@@ -130,4 +130,4 @@ docker run -d \
 
 ## 🌟 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=sansan0/aicezam/trendsonar&type=Date)](https://www.star-history.com/#aicezam/trendsonar&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=aicezam/trendsonar&type=Date)](https://www.star-history.com/#aicezam/trendsonar&Date)
