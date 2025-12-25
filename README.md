@@ -123,10 +123,8 @@ docker run -d \
 <img src="docs/images/topic.png" alt="专题脉络" width="100%">
 
 ### 📑 深度报表
-<div align="center">
-  <img src="docs/images/baobiao1.png" alt="报表预览1" width="48%">
-  <img src="docs/images/baobiao2.png" alt="报表预览2" width="48%">
-</div>
+<img src="docs/images/baobiao1.png" alt="报表预览1" width="100%">
+<img src="docs/images/baobiao2.png" alt="报表预览2" width="100%">
 
 ## 🌟 Star History
 
