@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+venv/
+.env
+config_local.py
+trendsonar-dockerandgit-push.txt
+config.yaml
