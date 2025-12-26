@@ -774,11 +774,12 @@ class AIService:
 
 
 
-    async def generate_daily_timeline_events(self, date_str: str, news_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def generate_daily_timeline_events(self, date_str: str, news_items: List[Dict[str, Any]], topic_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         输入:
         - date_str: "YYYY-MM-DD"
         - news_items: List of {"id": ..., "title": ..., "summary": ...}
+        - topic_name: Optional topic name to focus on
 
         输出:
         - List of events: [{"content": "...", "source_ids": [id1, id2...]}, ...]
@@ -788,6 +789,10 @@ class AIService:
 
         logger.info(f"🤖 正在为 {date_str} 合成时间轴事件 (共 {len(news_items)} 条新闻)...")
         
+        focus_instruction = ""
+        if topic_name:
+            focus_instruction = f"7. **专题聚焦**：当前专题为“{topic_name}”，请严格专注于与该专题直接相关的信息。如果是无关的噪音新闻，请直接忽略。如果所有新闻都与该专题无关，返回空数组。\n"
+
         system_prompt = (
             "你是时间轴事件合成助手。请根据提供的某一天的新闻列表，将其合成为 1-2 个关键的时间轴节点事件。\n"
             "要求：\n"
@@ -796,10 +801,14 @@ class AIService:
             "3. **关联来源**：对于每个生成的事件，必须列出支持该事件的所有新闻 ID (source_ids)。\n"
             "4. **数量限制**：每天最多生成 2 个事件。如果有多件大事，取最重要的 2 件；如果是同一件事的多个方面，尽量合并为 1 件。\n"
             "5. **直接输出**：不要包含“好的”、“根据提供的新闻”等客套话，直接返回结果。\n"
-            "6. **返回格式**：仅返回 JSON 数组，例如：[{\"content\": \"事件描述...\", \"source_ids\": [1, 3]}, ...]"
+            "6. **返回格式**：仅返回 JSON 数组，例如：[{\"content\": \"事件描述...\", \"source_ids\": [1, 3]}, ...]\n"
+            f"{focus_instruction}"
         )
 
-        user_prompt = f"日期：{date_str}\n新闻列表：\n"
+        user_prompt = f"日期：{date_str}\n"
+        if topic_name:
+            user_prompt += f"专题名称：{topic_name}\n"
+        user_prompt += "新闻列表：\n"
         for item in news_items:
             user_prompt += f"[ID: {item['id']}] {item['title']}\n摘要: {(item['summary'] or '')[:100]}\n\n"
 

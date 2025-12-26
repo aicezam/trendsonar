@@ -441,9 +441,10 @@ class TopicService:
             })
         
         # 遍历每一天，调用 AI 合成事件
+        current_topic_name = topic_obj_to_return.name if topic_obj_to_return else None
         for d_str, day_news in news_by_date.items():
             # 调用 AI 合成
-            day_events = await self.ai.generate_daily_timeline_events(d_str, day_news)
+            day_events = await self.ai.generate_daily_timeline_events(d_str, day_news, topic_name=current_topic_name)
             
             # 如果 AI 没有生成任何事件（失败或为空），则降级处理：选最重要的 1-2 条作为代表
             if not day_events:
