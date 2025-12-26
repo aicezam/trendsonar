@@ -70,7 +70,12 @@ async def lifespan(app: FastAPI):
 
 
 configure_logging()
-app = FastAPI(title=settings.APP_NAME, lifespan=lifespan, debug=settings.DEBUG)
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.VERSION,
+    lifespan=lifespan,
+    debug=settings.DEBUG
+)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 app.include_router(api_router)
 

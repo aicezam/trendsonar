@@ -104,7 +104,17 @@ docker run -d \
 
 更多详细配置项请参考 `config.yaml.example` 文件中的注释。
 
-## 📚 推荐新闻源
+## 🎉 效果说明
+
+部署完成后，系统需要一定时间来积累数据和构建上下文，**通常运行 48 小时后效果最佳**。
+
+TrendSonar 的分析质量主要取决于以下因素：
+1. **数据积累**: 初始阶段数据较少，聚类和专题分析可能不够丰富，随着时间推移效果会显著提升。
+2. **参数配置**: `config.yaml` 中的热度阈值、权重设置会直接影响信息的筛选结果。
+3. **AI 模型**: 所选用的 LLM (如 GLM-4, DeepSeek) 和 Embedding 模型的性能决定了摘要、情感分析和聚类的准确度。
+4. **新闻源质量**: 优质、高频更新的 RSS 源能提供更丰富的信息输入（推荐参考下方“推荐新闻源”）。
+
+##  🧩 推荐新闻源
 
 如果您需要添加更多高质量的新闻源（RSS），推荐参考以下开源项目或服务获取订阅链接：
 
@@ -116,11 +126,11 @@ docker run -d \
 
 ## 📸 界面预览
 
-### 📊 趋势仪表盘
-<img src="docs/images/index.png" alt="趋势仪表盘" width="100%">
+### 📊 热点新闻列表
+<img src="docs/images/index.png" alt="热点新闻列表" width="100%">
 
-### 🕸️ 专题脉络
-<img src="docs/images/topic.png" alt="专题脉络" width="100%">
+### 🕸️ 专题追踪
+<img src="docs/images/topic.png" alt="专题追踪" width="100%">
 
 ### 📑 深度报表
 <img src="docs/images/baobiao1.png" alt="报表预览1" width="100%">
@@ -129,3 +139,9 @@ docker run -d \
 ## 🌟 Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=aicezam/trendsonar&type=Date)](https://www.star-history.com/#aicezam/trendsonar&Date)
+
+
+## 📆 更新日志
+
+- **v0.1.0**: 初始版本，发布至 Docker Hub。
+- **v0.1.1**: 修复部分鉴权问题。

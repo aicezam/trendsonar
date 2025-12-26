@@ -4,8 +4,9 @@
 - `api_router`: API 路由聚合器
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.deps import verify_admin_access
 from app.api.endpoints import news, reports, system, topics
 
 api_router = APIRouter()

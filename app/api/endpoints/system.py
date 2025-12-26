@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import settings
+from app.api.deps import settings, verify_admin_access
 from app.core.database import get_db
 from app.core.config import get_missing_config_keys, BASE_DIR
 from app.core.logger import clear_cached_logs, get_cached_log_text
@@ -51,7 +51,7 @@ async def api_reanalyze_all_categories(auth: AdminAuth):
     return await reanalyze_all_categories()
 
 
-@router.post("/admin/analyze_all_sentiment")
+@router.post("/admin/analyze_all_sentiment", dependencies=[Depends(verify_admin_access)])
 async def api_analyze_all_sentiment():
     """
     输入:
@@ -90,7 +90,7 @@ def _get_news_sources_path() -> Path:
 
 @router.get("/app_info")
 async def api_get_app_info():
-    return {"app_name": settings.APP_NAME}
+    return {"app_name": settings.APP_NAME, "version": settings.VERSION}
 
 
 @router.get("/admin/config")
@@ -127,7 +127,7 @@ async def api_clear_admin_logs(request: Request):
     return {"ok": True}
 
 
-@router.post("/trigger_crawl")
+@router.post("/trigger_crawl", dependencies=[Depends(verify_admin_access)])
 async def api_trigger_crawl():
     """
     输入:
@@ -144,7 +144,7 @@ async def api_trigger_crawl():
     return {"status": "started"}
 
 
-@router.get("/chat")
+@router.get("/chat", dependencies=[Depends(verify_admin_access)])
 async def chat_api(
     query: str,
     stream: bool = True,
