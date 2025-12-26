@@ -958,6 +958,7 @@ class AIService:
             if "modelscope" in str(client.base_url):
                 extra_body["enable_thinking"] = False
 
+            logger.info(f"开始流式对话请求: model={model}, stream=True")
             stream = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -969,12 +970,17 @@ class AIService:
                 timeout=60,
                 extra_body=extra_body if extra_body else None,
             )
+            logger.info("流式请求已建立，开始读取 chunks")
             async for chunk in stream:
+                # logger.debug(f"收到 chunk: {chunk}")
+                if not chunk.choices:
+                    continue
                 content = chunk.choices[0].delta.content
                 if content:
                     yield content
+            logger.info("流式传输结束")
         except Exception as e:
-            logger.error(f"聊天流错误: {e}")
+            logger.error(f"聊天流错误: {e}", exc_info=True)
             yield f"错误: {str(e)}"
 
     async def get_embeddings(self, texts: List[str]) -> List[List[float]]:

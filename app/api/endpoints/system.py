@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import settings, verify_admin_access
 from app.core.database import get_db
 from app.core.config import get_missing_config_keys, BASE_DIR
-from app.core.logger import clear_cached_logs, get_cached_log_text
+from app.core.logger import clear_cached_logs, get_cached_log_text, logger
 from app.models.news import News
 from app.schemas.system import AdminAuth
 from app.services.ai_service import ai_service
@@ -165,6 +165,7 @@ async def chat_api(
     - 基于新闻向量检索构造上下文，实现 RAG 问答
     """
 
+    logger.info(f"收到聊天请求: query={query}, stream={stream}, use_backup={use_backup}")
     q_emb_list = await ai_service.get_embeddings([query])
     q_vec = np.array(q_emb_list[0]) if q_emb_list and q_emb_list[0] else None
 
@@ -215,7 +216,18 @@ async def chat_api(
 
     model_type = "backup" if use_backup else "main"
     if stream:
-        return StreamingResponse(ai_service.stream_chat(query, context_text, model_type), media_type="text/event-stream")
+        logger.info(f"开始流式返回: model_type={model_type}")
+        async def stream_wrapper():
+            try:
+                async for chunk in ai_service.stream_chat(query, context_text, model_type):
+                    yield chunk
+            except Exception as e:
+                logger.error(f"Stream wrapper error: {e}")
+                yield f"Error: {e}"
+            finally:
+                logger.info("Stream wrapper finished")
+
+        return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
 
     full_response = ""
     async for chunk in ai_service.stream_chat(query, context_text, model_type):
