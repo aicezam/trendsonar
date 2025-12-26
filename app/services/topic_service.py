@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, check_db_connection
 from app.core.logger import setup_logger
+from app.core.exceptions import AIConfigurationError
 from app.models.news import News
 from app.models.topic import Topic, TopicTimelineItem
 from app.services.ai_service import AIService
@@ -597,6 +598,10 @@ class TopicService:
                 # So this might be just a backup or manual trigger handler
                 await asyncio.sleep(4 * 3600) 
                 await self.refresh_topics()
+            except AIConfigurationError as e:
+                logger.error(f"🛑 配置错误: {e} 请检查 config.yaml 是否配置正确")
+                logger.warning("⚠️ 专题追踪任务进入维护模式，每 5 分钟尝试重启服务检查一次...")
+                await asyncio.sleep(300)
             except Exception as e:
                 logger.error(f"Scheduled topic task error: {e}")
                 await asyncio.sleep(300)

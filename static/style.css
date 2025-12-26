@@ -85,7 +85,7 @@ button { cursor: pointer; border: 1px solid transparent; background: transparent
 .logo { display: flex; align-items: center; gap: 8px; font-weight: 750; font-size: 1.1rem; color: var(--text-main); text-decoration: none; letter-spacing: 0.1px; }
 .logo-icon { color: var(--primary-color); }
 
-.header-actions { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.header-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .nav-links { display: flex; gap: 14px; align-items: center; min-width: 0; }
 .nav-link { color: var(--text-secondary); text-decoration: none; font-weight: 650; font-size: 0.92rem; }
 .nav-link:hover { color: var(--primary-color); }
@@ -108,6 +108,19 @@ button { cursor: pointer; border: 1px solid transparent; background: transparent
     border-radius: 999px;
 }
 .theme-toggle:hover { color: var(--primary-color); background: transparent; }
+
+.github-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+    color: var(--text-secondary);
+    border-radius: 999px;
+    transition: color 0.2s;
+}
+.github-link:hover {
+    color: var(--primary-color);
+}
 
 .config-warning { margin-top: 12px; margin-bottom: 12px; padding: 12px 14px; border-radius: var(--radius); border: 1px solid rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.12); }
 .config-warning-title { font-weight: 800; color: #92400e; }

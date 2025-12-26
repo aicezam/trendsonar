@@ -16,6 +16,7 @@ from openai import AsyncOpenAI, APIStatusError, RateLimitError, APIConnectionErr
 
 from app.core.config import get_settings
 from app.core.logger import setup_logger
+from app.core.exceptions import AIConfigurationError
 from app.utils.tools import normalize_regions_to_countries
 
 settings = get_settings()
@@ -48,6 +49,26 @@ class AIService:
 
         self.main_sem = asyncio.Semaphore(settings.MAIN_AI_CONCURRENCY)
         self.backup_sem = asyncio.Semaphore(settings.BACKUP_AI_CONCURRENCY)
+
+    def reload_config(self) -> None:
+        """
+        输入:
+        - 无
+
+        输出:
+        - 无
+
+        作用:
+        - 重新加载全局配置（用于配置更新后刷新本地引用）
+        """
+        global settings
+        from app.core.config import get_settings
+        settings = get_settings()
+        
+        # 重新初始化信号量（并发配置可能改变）
+        self.main_sem = asyncio.Semaphore(settings.MAIN_AI_CONCURRENCY)
+        self.backup_sem = asyncio.Semaphore(settings.BACKUP_AI_CONCURRENCY)
+        logger.info("🔄 AIService 配置已刷新")
 
     def _has_main_llm(self) -> bool:
         return bool((settings.MAIN_AI_API_KEY or "").strip()) and bool((settings.MAIN_AI_BASE_URL or "").strip()) and bool((settings.MAIN_AI_MODEL or "").strip())
@@ -178,6 +199,11 @@ class AIService:
                     await asyncio.sleep(wait_time)
                 
                 except APIStatusError as e:
+                    # 401: Invalid API Key - Fatal error
+                    if e.status_code == 401:
+                        logger.error(f"❌ AI 认证失败 (401) - API Key 无效 ({model}): {e}")
+                        raise AIConfigurationError(f"AI API Key 无效 ({model})")
+
                     # 400 Bad Request usually means content filter or invalid parameters
                     if e.status_code == 400:
                         logger.warning(f"❌ AI 请求被拒绝 (400) - 可能触发敏感词过滤 ({model}): {e}")
@@ -193,6 +219,8 @@ class AIService:
                     else:
                         raise e
 
+        except AIConfigurationError:
+            raise
         except Exception as e:
             logger.error(f"❌ AI 调用异常 ({model}): {e}")
             return None
@@ -314,6 +342,8 @@ class AIService:
                 
             return valid_topics
             
+        except AIConfigurationError:
+            raise
         except Exception as e:
             logger.error(f"❌ 解析质量评估结果失败: {e}\nRaw: {res}")
             return topics
@@ -414,6 +444,8 @@ class AIService:
                 logger.info(f"✅ AI 提炼出 {len(valid_data)} 个潜在专题")
                 return valid_data
             return []
+        except AIConfigurationError:
+            raise
         except Exception as e:
             logger.error(f"❌ 解析专题提炼结果失败: {e}\nRaw: {res}")
             return []
@@ -453,6 +485,8 @@ class AIService:
                         clean_res = clean_res[start : end + 1]
                 data = json.loads(clean_res)
                 return data.get("items", [])
+            except AIConfigurationError:
+                raise
             except Exception as e:
                 logger.warning(f"AI提取结果解析失败: {e}")
                 return None
@@ -545,6 +579,8 @@ class AIService:
                     if not data.get("region") or data.get("region") in ["其他", "未知"]:
                         data["region"] = "全球"
                     return data
+            except AIConfigurationError:
+                raise
             except Exception:
                 pass
             return None
@@ -609,13 +645,14 @@ class AIService:
                 return {}
 
             clean_res = res.strip()
-            if clean_res.startswith("```"):
-                start = clean_res.find("[")
-                end = clean_res.rfind("]")
-                if start != -1 and end != -1:
-                    clean_res = clean_res[start : end + 1]
-                else:
-                    clean_res = clean_res.replace("```json", "").replace("```", "").strip()
+            # 无论是否包含 markdown 标记，都优先尝试提取 JSON 数组
+            start = clean_res.find("[")
+            end = clean_res.rfind("]")
+            if start != -1 and end != -1:
+                clean_res = clean_res[start : end + 1]
+            else:
+                # 兜底清理
+                clean_res = clean_res.replace("```json", "").replace("```", "").strip()
 
             results_list = json.loads(clean_res)
 
@@ -629,6 +666,8 @@ class AIService:
                         result_map[item["id"]] = item
             return result_map
 
+        except AIConfigurationError:
+            raise
         except Exception as e:
             logger.error(f"批量情感分析失败: {e}")
             return {}
@@ -766,6 +805,8 @@ class AIService:
                     output.extend([(False, "返回数量不足")] * (len(tasks) - len(output)))
                 
                 return output[:len(tasks)]
+        except AIConfigurationError:
+            raise
         except Exception as e:
             logger.error(f"批量专题核验解析失败: {e}")
 
@@ -827,6 +868,8 @@ class AIService:
                     clean = clean[start : end + 1]
             events = json.loads(clean)
             return events
+        except AIConfigurationError:
+            raise
         except Exception as e:
             logger.error(f"❌ 解析时间轴合成结果失败: {e}\nRaw: {res}")
             return []
@@ -975,9 +1018,15 @@ class AIService:
                             data = await resp.json()
                             batch_res = sorted(data["data"], key=lambda x: x["index"])
                             all_embeddings.extend([x["embedding"] for x in batch_res])
+                        elif resp.status == 401:
+                             error_text = await resp.text()
+                             logger.error(f"❌ 向量 API 认证失败 (401): {error_text}")
+                             raise AIConfigurationError("Embedding API Key 无效")
                         else:
                             logger.error(f"❌ 向量 API 错误: {await resp.text()}")
                             all_embeddings.extend([[] for _ in batch])
+            except AIConfigurationError:
+                raise
             except Exception as e:
                 logger.error(f"❌ 向量网络错误: {e}")
                 all_embeddings.extend([[] for _ in batch])
@@ -1054,6 +1103,8 @@ class AIService:
 
                 logger.error(f"❌ 批量核验返回格式错误: {results} (预期长度: {len(pairs)})")
                 return None
+            except AIConfigurationError:
+                raise
             except Exception as e:
                 logger.error(f"❌ 批量核验异常 ({model}): {e}")
                 return None
@@ -1069,7 +1120,11 @@ class AIService:
                     await asyncio.sleep(2 if attempt == 1 else 10)
                 
                 client = AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"])
-                res = await try_verify(client, route["model"])
+                try:
+                    res = await try_verify(client, route["model"])
+                except AIConfigurationError:
+                    raise
+                
                 if res is not None:
                     return res
                 if is_backup:

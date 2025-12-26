@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     """
 
     APP_NAME: str = "TrendSonar"
-    VERSION: str = "0.1.1"
+    VERSION: str = "0.1.2"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
     PORT: int = 8193
@@ -174,3 +174,18 @@ def get_settings() -> Settings:
     """
 
     return Settings()
+
+
+def reload_settings() -> Settings:
+    """
+    输入:
+    - 无
+    
+    输出:
+    - 重新加载后的 Settings 实例
+    
+    作用:
+    - 清除 get_settings 的缓存并重新加载配置，用于运行时配置更新
+    """
+    get_settings.cache_clear()
+    return get_settings()

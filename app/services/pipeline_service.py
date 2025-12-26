@@ -16,6 +16,7 @@ from sqlalchemy import delete, desc, or_, select
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, check_db_connection
 from app.core.logger import logger
+from app.core.exceptions import AIConfigurationError
 from app.models.news import News
 from app.services.ai_service import ai_service
 from app.services.cluster_service import cluster_service
@@ -296,6 +297,8 @@ async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = 
         if run_topic_task:
             try:
                 await topic_service.refresh_topics()
+            except AIConfigurationError:
+                raise
             except Exception as e:
                 logger.error(f"❌ 专题刷新异常: {e}")
         else:
@@ -304,6 +307,8 @@ async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = 
         await cleanup_old_data()
 
         logger.info("✅ 本轮全流程任务结束")
+    except AIConfigurationError:
+        raise
     except Exception as e:
         logger.error(f"❌ 任务执行异常: {e}")
     finally:
@@ -376,6 +381,23 @@ async def scheduled_task() -> None:
                     await report_service.generate_and_cache_global_report("monthly")
                     last_monthly_final = now.date()
                     gc.collect()
+
+        except AIConfigurationError as e:
+            logger.error(f"🛑 配置错误: {e} 请检查 config.yaml 是否配置正确")
+            logger.warning("⚠️ 系统将进入维护模式，每 5 分钟自动重启服务检查一次...")
+            await asyncio.sleep(30)
+            
+            # 重新加载配置
+            from app.core.config import reload_settings
+            reload_settings()
+            
+            # 重新加载 AI 服务中的配置引用
+            from app.services.ai_service import ai_service
+            ai_service.reload_config()
+            
+            logger.info("🔄 配置已尝试重新加载")
+            
+            continue
 
         except Exception as e:
             logger.error(f"❌ 调度循环异常: {e}")

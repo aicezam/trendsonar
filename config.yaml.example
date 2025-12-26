@@ -37,7 +37,7 @@ MAIN_AI_CONCURRENCY: 10  # 最大并发请求数，根据模型能力调整
 BACKUP_AI_API_KEY: sk-XXXXXXXXXXXXXXXXXXXXXXXXXXX
 BACKUP_AI_BASE_URL: https://api.xiaomimimo.com/v1
 BACKUP_AI_MODEL: mimo-v2-flash
-BACKUP_AI_CONCURRENCY: 10  # 最大并发请求数，根据模型能力调整
+BACKUP_AI_CONCURRENCY: 5  # 最大并发请求数，根据模型能力调整
 
 # ================= AI 路由配置 =================
 # 配置不同功能模块使用的 AI 节点 (main / backup)
@@ -60,15 +60,15 @@ AI_ROUTE:
   # --- 报表生成 ---
   REPORT: "backup"         # 日报/周报生成
   # --- 交互对话 ---
-  CHAT: "main"           # 实时问答/助手对话
+  CHAT: "backup"           # 实时问答/助手对话
 
 # ================= 算法调优参数 =================
 # 聚类相似度阈值 (0.0 - 1.0)，建议 0.75，越高越严格
 CLUSTERING_THRESHOLD: 0.72
 # 聚类时间窗口 (小时)，超过此时间差的新闻即使相似也不合并
-CLUSTERING_TIME_WINDOW_HOURS: 24
+CLUSTERING_TIME_WINDOW_HOURS: 18
 # 自动任务调度间隔 (分钟)
-SCHEDULE_INTERVAL_MINUTES: 45
+SCHEDULE_INTERVAL_MINUTES: 30
 # 自动摘要 Top N (为每日热度最高的 N 条新闻生成摘要)
 AUTO_SUMMARY_TOP_N: 60
 # 自动深度分析 Top N (为每日热度最高的 N 条新闻自动分类、情感分析)
@@ -104,11 +104,11 @@ TOPIC_AGGREGATION_TOP_N: 300
 # 每次生成的新专题数量范围 (min-max)，格式 "3-10"
 TOPIC_GENERATION_COUNT: "1-5"
 # 向量召回池大小：在最近 N 条新闻中进行向量搜索 (默认 2000)
-TOPIC_RECALL_POOL_SIZE: 2000
+TOPIC_RECALL_POOL_SIZE: 3000
 # 向量初筛阈值（0.0-1.0）：用于向量预筛候选新闻 (默认 0.6)
 TOPIC_MATCH_THRESHOLD: 0.6
 # 向量召回候选数：每个专题最多对前 N 条高相似度新闻进行 AI 核验 (默认 20)
-TOPIC_MATCH_MAX_CANDIDATES: 20
+TOPIC_MATCH_MAX_CANDIDATES: 30
 # 专题质量门槛：只有当核验通过的新闻数量 > N 时才创建专题 (默认 3)
 TOPIC_MIN_NEWS_COUNT: 3
 # 专题定时任务间隔（小时）

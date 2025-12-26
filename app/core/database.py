@@ -39,6 +39,18 @@ def get_engine() -> AsyncEngine:
         pool_size=20,
         max_overflow=10,
     )
+
+    # 针对 SQLite 启用 WAL 模式以提高并发稳定性
+    if "sqlite" in settings.DATABASE_URL:
+        from sqlalchemy import event
+        
+        @event.listens_for(_engine.sync_engine, "connect")
+        def set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.close()
+
     return _engine
 
 

@@ -102,6 +102,39 @@ class CrawlerService:
             logger.error(f"加载新闻源失败: {e}")
             return []
 
+    def _clean_summary(self, summary: Optional[str]) -> Optional[str]:
+        """
+        输入:
+        - `summary`: 原始摘要（可能包含 HTML）
+
+        输出:
+        - 清洗后的摘要
+
+        作用:
+        - 移除无法访问的内部图片链接
+        """
+        if not summary:
+            return summary
+
+        # 快速检查，避免不必要的解析
+        if "ops.xhyun.news.cn" not in summary and "bucket-cb-yunqiao" not in summary:
+            return summary
+
+        try:
+            # 使用 html.parser 解析片段
+            soup = BeautifulSoup(summary, "html.parser")
+            changed = False
+            for img in soup.find_all("img"):
+                src = img.get("src", "")
+                if "ops.xhyun.news.cn" in src or "bucket-cb-yunqiao" in src:
+                    img.decompose()
+                    changed = True
+            
+            return str(soup) if changed else summary
+        except Exception as e:
+            logger.warning(f"摘要清洗失败: {e}")
+            return summary
+
     def _process_meta(
         self,
         source_name: str,
@@ -132,13 +165,17 @@ class CrawlerService:
         for domain in settings.IGNORED_DOMAINS:
             if domain in url:
                 return None
+        
+        # 清洗摘要中的坏链
+        cleaned_summary = self._clean_summary(summary)
+
         return {
             "title": title.strip(),
             "url": url.strip(),
             "source": source_name,
             "publish_date": pub_date,
             "heat": weight,
-            "summary": summary,
+            "summary": cleaned_summary,
         }
 
     async def fetch_and_parse(

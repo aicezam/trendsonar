@@ -969,19 +969,44 @@
                     </div>
                 `;
             }
+
+            // 过滤掉无法访问的内部 OSS 图片链接 (xhyun.news.cn)
+            // 避免产生 net::ERR_NAME_NOT_RESOLVED 错误
+            let cleanSummary = summary;
+            try {
+                const filterTemp = document.createElement('div');
+                filterTemp.innerHTML = summary;
+                const images = filterTemp.querySelectorAll('img');
+                let changed = false;
+                images.forEach(img => {
+                    // 检查是否为已知的内部/不可达域名
+                    if (img.src && (
+                        img.src.includes('ops.xhyun.news.cn') || 
+                        img.src.includes('bucket-cb-yunqiao')
+                    )) {
+                        img.remove();
+                        changed = true;
+                    }
+                });
+                if (changed) {
+                    cleanSummary = filterTemp.innerHTML;
+                }
+            } catch (e) {
+                console.warn('Summary cleanup failed', e);
+            }
             
             // 使用纯文本长度判断是否需要折叠，避免截断 HTML
             const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = summary;
+            tempDiv.innerHTML = cleanSummary;
             const textLength = tempDiv.innerText.length;
             const threshold = 300;
             
             if (textLength <= threshold) {
-                return summary + ` <button class="btn-regen" onclick="genSummary(${id})">🔄 重新生成</button>`;
+                return cleanSummary + ` <button class="btn-regen" onclick="genSummary(${id})">🔄 重新生成</button>`;
             } else {
                 return `
                     <div id="summary-content-${id}" class="summary-content collapsed">
-                        ${summary}
+                        ${cleanSummary}
                     </div>
                     <button id="btn-expand-${id}" class="btn-link" onclick="toggleSummary(${id}, true)">查看全部</button>
                     <button id="btn-collapse-${id}" class="btn-link" style="display:none;" onclick="toggleSummary(${id}, false)">收起</button>
