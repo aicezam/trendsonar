@@ -10,4 +10,6 @@ venv/
 .test/
 scripts/
 trendsonar.db
+trendsonar.db-wal
+trendsonar.db-shm
 docker/

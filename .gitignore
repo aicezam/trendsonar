@@ -7,3 +7,5 @@ config_local.py
 .test/
 scripts/
 trendsonar.db
+trendsonar.db-shm
+trendsonar.db-wal
