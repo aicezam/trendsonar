@@ -144,7 +144,7 @@ async def api_trigger_crawl():
     return {"status": "started"}
 
 
-@router.get("/chat", dependencies=[Depends(verify_admin_access)])
+@router.get("/chat")
 async def chat_api(
     query: str,
     stream: bool = True,
@@ -218,14 +218,20 @@ async def chat_api(
     if stream:
         logger.info(f"开始流式返回: model_type={model_type}")
         async def stream_wrapper():
+            count = 0
             try:
                 async for chunk in ai_service.stream_chat(query, context_text, model_type):
+                    count += 1
                     yield chunk
+                
+                if count == 0:
+                    logger.warning("Stream wrapper yielded 0 chunks, sending fallback message")
+                    yield "AI 未返回任何内容，请查看后台日志，可能有敏感信息，请切换模型重试"
             except Exception as e:
                 logger.error(f"Stream wrapper error: {e}")
                 yield f"Error: {e}"
             finally:
-                logger.info("Stream wrapper finished")
+                logger.info(f"Stream wrapper finished, total chunks: {count}")
 
         return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
 

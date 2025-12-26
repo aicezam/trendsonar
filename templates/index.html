@@ -641,9 +641,11 @@
                 aiMsgEl.innerHTML = `<span style="color:var(--text-light); font-style:italic;">${statusMessages[0]}</span>`;
                 
                 const statusTimer = setInterval(() => {
-                    statusIdx = (statusIdx + 1) % statusMessages.length;
-                    aiMsgEl.innerHTML = `<span style="color:var(--text-light); font-style:italic;">${statusMessages[statusIdx]}</span>`;
-                }, 2000);
+                    if (statusIdx < statusMessages.length - 1) {
+                        statusIdx++;
+                        aiMsgEl.innerHTML = `<span style="color:var(--text-light); font-style:italic;">${statusMessages[statusIdx]}</span>`;
+                    }
+                }, 5000);
                 
                 try {
                     const params = new URLSearchParams({

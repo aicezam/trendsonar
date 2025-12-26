@@ -971,14 +971,20 @@ class AIService:
                 extra_body=extra_body if extra_body else None,
             )
             logger.info("流式请求已建立，开始读取 chunks")
+            chunk_count = 0
             async for chunk in stream:
-                # logger.debug(f"收到 chunk: {chunk}")
+                logger.info(f"Raw chunk received: {chunk}")
                 if not chunk.choices:
+                    logger.info(f"Chunk without choices: {chunk}")
                     continue
                 content = chunk.choices[0].delta.content
                 if content:
+                    chunk_count += 1
+                    # logger.debug(f"Yielding content: {content!r}")
                     yield content
-            logger.info("流式传输结束")
+                else:
+                    logger.info(f"Chunk with empty content: {chunk}")
+            logger.info(f"流式传输结束, 共发送 {chunk_count} 个 chunks")
         except Exception as e:
             logger.error(f"聊天流错误: {e}", exc_info=True)
             yield f"错误: {str(e)}"
