@@ -1,0 +1,1341 @@
+{% extends "base.html" %}
+{% block title %}{{ settings.APP_NAME }} - 舆情分析报表{% endblock %}
+{% block head %}
+    <script src="/static/echarts.min.js"></script>
+    <script src="/static/marked.min.js"></script>
+{% endblock %}
+{% block content %}
+
+<div class="loading-overlay" id="loading">
+    <div class="spinner"></div>
+    <div>TrendSonar 正在全网分析中...</div>
+</div>
+
+<div class="container">
+    <!-- Filter Section -->
+    <div class="filter-section">
+        <div class="search-bar-wrapper">
+            <div class="input-group">
+                <span class="input-icon">🔍</span>
+                <input type="text" id="keyword" class="input-text-search" placeholder="输入关键词 (例如: '人工智能', '新能源')">
+            </div>
+            <button class="btn-search" onclick="openSettingsModal()">生成深度报告</button>
+        </div>
+        
+        <!-- Recent Reports -->
+        <div class="recent-reports" id="recentReportsList">
+            <!-- Populated by JS -->
+        </div>
+    </div>
+
+    <!-- Info Header -->
+    <div class="report-header" id="reportInfoCard" style="display:none;">
+        <div class="report-title-group">
+            <h1 id="infoTitle">舆情分析报告</h1>
+            <div class="report-meta">
+                <span id="infoTime">时间范围：-</span> &nbsp;|&nbsp; 
+                <span id="infoDesc">分析维度：-</span>
+            </div>
+            <div id="historyQuickAccess" class="history-quick-access"></div>
+        </div>
+        <div class="report-actions">
+            <button onclick="loadDefaultReport()" id="btnBackToGlobal" style="display:none;">⬅ 返回大盘</button>
+        </div>
+    </div>
+
+    <!-- Metrics Grid -->
+    <div class="metrics-grid" id="metricsSection" style="display:none;">
+        <div class="metric-card">
+            <div class="metric-label">全网热点数</div>
+            <div class="metric-value" id="valTotal">0</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">平均热度指数</div>
+            <div class="metric-value" id="valAvgHeat">0</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">最高热度峰值</div>
+            <div class="metric-value" id="valMaxHeat">0</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">综合情感指数</div>
+            <div class="metric-value" id="valSentiment">0</div>
+            <div class="metric-sub">0-100 (50=中立)</div>
+        </div>
+        <div class="metric-card" style="display:none;">
+            <div class="metric-label">高危预警数</div>
+            <div class="metric-value" id="valRisk" style="color: #ef4444;">0</div>
+        </div>
+        <div class="metric-card" style="display:none;">
+            <div class="metric-label">分析时间跨度</div>
+            <div class="metric-value" id="valTimeRange" style="font-size:1.25rem; line-height: 2.1rem;">-</div>
+        </div>
+    </div>
+
+    <!-- AI Analysis -->
+    <div class="analysis-card" id="aiSection" style="display:none;">
+        <div class="chart-header ai-header">
+            <span class="chart-title" style="font-size: 1.25rem;">🤖 AI 舆情智能综述</span>
+        </div>
+        <div class="analysis-content" id="aiContent"></div>
+    </div>
+
+    <!-- Common Charts -->
+    <div id="commonCharts">
+        <div class="chart-row full-width">
+            <div class="chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">📈 热度与文章趋势</span>
+                </div>
+                <div id="chartTrend" class="chart-container"></div>
+            </div>
+        </div>
+
+        <div class="chart-row full-width">
+            <div class="chart-card auto-height">
+                <div class="chart-header">
+                    <span class="chart-title">☁️ 全网舆情热词云</span>
+                    <select class="chart-filter" id="filter-word_cloud" onchange="updateChart('word_cloud', this.value)"></select>
+                </div>
+                <div id="wordCloud" class="word-cloud-container"></div>
+            </div>
+        </div>
+
+        <div class="chart-row two-cols">
+            <div class="chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">📢 媒体来源分布</span>
+                    <select class="chart-filter" id="filter-source" onchange="updateChart('source', this.value)"></select>
+                </div>
+                <div id="chartSource" class="chart-container"></div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">🎭 情感倾向占比</span>
+                    <select class="chart-filter" id="filter-sentiment" onchange="updateChart('sentiment', this.value)"></select>
+                </div>
+                <div id="chartSentiment" class="chart-container"></div>
+                <div style="text-align: center; font-size: 0.85rem; color: #64748b; margin-top: 10px; padding: 8px; background: #f8fafc; border-radius: 8px;">
+                    主要负面词: <span id="negKeywords" style="color: #ef4444; font-weight: 500;"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Keyword Specific Charts -->
+    <div id="keywordView" style="display:none;">
+        <div class="chart-row full-width">
+            <div class="chart-card large-chart">
+                <div class="chart-header">
+                    <span class="chart-title">🔗 关键词共现关系图谱</span>
+                </div>
+                <div id="chartCorrelation" class="chart-container"></div>
+            </div>
+        </div>
+
+        <div class="chart-row full-width">
+            <div class="chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">📊 关键词频次演变趋势</span>
+                </div>
+                <div id="chartFreqTrend" class="chart-container"></div>
+            </div>
+        </div>
+
+        <div class="chart-row full-width">
+            <div class="chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">🌡️ 相关新闻情感走势</span>
+                </div>
+                <div id="chartSentimentTrend" class="chart-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail Table -->
+    <div class="table-card" id="tableSection" style="display:none;">
+        <div class="table-header-wrapper">
+            <span class="chart-title" style="font-size: 1.1rem;">🔥 热门舆情列表 (Top 50)</span>
+            <select class="chart-filter" id="filter-list" onchange="updateChart('list', this.value)"></select>
+        </div>
+        <div id="hotNewsList" class="news-list"></div>
+        <div id="newsPagination" class="pagination"></div>
+    </div>
+</div>
+
+<!-- History Sidebar -->
+<div class="history-sidebar" id="historySidebar">
+    <div class="history-header">
+        <span id="historyTitle">历史报告</span>
+        <span class="close-history" onclick="toggleHistorySidebar()" style="cursor:pointer; font-size:1.5rem;">×</span>
+    </div>
+    <div class="history-list" id="historyList"></div>
+</div>
+
+<!-- Floating Button Removed -->
+
+<!-- Settings Modal -->
+<div class="modal-overlay" id="settingsModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <div class="modal-title">生成配置</div>
+            <div class="modal-close" onclick="closeSettingsModal()">&times;</div>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">时间范围</label>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <input type="date" id="startDate" class="form-control">
+                    <span style="color:var(--text-secondary)">至</span>
+                    <input type="date" id="endDate" class="form-control">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">领域/分类</label>
+                <div class="custom-select" id="domainSelect">
+                    <div class="select-trigger" onclick="toggleSelect(this)">
+                        <span id="domainTriggerText">选择领域 (全部)</span>
+                        <span style="font-size: 0.7rem;">▼</span>
+                    </div>
+                    <div class="select-options">
+                        <label><input type="checkbox" id="cat-all" value="all" checked onchange="toggleAllDomains(this)"> <strong>全部</strong></label>
+                        <div id="domainOptionsList"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">地区 (可选)</label>
+                <div class="custom-select" id="regionSelect">
+                    <div class="select-trigger" onclick="toggleSelect(this)">
+                        <span id="regionTriggerText">选择地区 (全部)</span>
+                        <span style="font-size: 0.7rem;">▼</span>
+                    </div>
+                    <div class="select-options">
+                        <label><input type="checkbox" id="reg-all" value="all" checked onchange="toggleAllRegions(this)"> <strong>全部</strong></label>
+                        <div id="regionOptionsList"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">媒体来源 (可选)</label>
+                <div class="custom-select" id="sourceSelect">
+                    <div class="select-trigger" onclick="toggleSelect(this)">
+                        <span id="sourceTriggerText">选择来源 (全部)</span>
+                        <span style="font-size: 0.7rem;">▼</span>
+                    </div>
+                    <div class="select-options">
+                        <label><input type="checkbox" id="src-all" value="all" checked onchange="toggleAllSources(this)"> <strong>全部</strong></label>
+                        <div id="sourceOptionsList"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">分析数据量 (Top N)</label>
+                <select id="limitSelect" class="form-control">
+                    <option value="50">Top 50 (快速)</option>
+                    <option value="100">Top 100</option>
+                    <option value="500">Top 500</option>
+                    <option value="2000">Top 2000</option>
+                    <option value="0" selected>不限 (分析全量数据)</option>
+                </select>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-cancel" onclick="closeSettingsModal()">取消</button>
+            <button class="btn-confirm" onclick="confirmGenerate()">开始生成</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+    const NEWS_CATEGORIES = {{ settings.NEWS_CATEGORIES | tojson }};
+
+    // 初始化默认时间范围为7天
+    const today = new Date();
+    const lastWeek = new Date(today);
+    lastWeek.setDate(today.getDate() - 7);
+    
+    document.getElementById('endDate').value = today.toISOString().split('T')[0];
+    document.getElementById('startDate').value = lastWeek.toISOString().split('T')[0];
+
+    // Chart Instances
+    let chartTrend = null, chartSource = null, chartSentiment = null;
+    let chartCorrelation = null, chartFreqTrend = null, chartSentimentTrend = null;
+
+    // Init Filters
+    populateFilters();
+    populateSourceOptions();
+    populateRegionOptions();
+    loadRecentReports();
+    loadHistoryList('');
+
+    // Close select when clicking outside
+    document.addEventListener('click', function(e) {
+        document.querySelectorAll('.custom-select').forEach(select => {
+            if (!select.contains(e.target)) {
+                select.querySelector('.select-options').classList.remove('show');
+            }
+        });
+    });
+
+    function toggleSelect(el) {
+        document.querySelectorAll('.select-options.show').forEach(opt => {
+            if (opt !== el.nextElementSibling) {
+                opt.classList.remove('show');
+            }
+        });
+        el.nextElementSibling.classList.toggle('show');
+    }
+
+    function populateFilters() {
+        const list = document.getElementById('domainOptionsList');
+        NEWS_CATEGORIES.forEach(cat => {
+            const label = document.createElement('label');
+            label.innerHTML = `<input type="checkbox" class="cat-cb" value="${cat}" checked onchange="checkAllState()"> <span>${cat}</span>`;
+            list.appendChild(label);
+        });
+
+        const chartFilters = ['filter-word_cloud', 'filter-source', 'filter-sentiment', 'filter-list'];
+        chartFilters.forEach(id => {
+            const select = document.getElementById(id);
+            if (!select) return;
+            select.innerHTML = '<option value="all">全网 (所有领域)</option>';
+            NEWS_CATEGORIES.forEach(cat => {
+                const opt = document.createElement('option');
+                opt.value = cat;
+                opt.textContent = cat;
+                select.appendChild(opt);
+            });
+        });
+    }
+
+    async function populateSourceOptions() {
+        try {
+            const res = await fetch('/api/sources');
+            const sources = await res.json();
+            const list = document.getElementById('sourceOptionsList');
+            
+            if (list && sources.length > 0) {
+                list.innerHTML = '';
+                sources.forEach(src => {
+                    const label = document.createElement('label');
+                    label.innerHTML = `<input type="checkbox" class="src-cb" value="${src}" checked onchange="checkAllSourceState()"> <span>${src}</span>`;
+                    list.appendChild(label);
+                });
+            } else if (list) {
+                list.innerHTML = '<div style="padding:10px;color:#999;font-size:0.9rem">暂无来源数据</div>';
+            }
+        } catch (e) {
+            console.error("加载媒体源失败", e);
+        }
+    }
+
+    async function populateRegionOptions() {
+        try {
+            const res = await fetch('/api/regions');
+            const regions = await res.json();
+            const list = document.getElementById('regionOptionsList');
+            
+            if (list && regions.length > 0) {
+                list.innerHTML = '';
+                regions.forEach(reg => {
+                    const label = document.createElement('label');
+                    label.innerHTML = `<input type="checkbox" class="reg-cb" value="${reg}" checked onchange="checkAllRegionState()"> <span>${reg}</span>`;
+                    list.appendChild(label);
+                });
+            } else if (list) {
+                list.innerHTML = '<div style="padding:10px;color:#999;font-size:0.9rem">暂无地区数据</div>';
+            }
+        } catch (e) {
+            console.error("加载地区失败", e);
+        }
+    }
+
+    function toggleAllRegions(el) {
+        const cbs = document.querySelectorAll('.reg-cb');
+        cbs.forEach(cb => cb.checked = el.checked);
+        updateRegionTriggerText();
+    }
+
+    function checkAllRegionState() {
+        const cbs = document.querySelectorAll('.reg-cb');
+        const allCb = document.getElementById('reg-all');
+        const allChecked = Array.from(cbs).every(cb => cb.checked);
+        allCb.checked = allChecked;
+        updateRegionTriggerText();
+    }
+
+    function updateRegionTriggerText() {
+        const cbs = document.querySelectorAll('.reg-cb');
+        const checked = Array.from(cbs).filter(cb => cb.checked);
+        const textSpan = document.getElementById('regionTriggerText');
+        
+        if (checked.length === cbs.length || cbs.length === 0) {
+            textSpan.textContent = "选择地区 (全部)";
+        } else if (checked.length === 0) {
+            textSpan.textContent = "选择地区 (未选)";
+        } else if (checked.length <= 2) {
+            textSpan.textContent = checked.map(cb => cb.value).join(', ');
+        } else {
+            textSpan.textContent = `已选 ${checked.length} 个地区`;
+        }
+    }
+
+    function toggleAllDomains(el) {
+        const cbs = document.querySelectorAll('.cat-cb');
+        cbs.forEach(cb => cb.checked = el.checked);
+        updateTriggerText();
+    }
+
+    function checkAllState() {
+        const cbs = document.querySelectorAll('.cat-cb');
+        const allCb = document.getElementById('cat-all');
+        const allChecked = Array.from(cbs).every(cb => cb.checked);
+        allCb.checked = allChecked;
+        updateTriggerText();
+    }
+
+    function updateTriggerText() {
+        const cbs = document.querySelectorAll('.cat-cb');
+        const checked = Array.from(cbs).filter(cb => cb.checked);
+        const textSpan = document.getElementById('domainTriggerText');
+        
+        if (checked.length === cbs.length) {
+            textSpan.textContent = "选择领域 (全部)";
+        } else if (checked.length === 0) {
+            textSpan.textContent = "选择领域 (未选)";
+        } else if (checked.length <= 2) {
+            textSpan.textContent = checked.map(cb => cb.value).join(', ');
+        } else {
+            textSpan.textContent = `已选 ${checked.length} 个领域`;
+        }
+    }
+
+    function toggleAllSources(el) {
+        const cbs = document.querySelectorAll('.src-cb');
+        cbs.forEach(cb => cb.checked = el.checked);
+        updateSourceTriggerText();
+    }
+
+    function checkAllSourceState() {
+        const cbs = document.querySelectorAll('.src-cb');
+        const allCb = document.getElementById('src-all');
+        const allChecked = Array.from(cbs).every(cb => cb.checked);
+        allCb.checked = allChecked;
+        updateSourceTriggerText();
+    }
+
+    function updateSourceTriggerText() {
+        const cbs = document.querySelectorAll('.src-cb');
+        const checked = Array.from(cbs).filter(cb => cb.checked);
+        const textSpan = document.getElementById('sourceTriggerText');
+        
+        if (checked.length === cbs.length || cbs.length === 0) {
+            textSpan.textContent = "选择来源 (全部)";
+        } else if (checked.length === 0) {
+            textSpan.textContent = "选择来源 (未选)";
+        } else if (checked.length <= 2) {
+            textSpan.textContent = checked.map(cb => cb.value).join(', ');
+        } else {
+            textSpan.textContent = `已选 ${checked.length} 个来源`;
+        }
+    }
+
+    // --- Loading Logic ---
+    window.addEventListener('DOMContentLoaded', () => {
+        loadDefaultReport();
+    });
+
+    async function loadDefaultReport() {
+        document.getElementById('loading').style.display = 'flex';
+        try {
+            const res = await fetch(`/api/report/analysis`);
+            const data = await res.json();
+            switchView('dashboard');
+            renderReport(data, 'dashboard');
+        } catch (e) {
+            console.error("加载默认报表失败", e);
+            generateReport();
+        } finally {
+            document.getElementById('loading').style.display = 'none';
+        }
+    }
+
+    // --- Recent Reports ---
+    async function loadRecentReports() {
+        try {
+            const res = await fetch('/api/report/recent');
+            const reports = await res.json();
+            const container = document.getElementById('recentReportsList');
+            container.innerHTML = '<span class="recent-label">最近生成:</span>';
+            
+            reports.forEach(r => {
+                const tag = document.createElement('span');
+                tag.className = 'recent-tag';
+                tag.textContent = r.keyword;
+                tag.onclick = () => {
+                    document.getElementById('keyword').value = r.keyword;
+                    loadHistoryReport(r.id, r.keyword);
+                };
+                container.appendChild(tag);
+            });
+        } catch (e) {
+            console.error("Load recent reports failed", e);
+        }
+    }
+
+    // --- History Sidebar ---
+    function toggleHistorySidebar() {
+        const sb = document.getElementById('historySidebar');
+        sb.classList.toggle('show');
+        if (sb.classList.contains('show')) {
+            const keyword = document.getElementById('keyword').value.trim();
+            loadHistoryList(keyword);
+        }
+    }
+
+    async function loadHistoryList(keyword) {
+        const list = document.getElementById('historyList');
+        const title = document.getElementById('historyTitle');
+        const quickAccess = document.getElementById('historyQuickAccess');
+        
+        title.textContent = keyword ? `${keyword} - 历史报告` : `大盘 - 历史报告`;
+        list.innerHTML = '<div style="color:#999;padding:10px;">加载中...</div>';
+        
+        try {
+            const url = keyword ? `/api/report/history?keyword=${encodeURIComponent(keyword)}` : `/api/report/history`;
+            const res = await fetch(url);
+            const history = await res.json();
+            
+            // Populate Quick Access
+            if (quickAccess) {
+                quickAccess.innerHTML = '';
+                const displayCount = 5;
+                const hasMore = history.length > displayCount;
+                const displayItems = history.slice(0, displayCount);
+                
+                displayItems.forEach(h => {
+                    const tag = document.createElement('div');
+                    // Add specific class based on report type
+                    const typeClass = h.type ? `qa-${h.type}` : 'qa-daily';
+                    tag.className = `history-qa-item ${typeClass}`;
+                    
+                    let label = '';
+                    if (h.keyword) {
+                        // Keyword report
+                        label = h.keyword + ' ' + h.date.substring(5, 10);
+                        // Keyword reports might default to daily style or have their own
+                        if (!h.type) tag.classList.add('qa-keyword'); 
+                    } else {
+                        // Dashboard report
+                        const typeMap = { 'daily': '日报', 'weekly': '周报', 'monthly': '月报' };
+                        const typeLabel = typeMap[h.type] || h.type || '大盘';
+                        label = typeLabel + ' ' + h.date.substring(5, 10);
+                    }
+                    tag.textContent = label;
+                    tag.onclick = () => loadHistoryReport(h.id, keyword);
+                    quickAccess.appendChild(tag);
+                });
+
+                if (hasMore) {
+                    const moreBtn = document.createElement('div');
+                    moreBtn.className = 'history-qa-more';
+                    moreBtn.textContent = '更多...';
+                    moreBtn.onclick = toggleHistorySidebar;
+                    quickAccess.appendChild(moreBtn);
+                }
+            }
+            
+            list.innerHTML = '';
+            if (history.length === 0) {
+                list.innerHTML = '<div style="color:#999;padding:10px;">暂无历史</div>';
+                if(quickAccess) quickAccess.innerHTML = '<span style="color:#999;font-size:0.85rem">暂无历史报告</span>';
+                return;
+            }
+            
+            const grouped = {};
+            history.forEach(h => {
+                const datePart = h.date.split(' ')[0];
+                if (!grouped[datePart]) grouped[datePart] = [];
+                grouped[datePart].push(h);
+            });
+            
+            const sortedDates = Object.keys(grouped).sort((a, b) => new Date(b) - new Date(a));
+            
+            sortedDates.forEach(dateStr => {
+                const groupTitle = document.createElement('div');
+                groupTitle.className = 'history-group-title';
+                groupTitle.textContent = dateStr;
+                list.appendChild(groupTitle);
+                
+                const items = grouped[dateStr];
+                
+                items.forEach(h => {
+                    const item = document.createElement('div');
+                    item.className = 'history-item';
+                    
+                    let content = '';
+                    if (!keyword) {
+                        const type = h.type || 'weekly';
+                        const typeMap = { 'daily': '日报', 'weekly': '周报', 'monthly': '月报' };
+                        const typeLabel = typeMap[type] || type;
+                        const typeClass = `tag-${type}`;
+                        content = `<span class="report-tag ${typeClass}">${typeLabel}</span> <span style="font-size:0.8rem;color:#64748b">${h.date.split(' ')[1]}</span>`;
+                    } else {
+                        content = `<span>${h.date.substring(5)}</span>`;
+                    }
+                    
+                    item.innerHTML = content;
+                    item.onclick = () => loadHistoryReport(h.id, keyword);
+                    list.appendChild(item);
+                });
+            });
+            
+        } catch (e) {
+            console.error(e);
+            list.innerHTML = '<div style="color:red;padding:10px;">加载失败</div>';
+        }
+    }
+
+    async function loadHistoryReport(id, keyword) {
+        document.getElementById('loading').style.display = 'flex';
+        try {
+            const res = await fetch(`/api/report/load/${id}`);
+            const data = await res.json();
+            
+            document.getElementById('keyword').value = keyword || '';
+            
+            if (keyword) {
+                switchView('keyword');
+                renderReport(data, 'keyword');
+            } else {
+                switchView('dashboard');
+                renderReport(data, 'dashboard');
+            }
+            
+            loadHistoryList(keyword);
+            
+        } catch (e) {
+            alert("加载报告失败: " + e);
+        } finally {
+            document.getElementById('loading').style.display = 'none';
+        }
+    }
+
+    // --- Core Generation ---
+    function openSettingsModal() { document.getElementById('settingsModal').classList.add('show'); }
+    function closeSettingsModal() { document.getElementById('settingsModal').classList.remove('show'); }
+    function confirmGenerate() { closeSettingsModal(); generateReport(); }
+    document.getElementById('settingsModal').addEventListener('click', function(e) { if (e.target === this) closeSettingsModal(); });
+
+    async function generateReport() {
+        const keyword = document.getElementById('keyword').value.trim();
+        const start = document.getElementById('startDate').value;
+        const end = document.getElementById('endDate').value;
+        const limit = document.getElementById('limitSelect').value;
+        
+        const allCb = document.getElementById('cat-all');
+        let category = 'all';
+        if (!allCb.checked) {
+            const selected = Array.from(document.querySelectorAll('.cat-cb:checked')).map(cb => cb.value);
+            if (selected.length === 0) { alert('请至少选择一个领域'); return; }
+            category = selected.join(',');
+        }
+
+        const allSrcCb = document.getElementById('src-all');
+        let source = '';
+        if (allSrcCb && !allSrcCb.checked) {
+            const selectedSrc = Array.from(document.querySelectorAll('.src-cb:checked')).map(cb => cb.value);
+            if (selectedSrc.length > 0) {
+                source = selectedSrc.join(',');
+            }
+        }
+
+        const allRegCb = document.getElementById('reg-all');
+        let region = 'all';
+        if (allRegCb && !allRegCb.checked) {
+            const selectedReg = Array.from(document.querySelectorAll('.reg-cb:checked')).map(cb => cb.value);
+            if (selectedReg.length > 0) {
+                region = selectedReg.join(',');
+            }
+        }
+
+        document.getElementById('loading').style.display = 'flex';
+        
+        try {
+            const params = new URLSearchParams({
+                q: keyword,
+                start_date: start,
+                end_date: end,
+                category: category,
+                source: source,
+                region: region,
+                limit: limit,
+                generate_ai: 'true'
+            });
+            const res = await fetch(`/api/report/analysis?${params.toString()}`);
+            const data = await res.json();
+            
+            if (keyword) {
+                switchView('keyword');
+                renderReport(data, 'keyword');
+                loadRecentReports();
+                loadHistoryList(keyword);
+            } else {
+                switchView('dashboard');
+                renderReport(data, 'dashboard');
+            }
+            
+            ['filter-word_cloud', 'filter-source', 'filter-sentiment', 'filter-list'].forEach(id => {
+                const el = document.getElementById(id);
+                if(el) el.value = 'all';
+            });
+            
+        } catch (e) {
+            alert('生成失败: ' + e);
+        } finally {
+            document.getElementById('loading').style.display = 'none';
+        }
+    }
+
+    function switchView(mode) {
+        const common = document.getElementById('commonCharts');
+        const keyw = document.getElementById('keywordView');
+        
+        common.style.display = 'block';
+
+        if (mode === 'keyword') {
+            keyw.style.display = 'block';
+        } else {
+            keyw.style.display = 'none';
+            document.getElementById('historySidebar').classList.remove('show');
+        }
+    }
+
+    async function updateChart(type, category) {
+        const keyword = document.getElementById('keyword').value.trim();
+        const start = document.getElementById('startDate').value;
+        const end = document.getElementById('endDate').value;
+        
+        try {
+             const params = new URLSearchParams({
+                type: type,
+                q: keyword,
+                start_date: start,
+                end_date: end,
+                category: category
+            });
+            const res = await fetch(`/api/report/chart-data?${params.toString()}`);
+            const data = await res.json();
+            
+            if (type === 'word_cloud') renderWordCloud(data);
+            else if (type === 'source') renderSourceChart(data);
+            else if (type === 'sentiment') {
+                const sentimentDist = Array.isArray(data) ? data : (data.sentiment_dist || []);
+                const negKeywords = Array.isArray(data) ? [] : (data.neg_keywords || []);
+                renderSentimentChart(sentimentDist);
+                document.getElementById('negKeywords').innerText = (negKeywords || []).join(', ');
+            }
+            else if (type === 'list') renderNewsList(data);
+
+        } catch (e) {
+            console.error("Update chart failed", e);
+        }
+    }
+
+    function renderReport(data, mode) {
+        window.currentReportParams = data.params;
+        ['aiSection', 'metricsSection', 'tableSection'].forEach(id => {
+            document.getElementById(id).style.display = (id === 'metricsSection') ? 'grid' : 'block';
+        });
+
+        const s = data.summary;
+        const avgHeat = Number(s.avg_heat ?? 0);
+        const sentimentIdx = Number(s.sentiment_idx ?? 0);
+        document.getElementById('valTotal').innerText = s.total;
+        document.getElementById('valAvgHeat').innerText = avgHeat.toFixed(2);
+        document.getElementById('valMaxHeat').innerText = s.max_heat;
+        document.getElementById('valSentiment').innerText = sentimentIdx.toFixed(2);
+        document.getElementById('valSentiment').style.color = sentimentIdx < 50 ? '#ef4444' : '#10b981';
+        document.getElementById('valRisk').innerText = s.risk_count;
+        document.getElementById('valTimeRange').innerText = s.time_range;
+
+        let aiText = data.ai_analysis || "暂无分析";
+        aiText = aiText.replace(/\n{3,}/g, '\n\n');
+        document.getElementById('aiContent').innerHTML = marked.parse(aiText);
+
+        renderTrendChart(data.charts.trend);
+        renderWordCloud(data.charts.word_cloud);
+        renderSourceChart(data.charts.source);
+        renderSentimentChart(data.charts.sentiment_dist);
+        document.getElementById('negKeywords').innerText = (data.charts.neg_keywords || []).join(', ');
+
+        if (mode === 'keyword') {
+            renderCorrelationChart(data.charts.correlation);
+            renderFreqTrendChart(data.charts.freq_trend);
+            renderSentimentTrendChart(data.charts.sentiment_trend);
+        }
+
+        renderNewsList(data.top_news);
+        updateInfoCard(data, mode);
+    }
+    
+    function updateInfoCard(data, mode) {
+        const card = document.getElementById('reportInfoCard');
+        const titleEl = document.getElementById('infoTitle');
+        const timeEl = document.getElementById('infoTime');
+        const descEl = document.getElementById('infoDesc');
+        const backBtn = document.getElementById('btnBackToGlobal');
+        
+        card.style.display = 'flex';
+        
+        const keyword = document.getElementById('keyword').value.trim();
+        
+        let catText = "所有领域";
+        let srcText = "所有来源";
+        
+        if (data.params) {
+            if (data.params.category && data.params.category !== 'all') {
+                const cats = data.params.category.split(',');
+                catText = cats.length > 3 ? `选中 ${cats.length} 个领域` : data.params.category;
+            }
+            if (data.params.source && data.params.source !== 'all') {
+                const srcs = data.params.source.split(',');
+                srcText = srcs.length > 3 ? `选中 ${srcs.length} 个来源` : data.params.source;
+            }
+        } else {
+            const catEl = document.getElementById('domainTriggerText');
+            const srcEl = document.getElementById('sourceTriggerText');
+            if (catEl) catText = catEl.textContent;
+            if (srcEl) srcText = srcEl.textContent;
+        }
+
+        if (mode === 'keyword') {
+            titleEl.innerHTML = `关键词分析: <span style="color:#fbbf24">${keyword}</span> <button class="btn-reanalyze" onclick="reAnalyze()" style="margin-left:12px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-soft); color: var(--text-primary);">🔄 重新分析</button>`;
+            backBtn.style.display = 'flex';
+        } else {
+            const typeMap = { daily: '日报', weekly: '周报', monthly: '月报' };
+
+            const toYYMMDD = (d) => (typeof d === 'string' && d.length >= 10 ? d.slice(2, 10) : '');
+            const toYYMM = (d) => (typeof d === 'string' && d.length >= 7 ? d.slice(2, 7) : '');
+
+            const parseTimeRange = (tr) => {
+                if (!tr || tr === '-') return null;
+                const normalized = String(tr).replace(/至/g, '~');
+                const parts = normalized.split('~').map(s => s.trim()).filter(Boolean);
+                if (parts.length >= 2) return { start: parts[0], end: parts[1] };
+                if (parts.length === 1) return { start: parts[0], end: parts[0] };
+                return null;
+            };
+
+            const formatTitle = (period, timeRange) => {
+                const label = typeMap[period] || '报表';
+                const range = parseTimeRange(timeRange);
+                if (!range) return label;
+                if (period === 'daily') return `${label}（${toYYMMDD(range.end)}）`;
+                if (period === 'weekly') return `${label}（${toYYMMDD(range.start)} 至 ${toYYMMDD(range.end)}）`;
+                if (period === 'monthly') return `${label}（${toYYMM(range.end)}）`;
+                return label;
+            };
+
+            titleEl.textContent = formatTitle(data.period, data?.summary?.time_range);
+            backBtn.style.display = 'none';
+        }
+        
+        timeEl.textContent = `时间范围: ${data.summary.time_range}`;
+        descEl.textContent = `分析维度: ${catText} | ${srcText}`;
+    }
+
+    function reAnalyze() {
+        if (!window.currentReportParams) {
+            console.warn("未找到历史参数，使用当前面板条件进行重新分析");
+            generateReport();
+            return;
+        }
+        const p = window.currentReportParams;
+        restoreFilters(p);
+        generateReport();
+    }
+
+    function restoreFilters(p) {
+        if(!p) return;
+        if(p.keyword) document.getElementById('keyword').value = p.keyword;
+        if(p.start_date) document.getElementById('startDate').value = p.start_date;
+        if(p.end_date) document.getElementById('endDate').value = p.end_date;
+        if(p.limit) document.getElementById('limitSelect').value = p.limit;
+        
+        // Helper to set checkboxes
+        const setChecks = (cls, allId, valStr) => {
+            const allCb = document.getElementById(allId);
+            const cbs = document.querySelectorAll('.' + cls);
+            if (!valStr || valStr === 'all') {
+                allCb.checked = true;
+                cbs.forEach(cb => cb.checked = true);
+            } else {
+                allCb.checked = false;
+                const vals = valStr.split(',');
+                cbs.forEach(cb => cb.checked = vals.includes(cb.value));
+            }
+        };
+        
+        setChecks('cat-cb', 'cat-all', p.category);
+        setChecks('src-cb', 'src-all', p.source);
+        setChecks('reg-cb', 'reg-all', p.region);
+        
+        // Trigger UI updates
+        updateTriggerText();
+        updateSourceTriggerText();
+        updateRegionTriggerText();
+    }
+
+    // --- Helper for Mobile Detection ---
+    function isMobileScreen() {
+        return window.innerWidth < 768;
+    }
+
+    function renderTrendChart(trendData) {
+        if (chartTrend) chartTrend.dispose();
+        chartTrend = echarts.init(document.getElementById('chartTrend'));
+        
+        const series = [];
+        const legendData = [];
+        const isMobile = isMobileScreen();
+        
+        if (trendData.category_series && trendData.category_series.length > 0) {
+            trendData.category_series.forEach(s => {
+                series.push(s);
+                legendData.push(s.name);
+            });
+        } else {
+             series.push({ name: '文章数', type: 'bar', data: trendData.counts, itemStyle: { color: '#3b82f6', borderRadius: [4,4,0,0] } });
+             legendData.push('文章数');
+        }
+
+        series.push({ 
+            name: '平均热度', type: 'line', yAxisIndex: 1, 
+            data: trendData.avg_heats, itemStyle: { color: '#ef4444' }, 
+            smooth: true, lineStyle: { width: 3 }, showSymbol: false
+        });
+        legendData.push('平均热度');
+
+        chartTrend.setOption({
+            tooltip: { 
+                trigger: 'axis', 
+                backgroundColor: 'rgba(255,255,255,0.95)', 
+                textStyle: { color: '#333' },
+                formatter: function (params) {
+                    let res = params[0].name + '<br/>';
+                    params.forEach(function (item) {
+                        let val = item.value;
+                        if (item.seriesName === '平均热度' && typeof val === 'number') {
+                            val = val.toFixed(2);
+                        }
+                        res += item.marker + " " + item.seriesName + ": " + val + '<br/>';
+                    });
+                    return res;
+                }
+            },
+            legend: { 
+                data: legendData, 
+                bottom: 0,
+                type: isMobile ? 'scroll' : 'plain',
+                padding: isMobile ? [5, 10] : 5
+            },
+            grid: { 
+                bottom: isMobile ? '15%' : '10%', 
+                left: isMobile ? '2%' : '3%', 
+                right: isMobile ? '2%' : '3%', 
+                containLabel: true 
+            },
+            xAxis: { 
+                type: 'category', 
+                data: trendData.dates, 
+                axisLine: { lineStyle: { color: '#e2e8f0' } }, 
+                axisLabel: { 
+                    color: '#64748b',
+                    rotate: isMobile ? 45 : 0,
+                    interval: isMobile ? 'auto' : 0
+                } 
+            },
+            yAxis: [ 
+                { type: 'value', name: isMobile ? '' : '文章数', splitLine: { lineStyle: { type: 'dashed' } } }, 
+                { type: 'value', name: isMobile ? '' : '热度', splitLine: { show: false } } 
+            ],
+            series: series
+        });
+    }
+
+    function renderWordCloud(words) {
+        const container = document.getElementById('wordCloud');
+        container.innerHTML = '';
+        const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+        
+        if (!words || words.length === 0) {
+            container.innerHTML = '<div style="color:#999">暂无数据</div>';
+            return;
+        }
+
+        let maxVal = 0;
+        let minVal = Infinity;
+        words.forEach(w => {
+            if (w.value > maxVal) maxVal = w.value;
+            if (w.value < minVal) minVal = w.value;
+        });
+
+        // Dynamic sizing based on screen width
+        const isMobile = isMobileScreen();
+        const minSize = isMobile ? 0.75 : 0.85;
+        const maxSize = isMobile ? 1.8 : 2.5;
+        // Increased limit since we have a scrollable container now
+        const maxWords = isMobile ? 100 : 200; 
+        
+        // Sort by value and take top N
+        const displayWords = words.sort((a,b) => b.value - a.value).slice(0, maxWords);
+
+        displayWords.forEach(w => {
+            const span = document.createElement('span');
+            span.className = 'cloud-tag';
+            span.textContent = w.name;
+            
+            let size = minSize;
+            if (maxVal > minVal) {
+                size = minSize + ((w.value - minVal) / (maxVal - minVal)) * (maxSize - minSize);
+            }
+            span.style.fontSize = size + 'rem';
+            span.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+            container.appendChild(span);
+        });
+    }
+
+    function renderSourceChart(sourceData) {
+        if (chartSource) chartSource.dispose();
+        chartSource = echarts.init(document.getElementById('chartSource'));
+        const isMobile = isMobileScreen();
+        
+        chartSource.setOption({
+            tooltip: { trigger: 'item' },
+            legend: { 
+                type: 'scroll', 
+                orient: isMobile ? 'horizontal' : 'vertical', 
+                left: isMobile ? 'center' : 'left',
+                bottom: isMobile ? 0 : 'auto',
+                top: isMobile ? 'auto' : 'middle'
+            },
+            series: [{
+                name: '来源', type: 'pie', 
+                radius: isMobile ? ['35%', '60%'] : ['40%', '70%'],
+                center: isMobile ? ['50%', '45%'] : ['60%', '50%'],
+                data: sourceData,
+                itemStyle: { borderRadius: 5, borderColor: '#fff', borderWidth: 2 },
+                label: { show: !isMobile }
+            }]
+        });
+    }
+
+    function renderSentimentChart(sentimentData) {
+        if (chartSentiment) chartSentiment.dispose();
+        chartSentiment = echarts.init(document.getElementById('chartSentiment'));
+        const isMobile = isMobileScreen();
+
+        chartSentiment.setOption({
+            tooltip: { trigger: 'item' },
+            legend: { bottom: '0%' },
+            series: [{
+                name: '情感', type: 'pie', 
+                radius: isMobile ? ['35%', '60%'] : ['40%', '70%'],
+                center: ['50%', '45%'],
+                avoidLabelOverlap: false,
+                label: { show: false, position: 'center' },
+                emphasis: { label: { show: true, fontSize: isMobile ? '14' : '18', fontWeight: 'bold' } },
+                data: sentimentData
+            }]
+        });
+    }
+
+    function renderCorrelationChart(data) {
+        if (chartCorrelation) chartCorrelation.dispose();
+        chartCorrelation = echarts.init(document.getElementById('chartCorrelation'));
+        const isMobile = isMobileScreen();
+        
+        if (!data || !data.nodes || data.nodes.length === 0) {
+             chartCorrelation.clear();
+             return;
+        }
+
+        chartCorrelation.setOption({
+            tooltip: {},
+            series: [{
+                type: 'graph',
+                layout: 'force',
+                data: data.nodes,
+                links: data.links,
+                roam: true,
+                label: { show: !isMobile, position: 'right' },
+                force: { repulsion: isMobile ? 100 : 200, edgeLength: isMobile ? 50 : 80 },
+                lineStyle: { color: 'source', curveness: 0.3 }
+            }]
+        });
+    }
+
+    function renderFreqTrendChart(data) {
+        if (chartFreqTrend) chartFreqTrend.dispose();
+        chartFreqTrend = echarts.init(document.getElementById('chartFreqTrend'));
+        const isMobile = isMobileScreen();
+        
+        if (!data || !data.series) { chartFreqTrend.clear(); return; }
+
+        chartFreqTrend.setOption({
+            tooltip: { trigger: 'axis' },
+            legend: { bottom: 0, type: 'scroll' },
+            grid: { bottom: isMobile ? '15%' : '10%' },
+            xAxis: { type: 'category', data: data.dates },
+            yAxis: { type: 'value' },
+            series: data.series
+        });
+    }
+
+    function renderSentimentTrendChart(data) {
+        if (chartSentimentTrend) chartSentimentTrend.dispose();
+        chartSentimentTrend = echarts.init(document.getElementById('chartSentimentTrend'));
+        const isMobile = isMobileScreen();
+        
+        if (!data || !data.series) { chartSentimentTrend.clear(); return; }
+
+        chartSentimentTrend.setOption({
+            tooltip: { trigger: 'axis' },
+            legend: { bottom: 0, type: 'scroll' },
+            grid: { bottom: isMobile ? '15%' : '10%' },
+            xAxis: { type: 'category', data: data.dates },
+            yAxis: [
+                { type: 'value', name: '文章数' },
+                { type: 'value', name: '情感分', min: 0, max: 100 }
+            ],
+            series: data.series
+        });
+    }
+
+    // Global state for summary generation
+    const state = { isGenerating: false };
+
+    function renderSummaryHtml(summary, id) {
+        if (!summary) {
+            return `
+                <div class="summary-placeholder">
+                    <span>暂无摘要</span>
+                    <button class="btn-link" onclick="genSummary(${id})">✨ 生成摘要</button>
+                </div>
+            `;
+        }
+        
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = summary;
+        const textLength = tempDiv.innerText.length;
+        const threshold = 300;
+        
+        if (textLength <= threshold) {
+            return summary + ` <button class="btn-regen" onclick="genSummary(${id})">🔄 重新生成</button>`;
+        } else {
+            return `
+                <div id="summary-content-${id}" class="summary-content collapsed">
+                    ${summary}
+                </div>
+                <button id="btn-expand-${id}" class="btn-link" onclick="toggleSummary(${id}, true)">查看全部</button>
+                <button id="btn-collapse-${id}" class="btn-link" style="display:none;" onclick="toggleSummary(${id}, false)">收起</button>
+                <button class="btn-regen" onclick="genSummary(${id})">🔄 重新生成</button>
+            `;
+        }
+    }
+
+    window.toggleSummary = (id, showFull) => {
+        const content = document.getElementById(`summary-content-${id}`);
+        const btnExpand = document.getElementById(`btn-expand-${id}`);
+        const btnCollapse = document.getElementById(`btn-collapse-${id}`);
+        
+        if (content && btnExpand && btnCollapse) {
+            if (showFull) {
+                content.classList.remove('collapsed');
+                btnExpand.style.display = 'none';
+                btnCollapse.style.display = 'inline';
+            } else {
+                content.classList.add('collapsed');
+                btnExpand.style.display = 'inline';
+                btnCollapse.style.display = 'none';
+                
+                // 收起时滚动回新闻卡片顶部
+                const card = content.closest('.news-card');
+                if (card) {
+                    const headerOffset = 80; 
+                    const elementPosition = card.getBoundingClientRect().top;
+                    const offsetPosition = elementPosition + window.scrollY - headerOffset;
+                    
+                    window.scrollTo({
+                            top: offsetPosition,
+                            behavior: "smooth"
+                    });
+                }
+            }
+        }
+    };
+
+    window.genSummary = async (id) => {
+        if (state.isGenerating) return;
+        
+        const box = document.getElementById(`summary-${id}`);
+        if (!box) return;
+        
+        state.isGenerating = true;
+        updateRegenButtonsState();
+
+        const originalContent = box.innerHTML;
+        const isRegen = box.querySelector('.btn-regen') !== null;
+        
+        if (isRegen) {
+            const btn = box.querySelector('.btn-regen');
+            if (btn) btn.innerText = "⏳ 生成中...";
+        } else {
+            box.innerHTML = '<span style="color:var(--primary)">正在生成摘要...</span>';
+        }
+        
+        try {
+            const res = await fetch(`/api/generate_summary/${id}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.summary) {
+                box.innerHTML = renderSummaryHtml(data.summary, id);
+            } else {
+                throw new Error("Empty summary");
+            }
+        } catch (err) {
+            alert('生成失败');
+            box.innerHTML = originalContent;
+        } finally {
+            state.isGenerating = false;
+            updateRegenButtonsState();
+        }
+    };
+
+    function updateRegenButtonsState() {
+        const regenBtns = document.querySelectorAll('.btn-regen');
+        const createBtns = document.querySelectorAll('.summary-placeholder .btn-link');
+        
+        const setDisabled = (btn) => {
+            btn.disabled = state.isGenerating;
+            if (state.isGenerating) btn.style.opacity = '0.5';
+            else btn.style.opacity = '1';
+            btn.style.cursor = state.isGenerating ? 'not-allowed' : 'pointer';
+        };
+
+        regenBtns.forEach(setDisabled);
+        createBtns.forEach(setDisabled);
+    }
+
+    window.toggleRelated = (id) => {
+        const el = document.getElementById(`related-${id}`);
+        if (el) {
+            if (el.classList.contains('show')) el.classList.remove('show');
+            else {
+                document.querySelectorAll('.related-content.show').forEach(d => d.classList.remove('show'));
+                el.classList.add('show');
+            }
+        }
+    };
+
+    function renderNewsList(newsList) {
+        const container = document.getElementById('hotNewsList');
+        // Clean up pagination container if it exists from previous state
+        const paginationContainer = document.getElementById('newsPagination');
+        if (paginationContainer) paginationContainer.innerHTML = '';
+        
+        if (!container) return;
+        
+        container.innerHTML = '';
+        
+        if (!newsList || newsList.length === 0) {
+            container.innerHTML = '<div style="text-align:center;color:#999;padding:20px">暂无热门舆情数据</div>';
+            return;
+        }
+
+        newsList.forEach((news, index) => {
+            const card = document.createElement('div');
+            card.className = 'news-card';
+            
+            // Determine sentiment class
+            const sentiment = (news.sentiment_label || news.sentiment || '中立').trim();
+            let sentimentClass = 'sent-neu';
+            
+            if (sentiment === '正面') sentimentClass = 'sent-pos';
+            else if (sentiment === '负面') sentimentClass = 'sent-neg';
+
+            // Rank
+            const rank = news.rank || (index + 1);
+            
+            const heat = typeof news.heat === 'number' ? news.heat.toFixed(1) : news.heat;
+            
+            // Format time if available
+            let timeStr = '';
+            if (news.time || news.created_at) {
+                const t = new Date(news.time || news.created_at);
+                if (!isNaN(t.getTime())) {
+                    timeStr = t.toLocaleString('zh-CN', {month:'numeric', day:'numeric', hour:'numeric', minute:'numeric'});
+                }
+            }
+
+            card.innerHTML = `
+                <div class="card-body">
+                    <div class="rank">${rank}</div>
+                    <div class="content">
+                        <div class="news-head">
+                            <a href="${news.url}" target="_blank" class="news-title">${news.title}</a>
+                        </div>
+
+                        <div class="meta-row">
+                            <div class="meta-left">
+                                <span class="tag tag-category">${news.category || '其他'}</span>
+                                <span class="tag tag-heat">🔥 ${heat || 0}</span>
+                                <span class="tag sentiment-pill ${sentimentClass}">${sentiment}</span>
+                            </div>
+                            <div class="meta-right">
+                                <span class="time-str">${timeStr}</span>
+                                ${news.sources && news.sources.length > 0 ? `
+                                    <div class="related-dropdown">
+                                        <button class="btn-link" onclick="toggleRelated(${news.id})">🔗 关联报道 (${news.sources.length}) ▼</button>
+                                        <div class="related-content" id="related-${news.id}">
+                                            ${news.sources.map(src => `
+                                                <div class="related-item">
+                                                    <span style="flex:1; margin-right:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${src.name || '未知来源'}</span>
+                                                    <a href="${src.url}" target="_blank" class="related-link">查看原文 ↗</a>
+                                                </div>
+                                            `).join('')}
+                                        </div>
+                                    </div>
+                                ` : `
+                                    <button class="btn-link" onclick="window.open('${news.url}', '_blank')">查看详情</button>
+                                `}
+                            </div>
+                        </div>
+                        
+                        <div class="summary-box" id="summary-${news.id}">
+                            ${renderSummaryHtml(news.summary, news.id)}
+                        </div>
+                    </div>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+    }
+
+    window.onresize = () => {
+        if(chartTrend) chartTrend.resize();
+        if(chartSource) chartSource.resize();
+        if(chartSentiment) chartSentiment.resize();
+        if(chartCorrelation) chartCorrelation.resize();
+        if(chartFreqTrend) chartFreqTrend.resize();
+        if(chartSentimentTrend) chartSentimentTrend.resize();
+    };
+</script>
+{% endblock %}

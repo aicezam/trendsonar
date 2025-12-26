@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+.idea/
+.vscode/
+run.log
+venv/
+.trae
+.test
+scripts
+trendsonar.db

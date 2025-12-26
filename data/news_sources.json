@@ -1,0 +1,102 @@
+[
+    {
+        "name": "财联社-热门",
+        "weight": 1.0,
+        "address": "https://newsnow.busiyi.world/api/s?id=cls-hot"
+    },
+    {
+        "name": "36氪人气榜",
+        "weight": 1.5,
+        "address": "https://newsnow.busiyi.world/api/s?id=36kr-renqi"
+    },
+    {
+        "name": "36氪综和资讯",
+        "weight": 1.0,
+        "address": "https://36kr.com/feed"
+    },
+    {
+        "name": "Readhub-每日早报",
+        "weight": 1.5,
+        "address": "https://rsshub.rssforever.com/readhub/daily"
+    },
+    {
+        "name": "联合早报-国际即时",
+        "weight": 1,
+        "address": "https://plink.anyfeeder.com/zaobao/realtime/world"
+    },
+    {
+        "name": "联合早报-中国",
+        "weight": 1,
+        "address": "https://plink.anyfeeder.com/zaobao/realtime/china"
+    },
+    {
+        "name": "每日环球视野",
+        "weight": 1,
+        "address": "https://plink.anyfeeder.com/idaily/today"
+    },
+    {
+        "name": "纽约时报-中文",
+        "weight": 1,
+        "address": "https://plink.anyfeeder.com/nytimes/cn"
+    },
+    {
+        "name": "华尔街日报-中文",
+        "weight": 1,
+        "address": "https://plink.anyfeeder.com/wsj/cn"
+    },
+    {
+        "name": "人民网-头条",
+        "weight": 3.0,
+        "address": "https://plink.anyfeeder.com/people"
+    },
+    {
+        "name": "新华网-新华社新闻",
+        "weight": 2.0,
+        "address": "https://plink.anyfeeder.com/newscn/whxw"
+    },
+    {
+        "name": "百度热搜",
+        "weight": 2.0,
+        "address": "https://newsnow.busiyi.world/api/s?id=baidu"
+    },
+    {
+        "name": "微博",
+        "weight": 0.5,
+        "address": "https://newsnow.busiyi.world/api/s?id=weibo"
+    },
+    {
+        "name": "MIT科技评论-本周热榜",
+        "weight": 1.5,
+        "address": "https://plink.anyfeeder.com/mittrchina/hot"
+    },
+    {
+        "name": "知乎日报",
+        "weight": 1.5,
+        "address": "https://plink.anyfeeder.com/zhihu/daily"
+    },
+    {
+        "name": "知乎热榜",
+        "weight": 1.5,
+        "address": "https://newsnow.busiyi.world/api/s?id=zhihu"
+    },
+    {
+        "name": "今日头条",
+        "weight": 1,
+        "address": "https://newsnow.busiyi.world/api/s?id=toutiao"
+    },
+    {
+        "name": "哔哩哔哩热搜",
+        "weight": 1,
+        "address": "https://newsnow.busiyi.world/api/s?id=bilibili-hot-search"
+    },
+    {
+        "name": "凤凰网",
+        "weight": 1,
+        "address": "https://newsnow.busiyi.world/api/s?id=ifeng"
+    },
+    {
+        "name": "腾讯新闻",
+        "weight": 1,
+        "address": "https://orz.ai/api/v1/dailynews/?platform=tenxunwang"
+    }
+]

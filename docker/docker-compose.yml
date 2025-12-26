@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  trendsonar:
+    # 如果您想从本地代码构建，请取消注释下一行
+    # build: .
+    image: instarsea/trendsonar
+    container_name: trendsonar
+    restart: always
+    ports:
+      - "8193:8193"
+    volumes:
+      # 挂载 config.yaml 到容器根目录
+      - ./data/config.yaml:/app/config.yaml
+      # 挂载 data 目录 (包含 news_sources.json)
+      - ./data:/app/data
+      # - ./app:/app/app
+    environment:
+      - TZ=Asia/Shanghai
+      # 管理员初始密码 (请在生产环境中修改)
+      - ADMIN_PASSWORD=admin123456

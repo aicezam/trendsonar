@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+aiohttp
+asyncpg
+sqlalchemy
+pydantic-settings
+openai
+numpy
+jinja2
+beautifulsoup4
+python-dotenv
+Pillow
+lxml
+crawl4ai
+pyyaml
