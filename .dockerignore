@@ -5,3 +5,8 @@ __pycache__/
 .idea/
 .vscode/
 run.log
+venv/
+trendsonar-dockerandgit-push.txt
+.trae
+.test
+scripts

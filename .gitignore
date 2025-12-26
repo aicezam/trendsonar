@@ -5,3 +5,6 @@ venv/
 config_local.py
 trendsonar-dockerandgit-push.txt
 config.yaml
+.trae
+.test
+scripts
