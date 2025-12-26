@@ -6,7 +6,7 @@ __pycache__/
 .vscode/
 run.log
 venv/
-trendsonar-dockerandgit-push.txt
 .trae
 .test
 scripts
+trendsonar.db

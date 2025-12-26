@@ -3,8 +3,8 @@ __pycache__/
 venv/
 .env
 config_local.py
-trendsonar-dockerandgit-push.txt
 config.yaml
 .trae
 .test
 scripts
+trendsonar.db
