@@ -3,7 +3,7 @@ __pycache__/
 venv/
 .env
 config_local.py
-.trae
-.test
-scripts
+.trae/
+.test/
+scripts/
 trendsonar.db
