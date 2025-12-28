@@ -7,11 +7,12 @@
 
 from typing import Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, select, asc
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import desc, select, asc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.api.deps import verify_admin_access
 from app.models.news import News
 from app.models.topic import Topic, TopicTimelineItem
 from app.services.topic_service import topic_service
@@ -19,13 +20,20 @@ from app.services.topic_service import topic_service
 router = APIRouter(prefix="/api", tags=["topics"])
 
 
-@router.get("/topics")
-async def get_topics(db: AsyncSession = Depends(get_db)) -> Dict[str, List[Dict]]:
-    stmt = select(Topic).where(Topic.status == "active").order_by(desc(Topic.updated_time)).limit(100)
-    topics = (await db.execute(stmt)).scalars().all()
-    data: List[Dict] = []
-    for t in topics:
-        data.append(
+@router.get("/topics/list")
+async def get_topics_list(
+    page: int = 1,
+    size: int = 20,
+    db: AsyncSession = Depends(get_db)
+) -> Dict:
+    stmt = select(Topic).where(Topic.status == "active").order_by(desc(Topic.updated_time))
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+    
+    items = (await db.execute(stmt.offset((page - 1) * size).limit(size))).scalars().all()
+    
+    return {
+        "total": total,
+        "items": [
             {
                 "id": t.id,
                 "name": t.name,
@@ -34,8 +42,28 @@ async def get_topics(db: AsyncSession = Depends(get_db)) -> Dict[str, List[Dict]
                 "updated_time": t.updated_time.isoformat() if t.updated_time else None,
                 "heat_score": float(t.heat_score or 0.0),
             }
-        )
-    return {"data": data}
+            for t in items
+        ],
+        "page": page,
+        "size": size
+    }
+
+@router.delete("/topics/{topic_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_topic(
+    topic_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_access)
+):
+    """
+    删除专题（仅管理员）
+    """
+    topic = (await db.execute(select(Topic).where(Topic.id == topic_id))).scalar_one_or_none()
+    if not topic:
+        raise HTTPException(status_code=404, detail="专题不存在")
+        
+    await db.delete(topic)
+    await db.commit()
+    return None
 
 
 @router.get("/topics/{topic_id}")
@@ -133,4 +161,3 @@ async def regenerate_topic_overview(topic_id: int, db: AsyncSession = Depends(ge
         raise HTTPException(status_code=404, detail="专题不存在或生成失败")
     
     return {"message": "专题综述生成成功", "record": new_record}
-

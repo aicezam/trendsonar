@@ -62,7 +62,8 @@ async def lifespan(app: FastAPI):
         lifespan_logger.warning("=" * 60)
         
     if db_initialized:
-        asyncio.create_task(topic_service.scheduled_topic_task())
+        # 统一由 pipeline_service 的 scheduled_task 进行调度，避免重复运行
+        # asyncio.create_task(topic_service.scheduled_topic_task())
         asyncio.create_task(scheduled_task())
     else:
         lifespan_logger.warning("⚠️ 由于数据库初始化失败，定时任务已跳过启动。")
@@ -123,9 +124,10 @@ async def page_report(request: Request):
 @app.get("/topics", response_class=HTMLResponse)
 async def page_topics(request: Request):
     missing_keys = get_missing_config_keys(settings)
+    authed = is_admin_request(request)
     return templates.TemplateResponse(
         "topics.html",
-        {"request": request, "settings": settings, "active_page": "topics", "missing_keys": missing_keys, "db_error": DB_INIT_ERROR},
+        {"request": request, "settings": settings, "active_page": "topics", "missing_keys": missing_keys, "authed": authed, "db_error": DB_INIT_ERROR},
     )
 
 

@@ -346,6 +346,10 @@ class CrawlerService:
             for res in results:
                 all_news.extend(res)
 
+        # 显式 GC
+        import gc
+        gc.collect()
+        
         return all_news
 
     async def save_raw_news(self, news_list: List[Dict[str, Any]]) -> None:

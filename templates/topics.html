@@ -15,6 +15,8 @@
 
 {% block scripts %}
 <script>
+    const IS_ADMIN = {{ "true" if authed else "false" }};
+
     function fmtTime(iso) {
         if (!iso) return "-";
         const d = new Date(iso);
@@ -27,10 +29,24 @@
         for (const [k, v] of Object.entries(attrs)) {
             if (k === "class") node.className = v;
             else if (k === "text") node.textContent = v;
+            else if (k.startsWith("on")) node.addEventListener(k.substring(2).toLowerCase(), v);
             else node.setAttribute(k, v);
         }
         for (const c of children) node.appendChild(c);
         return node;
+    }
+
+    async function deleteTopic(e, id, name) {
+        e.stopPropagation();
+        if (!confirm(`确定要删除专题 "${name}" 吗？此操作不可恢复。`)) return;
+        
+        try {
+            const resp = await fetch(`/api/topics/${id}`, { method: "DELETE" });
+            if (!resp.ok) throw new Error("删除失败");
+            loadTopics();
+        } catch (err) {
+            alert(err.message);
+        }
     }
 
     async function loadTopics() {
@@ -42,10 +58,10 @@
         list.innerHTML = "";
 
         try {
-            const resp = await fetch("/api/topics", { method: "GET", cache: "no-store" });
+            const resp = await fetch("/api/topics/list?size=100", { method: "GET", cache: "no-store" });
             if (!resp.ok) throw new Error("请求失败");
             const data = await resp.json();
-            const items = (data && data.data) || [];
+            const items = (data && data.items) || [];
             if (!items.length) {
                 empty.style.display = "block";
                 return;
@@ -57,7 +73,20 @@
                     window.location.href = `/topics/${t.id}`;
                 });
 
-                card.appendChild(el("div", { class: "topic-name", text: t.name || "未命名专题" }));
+                const header = el("div", { style: "display: flex; justify-content: space-between; align-items: flex-start;" });
+                
+                const nameDiv = el("div", { class: "topic-name", text: t.name || "未命名专题", style: "flex: 1;" });
+                header.appendChild(nameDiv);
+
+                if (IS_ADMIN) {
+                    const delBtn = el("button", { 
+                        text: "删除",
+                        style: "background: #ef4444; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 10px; white-space: nowrap;",
+                        onClick: (e) => deleteTopic(e, t.id, t.name)
+                    });
+                    header.appendChild(delBtn);
+                }
+                card.appendChild(header);
 
                 const meta = el("div", { class: "meta" });
                 meta.appendChild(el("span", { class: "tag", text: `发布时间 ${fmtTime(t.start_time)}` }));

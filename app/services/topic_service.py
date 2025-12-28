@@ -85,8 +85,16 @@ class TopicService:
 
             # 3. 准备 AI 提炼的种子标题（Top 300）
             # news_pool 已经是按 heat_score 排序的
-            seed_news = news_pool[:settings.TOPIC_AGGREGATION_TOP_N]
-            seed_titles = [(n.title or "").strip() for n in seed_news if (n.title or "").strip()]
+            # 过滤掉低热度新闻
+            min_heat = settings.TOPIC_NEWS_MIN_HEAT
+            seed_news = [n for n in news_pool if (n.heat_score or 0) >= min_heat][:settings.TOPIC_AGGREGATION_TOP_N]
+            
+            if not seed_news:
+                logger.info(f"📭 经热度过滤(>{min_heat})后，无符合条件的新闻，跳过专题生成")
+                return
+
+            # 格式化标题，带上热度信息
+            seed_titles = [f"[热度:{float(n.heat_score or 0):.1f}] {(n.title or '').strip()}" for n in seed_news if (n.title or "").strip()]
             
             # 4. AI 提炼专题
             proposed_topics = await self.ai.propose_topics_from_titles(seed_titles)
@@ -215,6 +223,14 @@ class TopicService:
                     processed_topic_ids.add(result_topic.id)
 
             logger.info(f"✅ 专题刷新完成，新建 {new_topics_created} 个，更新 {updated_topics_count} 个")
+
+            # 显式清理大对象，帮助 GC 回收
+            del news_pool
+            del pool_vecs
+            del active_topics
+            del active_topic_vecs
+            import gc
+            gc.collect()
             
     async def regenerate_topic_overview_action(self, db: AsyncSession, topic_id: int) -> Optional[str]:
         """
@@ -358,9 +374,17 @@ class TopicService:
 
         # 再次检查数量限制
         # 新专题：必须满足最小数量限制
-        if not is_duplicate and len(confirmed_news) <= settings.TOPIC_MIN_NEWS_COUNT:
-            logger.info(f"   ⚠️ [新专题] AI 核验通过数量不足 ({len(confirmed_news)} <= {settings.TOPIC_MIN_NEWS_COUNT})，跳过")
+        # 用户要求：媒体报道 >= 3 (即 count >= 3) => count < 3 则跳过
+        if not is_duplicate and len(confirmed_news) < settings.TOPIC_MIN_NEWS_COUNT:
+            logger.info(f"   ⚠️ [新专题] AI 核验通过数量不足 ({len(confirmed_news)} < {settings.TOPIC_MIN_NEWS_COUNT})，跳过")
             return None
+            
+        # 检查热度指标 (用户要求: 热度 > 6)
+        # 计算热度（取新闻最大热度）
+        max_heat = max([float(n.heat_score or 0) for n in confirmed_news]) if confirmed_news else 0
+        if not is_duplicate and max_heat <= 6:
+             logger.info(f"   ⚠️ [新专题] 热度不足 ({max_heat} <= 4)，跳过")
+             return None
         
         # 旧专题：不限制最小数量，只要有新的就合并
         if is_duplicate and not confirmed_news:
@@ -443,19 +467,84 @@ class TopicService:
         
         # 遍历每一天，调用 AI 合成事件
         current_topic_name = topic_obj_to_return.name if topic_obj_to_return else None
+        
         for d_str, day_news in news_by_date.items():
-            # 调用 AI 合成
-            day_events = await self.ai.generate_daily_timeline_events(d_str, day_news, topic_name=current_topic_name)
+            # 1. 获取该天已有的时间轴节点（为了合并更新）
+            # 注意：sqlite/pg 兼容性，这里简化处理，假设 event_time 存的是 datetime
+            target_date = datetime.strptime(d_str, "%Y-%m-%d").date()
             
+            # 构造查询范围：当天 00:00:00 到 23:59:59
+            day_start = datetime.combine(target_date, datetime.min.time())
+            day_end = datetime.combine(target_date, datetime.max.time())
+            
+            existing_items_stmt = (
+                select(TopicTimelineItem)
+                .where(TopicTimelineItem.topic_id == current_topic_id)
+                .where(TopicTimelineItem.event_time >= day_start)
+                .where(TopicTimelineItem.event_time <= day_end)
+            )
+            existing_items = (await db.execute(existing_items_stmt)).scalars().all()
+            
+            # 2. 收集该天所有相关的新闻 ID (旧 + 新)
+            all_news_ids = set()
+            for n in day_news:
+                all_news_ids.add(n["id"])
+            
+            for it in existing_items:
+                if it.news_id:
+                    all_news_ids.add(it.news_id)
+                if it.sources:
+                    for s in it.sources:
+                        if isinstance(s, dict) and s.get("id"):
+                            all_news_ids.add(s["id"])
+                            
+            # 3. 如果有旧节点，需要重新拉取所有相关新闻的详情，进行全量重生成
+            # 如果没有旧节点，直接用 day_news 即可
+            final_news_list = []
+            
+            if existing_items:
+                # 拉取所有涉及的新闻对象
+                news_stmt = select(News).where(News.id.in_(list(all_news_ids)))
+                all_news_objs = (await db.execute(news_stmt)).scalars().all()
+                
+                for n in all_news_objs:
+                    final_news_list.append({
+                        "id": n.id,
+                        "title": n.title,
+                        "summary": n.summary or (n.content or "")[:200],
+                        "source": n.source,
+                        "url": n.url,
+                        "publish_date": n.publish_date
+                    })
+            else:
+                final_news_list = day_news
+
+            # 4. 调用 AI 合成（全量）
+            logger.info(f"   🔄 正在重生成 {d_str} 的时间轴 (基于 {len(final_news_list)} 条新闻)...")
+            day_events = await self.ai.generate_daily_timeline_events(d_str, final_news_list, topic_name=current_topic_name)
+            
+            # 硬性规则：每天最多保留 2 个节点
+            if day_events and len(day_events) > 2:
+                logger.info(f"   ⚠️ [Rule] AI 生成了 {len(day_events)} 个节点，强制截取前 2 个")
+                day_events = day_events[:2]
+
             # 如果 AI 没有生成任何事件（失败或为空），则降级处理：选最重要的 1-2 条作为代表
             if not day_events:
                 logger.warning(f"   ⚠️ {d_str} AI 合成事件失败，降级为使用 Top 新闻")
+                # 按 publish_date 排序，取最新的
+                final_news_list.sort(key=lambda x: x.get("publish_date") or datetime.min, reverse=True)
                 # 简单取前 2 条
-                for n_item in day_news[:2]:
+                for n_item in final_news_list[:2]:
                     day_events.append({
                         "content": n_item["summary"] or n_item["title"],
                         "source_ids": [n_item["id"]]
                     })
+
+            # 5. 删除旧节点（如果存在），写入新节点
+            if existing_items:
+                for old_it in existing_items:
+                    await db.delete(old_it)
+                await db.flush() # 立即执行删除
 
             # 入库 Timeline Items
             for event in day_events:
@@ -471,8 +560,8 @@ class TopicService:
                 primary_news = None
                 
                 for nid in source_ids:
-                    # 在 day_news 中查找
-                    found = next((x for x in day_news if x["id"] == nid), None)
+                    # 在 final_news_list 中查找
+                    found = next((x for x in final_news_list if x["id"] == nid), None)
                     if found:
                         sources_data.append({
                             "id": found["id"],
@@ -484,8 +573,8 @@ class TopicService:
                             primary_news = found
                 
                 # 如果 source_ids 为空或没找到，尝试兜底（虽然不应该发生）
-                if not primary_news and day_news:
-                     primary_news = day_news[0]
+                if not primary_news and final_news_list:
+                     primary_news = final_news_list[0]
 
                 # Determine event time from primary news if available
                 event_time = datetime.strptime(d_str, "%Y-%m-%d")
@@ -508,9 +597,6 @@ class TopicService:
                 db.add(item)
                 
                 # 标记 used_ids
-                for s in sources_data:
-                    # 注意：这里 sources_data 里没有 id，需要从 source_ids 取
-                    pass
                 for nid in source_ids:
                     used_ids.add(nid)
 
