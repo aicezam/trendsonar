@@ -520,6 +520,80 @@ class CrawlerService:
             logger.error(f"   ❌ [Weibo Scraper] 异常: {e}")
             return None
 
+    @contextlib.asynccontextmanager
+    async def make_crawler(self):
+        """
+        输入:
+        - 无
+
+        输出:
+        - AsyncWebCrawler 实例上下文
+
+        作用:
+        - 创建并管理爬虫实例的生命周期，支持批量复用
+        """
+        try:
+            from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+
+            log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
+            is_verbose = log_level == logging.DEBUG
+            
+            browser_conf = BrowserConfig(headless=True)
+            
+            async with AsyncWebCrawler(config=browser_conf) as crawler:
+                yield crawler
+
+        except Exception as e:
+            logger.error(f"❌ 爬虫初始化失败: {e}")
+            yield None
+
+    async def crawl_content_with_instance(self, target_url: str, crawler) -> Optional[str]:
+        """
+        输入:
+        - `target_url`: 目标页面 URL
+        - `crawler`: 复用的爬虫实例
+
+        输出:
+        - 页面正文/Markdown 文本；失败返回 None
+
+        作用:
+        - 使用复用的爬虫实例抓取内容，减少浏览器启动开销
+        """
+        if not crawler:
+            return await self.crawl_content(target_url)
+
+        logger.info(f"抓取新闻 (复用实例): {target_url}")
+
+        if "weibo.com" in target_url or "weibo.cn" in target_url:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    return await self.crawl_weibo_simple(session, target_url)
+            except Exception as e:
+                logger.error(f"❌ 微博抓取失败: {e}")
+                return None
+
+        try:
+            from crawl4ai import CacheMode, CrawlerRunConfig
+
+            log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
+            is_verbose = log_level == logging.DEBUG
+
+            run_conf = CrawlerRunConfig(
+                cache_mode=CacheMode.BYPASS,
+                verbose=is_verbose
+            )
+
+            result = await crawler.arun(url=target_url, config=run_conf)
+
+            if result and result.markdown:
+                if hasattr(result.markdown, "raw_markdown"):
+                    return result.markdown.raw_markdown
+                return str(result.markdown)
+
+        except Exception as e:
+            logger.error(f"❌ 抓取失败: {e}")
+        return None
+
     async def crawl_content(self, target_url: str) -> Optional[str]:
         """
         输入:

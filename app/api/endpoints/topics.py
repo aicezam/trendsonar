@@ -69,7 +69,7 @@ async def delete_topic(
 @router.get("/topics/{topic_id}")
 async def get_topic_detail(
     topic_id: int, 
-    sort: str = Query("asc", regex="^(asc|desc)$"),
+    sort: str = Query("asc", pattern="^(asc|desc)$"),
     db: AsyncSession = Depends(get_db)
 ) -> Dict:
     topic = (await db.execute(select(Topic).where(Topic.id == topic_id))).scalar_one_or_none()

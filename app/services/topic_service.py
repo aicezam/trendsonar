@@ -434,20 +434,21 @@ class TopicService:
         
         # 4. 补全新闻详情与生成时间轴
         # 4.1 先检查并补全新闻详情
-        for n in confirmed_news:
-            if not n.content or len(n.content) < 100:
-                logger.info(f"   📥 正在补全新闻详情: {n.title[:20]}...")
-                try:
-                    crawled = await crawler_service.crawl_content(n.url)
-                    if crawled and len(crawled) > 50:
-                        n.content = crawled
-                        # 内容更新了，摘要最好也刷新一下，否则旧摘要可能不准
-                        fresh_summary = await self.ai.generate_summary(n.title, n.content, max_words=200)
-                        if fresh_summary:
-                            n.summary = fresh_summary
-                        db.add(n)
-                except Exception as e:
-                    logger.warning(f"   ⚠️ 补全详情失败: {e}")
+        async with crawler_service.make_crawler() as crawler:
+            for n in confirmed_news:
+                if not n.content or len(n.content) < 100:
+                    logger.info(f"   📥 正在补全新闻详情: {n.title[:20]}...")
+                    try:
+                        crawled = await crawler_service.crawl_content_with_instance(n.url, crawler)
+                        if crawled and len(crawled) > 50:
+                            n.content = crawled
+                            # 内容更新了，摘要最好也刷新一下，否则旧摘要可能不准
+                            fresh_summary = await self.ai.generate_summary(n.title, n.content, max_words=200)
+                            if fresh_summary:
+                                n.summary = fresh_summary
+                            db.add(n)
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ 补全详情失败: {e}")
         
         await db.flush()
 

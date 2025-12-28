@@ -111,61 +111,62 @@ async def auto_generate_summaries_top_n() -> None:
         logger.debug(f"   📋 需生成摘要: {total_task} 条")
 
         count = 0
-        for idx, news in enumerate(news_to_process, 1):
-            progress_str = f"({idx}/{total_task})"
-            try:
-                content = news.content
-                if not content or len(content) < 50:
-                    logger.debug(f"   {progress_str} 🕷️ 补抓正文: {news.title}")
-                    content = await crawler_service.crawl_content(news.url)
+        async with crawler_service.make_crawler() as crawler:
+            for idx, news in enumerate(news_to_process, 1):
+                progress_str = f"({idx}/{total_task})"
+                try:
+                    content = news.content
+                    if not content or len(content) < 50:
+                        logger.debug(f"   {progress_str} 🕷️ 补抓正文: {news.title}")
+                        content = await crawler_service.crawl_content_with_instance(news.url, crawler)
+                        if content:
+                            news.content = content
+                            db.add(news)
+                            await db.commit()
+                        else:
+                            logger.warning(f"   {progress_str} ❌ 无法获取正文，跳过: {news.title}")
+                            continue
+
                     if content:
-                        news.content = content
-                        db.add(news)
-                        await db.commit()
-                    else:
-                        logger.warning(f"   {progress_str} ❌ 无法获取正文，跳过: {news.title}")
-                        continue
+                        logger.debug(f"   {progress_str} 📝 生成摘要: {news.title}")
+                        
+                        # 组合输入：如果有原始摘要（RSS），则一起提供给 AI
+                        input_content = content
+                        if news.summary:
+                            input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
 
-                if content:
-                    logger.debug(f"   {progress_str} 📝 生成摘要: {news.title}")
-                    
-                    # 组合输入：如果有原始摘要（RSS），则一起提供给 AI
-                    input_content = content
-                    if news.summary:
-                        input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
+                        summary = await ai_service.generate_summary(news.title, input_content)
+                        if summary:
+                            news.summary = summary
+                            news.is_ai_summary = True
 
-                    summary = await ai_service.generate_summary(news.title, input_content)
-                    if summary:
-                        news.summary = summary
-                        news.is_ai_summary = True
-
-                        try:
-                            txt_to_embed = f"{news.title} {summary} {content[:1000]}"
-                            embs = await ai_service.get_embeddings([txt_to_embed])
-                            if embs and embs[0]:
-                                news.embedding = embs[0]
-                        except Exception as e:
-                            logger.error(f"   {progress_str} ⚠️ 向量更新失败: {e}")
-
-                        if not news.keywords:
                             try:
-                                logger.debug(f"   {progress_str} 🧠 同步深度分析: {news.title}")
-                                res = await ai_service.analyze_sentiment(news.title, summary)
-                                if res:
-                                    news.sentiment_score = res["score"]
-                                    news.sentiment_label = res["label"]
-                                    news.category = res.get("category", "其他")
-                                    news.region = res.get("region", "其他")
-                                    news.keywords = res["keywords"]
-                                    news.entities = res["entities"]
+                                txt_to_embed = f"{news.title} {summary} {content[:1000]}"
+                                embs = await ai_service.get_embeddings([txt_to_embed])
+                                if embs and embs[0]:
+                                    news.embedding = embs[0]
                             except Exception as e:
-                                logger.error(f"   {progress_str} ⚠️ 同步分析失败: {e}")
+                                logger.error(f"   {progress_str} ⚠️ 向量更新失败: {e}")
 
-                        db.add(news)
-                        await db.commit()
-                        count += 1
-            except Exception as e:
-                logger.error(f"   {progress_str} ⚠️ 处理异常 ({news.title}): {e}")
+                            if not news.keywords:
+                                try:
+                                    logger.debug(f"   {progress_str} 🧠 同步深度分析: {news.title}")
+                                    res = await ai_service.analyze_sentiment(news.title, summary)
+                                    if res:
+                                        news.sentiment_score = res["score"]
+                                        news.sentiment_label = res["label"]
+                                        news.category = res.get("category", "其他")
+                                        news.region = res.get("region", "其他")
+                                        news.keywords = res["keywords"]
+                                        news.entities = res["entities"]
+                                except Exception as e:
+                                    logger.error(f"   {progress_str} ⚠️ 同步分析失败: {e}")
+
+                            db.add(news)
+                            await db.commit()
+                            count += 1
+                except Exception as e:
+                    logger.error(f"   {progress_str} ⚠️ 处理异常 ({news.title}): {e}")
 
         logger.info(f"✅ 自动摘要完成，共处理 {count} 条")
 
