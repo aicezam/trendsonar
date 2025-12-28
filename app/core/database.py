@@ -110,6 +110,23 @@ async def check_db_connection(verbose: bool = True) -> bool:
 
 
 
+async def dispose_engine() -> None:
+    """
+    输入:
+    - 无
+    
+    输出:
+    - 无
+    
+    作用:
+    - 强制释放数据库引擎的连接池，用于释放空闲连接占用
+    """
+    global _engine
+    if _engine:
+        await _engine.dispose()
+        # logger.info("🔌 数据库连接池已释放")
+
+
 async def get_db():
     """
     输入:

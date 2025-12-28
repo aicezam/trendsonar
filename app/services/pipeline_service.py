@@ -7,14 +7,18 @@
 
 import asyncio
 import gc
+import json
+import sys
+import os
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
+from pathlib import Path
 
 import numpy as np
 from sqlalchemy import delete, desc, or_, select
 
-from app.core.config import get_settings
-from app.core.database import AsyncSessionLocal, check_db_connection
+from app.core.config import get_settings, BASE_DIR
+from app.core.database import AsyncSessionLocal, check_db_connection, dispose_engine
 from app.core.logger import logger
 from app.core.exceptions import AIConfigurationError
 from app.models.news import News
@@ -23,9 +27,27 @@ from app.services.cluster_service import cluster_service
 from app.services.crawler_service import crawler_service
 from app.services.report_service import report_service
 from app.services.topic_service import topic_service
+from app.services.admin_service import schedule_restart
 from app.utils.tools import normalize_regions_to_countries
 
 settings = get_settings()
+
+STATE_FILE = BASE_DIR / "scheduler_state.json"
+
+def _load_scheduler_state() -> Dict[str, Any]:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_scheduler_state(state: Dict[str, Any]) -> None:
+    try:
+        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Failed to save scheduler state: {e}")
+
 
 
 async def auto_batch_analyze_new_news() -> None:
@@ -313,8 +335,20 @@ async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = 
     except Exception as e:
         logger.error(f"❌ 任务执行异常: {e}")
     finally:
-        gc.collect()
-
+        # 深度资源清理
+        try:
+            # 1. 清理报表服务缓存
+            report_service.clear_local_cache()
+            
+            # 2. 释放数据库连接池
+            await dispose_engine()
+            
+            # 3. 强制 GC
+            gc.collect()
+            
+            logger.info("🧹 [Cleanup] 资源已深度释放 (缓存/DB连接池/GC)")
+        except Exception as e:
+            logger.error(f"❌ 资源释放异常: {e}")
 
 async def scheduled_task() -> None:
     """
@@ -330,14 +364,38 @@ async def scheduled_task() -> None:
 
     logger.info("⏰ 定时任务调度器启动...")
 
-    last_periodic_run = datetime.min
-    last_topic_run = datetime.min
-    last_daily_final = None
-    last_weekly_final = None
-    last_monthly_final = None
+    state = _load_scheduler_state()
+
+    def parse_dt(key, default):
+        val = state.get(key)
+        if val:
+            try:
+                return datetime.fromisoformat(val)
+            except: pass
+        return default
+        
+    def parse_date(key):
+        val = state.get(key)
+        if val:
+            try:
+                return datetime.fromisoformat(val).date()
+            except: pass
+        return None
+
+    last_periodic_run = parse_dt("last_periodic_run", datetime.min)
+    last_topic_run = parse_dt("last_topic_run", datetime.min)
+    
+    last_daily_final = parse_date("last_daily_final")
+    last_weekly_final = parse_date("last_weekly_final")
+    last_monthly_final = parse_date("last_monthly_final")
+
+    logger.info(f"📊 调度状态已加载: 上次运行={last_periodic_run}")
 
     while True:
         try:
+            should_restart = False
+            state_changed = False
+
             if not await check_db_connection():
                 logger.warning("⚠️ 数据库连接异常，定时任务暂停运行，等待恢复...")
                 await asyncio.sleep(60)
@@ -360,6 +418,9 @@ async def scheduled_task() -> None:
                 last_periodic_run = datetime.now()
                 if should_run_topics:
                     last_topic_run = datetime.now()
+                
+                state_changed = True
+                should_restart = True
 
             if now.hour == 23 and now.minute == 58:
                 if last_daily_final != now.date():
@@ -367,6 +428,7 @@ async def scheduled_task() -> None:
                     await report_service.generate_and_cache_global_report("daily")
                     last_daily_final = now.date()
                     gc.collect()
+                    state_changed = True
 
             if now.weekday() == 6 and now.hour == 23 and now.minute == 55:
                 if last_weekly_final != now.date():
@@ -374,6 +436,7 @@ async def scheduled_task() -> None:
                     await report_service.generate_and_cache_global_report("weekly")
                     last_weekly_final = now.date()
                     gc.collect()
+                    state_changed = True
 
             tomorrow = now + timedelta(days=1)
             if tomorrow.day == 1 and now.hour == 23 and now.minute == 50:
@@ -382,6 +445,23 @@ async def scheduled_task() -> None:
                     await report_service.generate_and_cache_global_report("monthly")
                     last_monthly_final = now.date()
                     gc.collect()
+                    state_changed = True
+
+            if state_changed:
+                new_state = {
+                    "last_periodic_run": last_periodic_run.isoformat(),
+                    "last_topic_run": last_topic_run.isoformat(),
+                    "last_daily_final": last_daily_final.isoformat() if last_daily_final else None,
+                    "last_weekly_final": last_weekly_final.isoformat() if last_weekly_final else None,
+                    "last_monthly_final": last_monthly_final.isoformat() if last_monthly_final else None,
+                }
+                _save_scheduler_state(new_state)
+
+            if should_restart:
+                logger.info("♻️ [Schedule] 任务周期结束，执行系统自动重启以释放内存...")
+                schedule_restart(delay_seconds=3)
+                await asyncio.sleep(60)
+                continue
 
         except AIConfigurationError as e:
             logger.error(f"🛑 配置错误: {e} 请检查 config.yaml 是否配置正确")

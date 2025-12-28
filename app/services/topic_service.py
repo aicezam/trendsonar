@@ -225,12 +225,15 @@ class TopicService:
             logger.info(f"✅ 专题刷新完成，新建 {new_topics_created} 个，更新 {updated_topics_count} 个")
 
             # 显式清理大对象，帮助 GC 回收
-            del news_pool
-            del pool_vecs
-            del active_topics
-            del active_topic_vecs
+            logger.info("🧹 [TopicService] 正在执行资源释放与内存清理...")
+            if 'news_pool' in locals(): del news_pool
+            if 'pool_vecs' in locals(): del pool_vecs
+            if 'active_topics' in locals(): del active_topics
+            if 'active_topic_vecs' in locals(): del active_topic_vecs
+            
             import gc
             gc.collect()
+            logger.info("✅ [TopicService] 内存清理完成")
             
     async def regenerate_topic_overview_action(self, db: AsyncSession, topic_id: int) -> Optional[str]:
         """

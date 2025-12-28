@@ -38,6 +38,13 @@ class ReportService:
         self._chart_cache: Dict[Tuple[Any, ...], Tuple[float, Any]] = {}
         self._global_cache: Optional[Tuple[float, str, Dict[str, Any]]] = None
 
+    def clear_local_cache(self) -> None:
+        """
+        清空本地内存缓存
+        """
+        self._chart_cache.clear()
+        self._global_cache = None
+        
     def _cleanup_chart_cache(self) -> None:
         """
         清理图表缓存：优先移除过期项，若仍超限则移除最早的项

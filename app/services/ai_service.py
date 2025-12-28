@@ -389,6 +389,7 @@ class AIService:
    - ✅ 正确示例：“证监会发布市值管理新规”、“SpaceX星舰第五次试飞”、“乌克兰东部战事升级”。
 5. **缩小范围**：名称中尽量包含具体的实体（人名、地名、机构名）或定语，以限定范围。
 6. **忽略琐碎**：忽略过于孤立或低价值的新闻。
+7. **时间范围**：专题事件必须从最近的时间窗口内获取。
 
 对于每个专题，提供：
 1. "name": 具体的专题名称（中文，不超过20字，必须具体、细化）。
@@ -497,8 +498,9 @@ class AIService:
         for r_idx, route in enumerate(routes):
             max_attempts = 3 if r_idx == 0 else 1
             for attempt in range(max_attempts):
-                client = AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"])
-                res = await try_extract(client, route["model"])
+                # 使用 async with 确保资源释放
+                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                    res = await try_extract(client, route["model"])
                 if res is not None:
                     return res
                 await asyncio.sleep(1)
@@ -586,8 +588,9 @@ class AIService:
 
         routes = self._iter_llm_routes(self._get_prefer_backup("SENTIMENT"))
         for route in routes:
-            client = AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"])
-            res = await try_analyze(client, route["model"])
+            # 使用 async with 确保资源释放
+            async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                res = await try_analyze(client, route["model"])
             if res:
                 return res
 
@@ -635,8 +638,9 @@ class AIService:
             routes = self._iter_llm_routes(self._get_prefer_backup("SENTIMENT"))
             res: Optional[str] = None
             for route in routes:
-                client = AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"])
-                res = await self._call_llm(client, route["model"], user_prompt, system_prompt)
+                # 使用 async with 确保资源释放
+                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                    res = await self._call_llm(client, route["model"], user_prompt, system_prompt)
                 if res:
                     break
 
@@ -704,12 +708,14 @@ class AIService:
         prefer_backup = self._get_prefer_backup("SUMMARY")
         routes = self._iter_llm_routes(prefer_backup)
         for route in routes:
-            res = await self._call_llm(
-                AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]),
-                route["model"],
-                user_prompt,
-                system_prompt,
-            )
+            # 使用 async with 确保资源释放
+            async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                res = await self._call_llm(
+                    client,
+                    route["model"],
+                    user_prompt,
+                    system_prompt,
+                )
             if res:
                 return res
         return None
@@ -723,12 +729,15 @@ class AIService:
         prefer = False if prefer_backup is None else prefer_backup
         routes = self._iter_llm_routes(prefer)
         for i, route in enumerate(routes):
-            res = await self._call_llm(
-                AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]),
-                route["model"],
-                user_prompt,
-                system_prompt,
-            )
+            # 使用 async with 确保 client 资源释放
+            async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                res = await self._call_llm(
+                    client,
+                    route["model"],
+                    user_prompt,
+                    system_prompt,
+                )
+            
             if res:
                 return res
             
@@ -941,12 +950,14 @@ class AIService:
             if self._get_prefer_backup("CHAT"):
                 model_type = "backup"
 
+        api_key = settings.MAIN_AI_API_KEY
+        base_url = settings.MAIN_AI_BASE_URL
+        model = settings.MAIN_AI_MODEL
+
         if model_type == "backup":
-            client = AsyncOpenAI(api_key=settings.BACKUP_AI_API_KEY, base_url=settings.BACKUP_AI_BASE_URL)
+            api_key = settings.BACKUP_AI_API_KEY
+            base_url = settings.BACKUP_AI_BASE_URL
             model = settings.BACKUP_AI_MODEL
-        else:
-            client = AsyncOpenAI(api_key=settings.MAIN_AI_API_KEY, base_url=settings.MAIN_AI_BASE_URL)
-            model = settings.MAIN_AI_MODEL
 
         system_prompt = (
             "你是一个专业的新闻助手。请根据提供的新闻上下文回答用户的问题。\n"
@@ -956,37 +967,39 @@ class AIService:
         user_prompt = f"【新闻上下文】:\n{context}\n\n【用户问题】: {query}"
 
         try:
-            extra_body = {}
-            if "modelscope" in str(client.base_url):
-                extra_body["enable_thinking"] = False
+            # 使用 async with 确保资源释放
+            async with AsyncOpenAI(api_key=api_key, base_url=base_url) as client:
+                extra_body = {}
+                if "modelscope" in str(client.base_url):
+                    extra_body["enable_thinking"] = False
 
-            logger.info(f"开始流式对话请求: model={model}, stream=True")
-            stream = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                stream=True,
-                temperature=0.7,
-                timeout=60,
-                extra_body=extra_body if extra_body else None,
-            )
-            logger.info("流式请求已建立，开始读取 chunks")
-            chunk_count = 0
-            async for chunk in stream:
-                logger.debug(f"Raw chunk received: {chunk}")
-                if not chunk.choices:
-                    logger.debug(f"Chunk without choices: {chunk}")
-                    continue
-                content = chunk.choices[0].delta.content
-                if content:
-                    chunk_count += 1
-                    # logger.debug(f"Yielding content: {content!r}")
-                    yield content
-                else:
-                    logger.debug(f"Chunk with empty content: {chunk}")
-            logger.info(f"流式传输结束, 共发送 {chunk_count} 个 chunks")
+                logger.info(f"开始流式对话请求: model={model}, stream=True")
+                stream = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    stream=True,
+                    temperature=0.7,
+                    timeout=60,
+                    extra_body=extra_body if extra_body else None,
+                )
+                logger.info("流式请求已建立，开始读取 chunks")
+                chunk_count = 0
+                async for chunk in stream:
+                    logger.debug(f"Raw chunk received: {chunk}")
+                    if not chunk.choices:
+                        logger.debug(f"Chunk without choices: {chunk}")
+                        continue
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        chunk_count += 1
+                        # logger.debug(f"Yielding content: {content!r}")
+                        yield content
+                    else:
+                        logger.debug(f"Chunk with empty content: {chunk}")
+                logger.info(f"流式传输结束, 共发送 {chunk_count} 个 chunks")
         except Exception as e:
             logger.error(f"聊天流错误: {e}", exc_info=True)
             yield f"错误: {str(e)}"
@@ -1133,11 +1146,12 @@ class AIService:
                 if attempt > 0:
                     await asyncio.sleep(2 if attempt == 1 else 10)
                 
-                client = AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"])
-                try:
-                    res = await try_verify(client, route["model"])
-                except AIConfigurationError:
-                    raise
+                # 使用 async with 确保资源释放
+                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                    try:
+                        res = await try_verify(client, route["model"])
+                    except AIConfigurationError:
+                        raise
                 
                 if res is not None:
                     return res
