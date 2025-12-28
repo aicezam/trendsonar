@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     """
 
     APP_NAME: str = "TrendSonar"
-    VERSION: str = "0.1.3"
+    VERSION: str = "0.1.4"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
     PORT: int = 8193
@@ -93,6 +93,7 @@ class Settings(BaseSettings):
     TOPIC_MIN_NEWS_COUNT: int = 3
     TOPIC_SCHEDULE_INTERVAL_HOURS: int = 4
     TOPIC_NEWS_MIN_HEAT: float = 1.0  # 参与专题生成的最低新闻热度
+    TOPIC_QUALITY_LEVEL: int = 3  # 专题质量审核等级 (1-5)
 
     # AI 路由配置
     AI_ROUTE: Dict[str, str] = {
