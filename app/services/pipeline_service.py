@@ -7,7 +7,10 @@
 
 import asyncio
 import gc
+import json
+import os
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -19,6 +22,7 @@ from app.core.logger import logger
 from app.core.exceptions import AIConfigurationError
 from app.models.news import News
 from app.services.ai_service import ai_service
+from app.services.admin_service import schedule_restart
 from app.services.cluster_service import cluster_service
 from app.services.crawler_service import crawler_service
 from app.services.report_service import report_service
@@ -26,6 +30,59 @@ from app.services.topic_service import topic_service
 from app.utils.tools import normalize_regions_to_countries
 
 settings = get_settings()
+
+DATA_DIR = Path("data")
+STATE_FILE = DATA_DIR / "scheduler_state.json"
+
+def _load_scheduler_state() -> Dict:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        res = {}
+        if "last_periodic_run" in data:
+            res["last_periodic_run"] = datetime.fromisoformat(data["last_periodic_run"])
+        if "last_topic_run" in data:
+            res["last_topic_run"] = datetime.fromisoformat(data["last_topic_run"])
+        if "last_daily_final" in data:
+            res["last_daily_final"] = datetime.strptime(data["last_daily_final"], "%Y-%m-%d").date()
+        if "last_weekly_final" in data:
+            res["last_weekly_final"] = datetime.strptime(data["last_weekly_final"], "%Y-%m-%d").date()
+        if "last_monthly_final" in data:
+            res["last_monthly_final"] = datetime.strptime(data["last_monthly_final"], "%Y-%m-%d").date()
+        return res
+    except Exception as e:
+        logger.warning(f"⚠️ 读取调度状态失败: {e}")
+        return {}
+
+def _save_scheduler_state(
+    last_periodic_run: datetime,
+    last_topic_run: datetime,
+    last_daily_final=None,
+    last_weekly_final=None,
+    last_monthly_final=None
+):
+    try:
+        if not DATA_DIR.exists():
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            
+        data = {
+            "last_periodic_run": last_periodic_run.isoformat(),
+            "last_topic_run": last_topic_run.isoformat(),
+        }
+        if last_daily_final:
+            data["last_daily_final"] = last_daily_final.strftime("%Y-%m-%d")
+        if last_weekly_final:
+            data["last_weekly_final"] = last_weekly_final.strftime("%Y-%m-%d")
+        if last_monthly_final:
+            data["last_monthly_final"] = last_monthly_final.strftime("%Y-%m-%d")
+            
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"❌ 保存调度状态失败: {e}")
 
 
 async def auto_batch_analyze_new_news() -> None:
@@ -329,11 +386,15 @@ async def scheduled_task() -> None:
 
     logger.info("⏰ 定时任务调度器启动...")
 
-    last_periodic_run = datetime.min
-    last_topic_run = datetime.min
-    last_daily_final = None
-    last_weekly_final = None
-    last_monthly_final = None
+    state = _load_scheduler_state()
+    last_periodic_run = state.get("last_periodic_run", datetime.min)
+    last_topic_run = state.get("last_topic_run", datetime.min)
+    last_daily_final = state.get("last_daily_final", None)
+    last_weekly_final = state.get("last_weekly_final", None)
+    last_monthly_final = state.get("last_monthly_final", None)
+
+    if last_periodic_run != datetime.min:
+        logger.info(f"📅 恢复调度状态: 上次运行于 {last_periodic_run}")
 
     while True:
         try:
@@ -359,12 +420,25 @@ async def scheduled_task() -> None:
                 last_periodic_run = datetime.now()
                 if should_run_topics:
                     last_topic_run = datetime.now()
+                
+                # 保存状态并触发重启
+                _save_scheduler_state(
+                    last_periodic_run, 
+                    last_topic_run, 
+                    last_daily_final, 
+                    last_weekly_final, 
+                    last_monthly_final
+                )
+                logger.info("🔄 全流程任务完成，5秒后重启服务以释放内存...")
+                schedule_restart(delay_seconds=5)
+                return
 
             if now.hour == 23 and now.minute == 58:
                 if last_daily_final != now.date():
                     logger.info("⏰ [Schedule] 触发每日最终报表 (23:58)...")
                     await report_service.generate_and_cache_global_report("daily")
                     last_daily_final = now.date()
+                    _save_scheduler_state(last_periodic_run, last_topic_run, last_daily_final, last_weekly_final, last_monthly_final)
                     gc.collect()
 
             if now.weekday() == 6 and now.hour == 23 and now.minute == 55:
@@ -372,6 +446,7 @@ async def scheduled_task() -> None:
                     logger.info("⏰ [Schedule] 触发每周最终报表 (周日 23:55)...")
                     await report_service.generate_and_cache_global_report("weekly")
                     last_weekly_final = now.date()
+                    _save_scheduler_state(last_periodic_run, last_topic_run, last_daily_final, last_weekly_final, last_monthly_final)
                     gc.collect()
 
             tomorrow = now + timedelta(days=1)
@@ -380,6 +455,7 @@ async def scheduled_task() -> None:
                     logger.info("⏰ [Schedule] 触发每月最终报表 (月末 23:50)...")
                     await report_service.generate_and_cache_global_report("monthly")
                     last_monthly_final = now.date()
+                    _save_scheduler_state(last_periodic_run, last_topic_run, last_daily_final, last_weekly_final, last_monthly_final)
                     gc.collect()
 
         except AIConfigurationError as e:
