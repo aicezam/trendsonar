@@ -111,6 +111,8 @@ TOPIC_MATCH_THRESHOLD: 0.6
 TOPIC_MATCH_MAX_CANDIDATES: 30
 # 专题质量门槛：只有当核验通过的新闻数量 > N 时才创建专题 (默认 3)
 TOPIC_MIN_NEWS_COUNT: 3
+# 专题更新时间窗口（天）：仅检查最近 N 天内更新过的活跃专题 (默认 3)
+TOPIC_UPDATE_LOOKBACK_DAYS: 3
 # 专题定时任务间隔（小时）
 TOPIC_SCHEDULE_INTERVAL_HOURS: 4
 # 参与专题生成的最低新闻热度（默认 6.0）

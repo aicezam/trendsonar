@@ -478,11 +478,11 @@ class CrawlerService:
             "Cookie": settings.WEIBO_COOKIE,
         }
 
-        logger.debug(f"   🔍 [Weibo Scraper] 正在抓取: {url}")
+        logger.debug(f"   🔍 [微博抓取] 正在抓取: {url}")
         try:
             async with session.get(url, headers=headers, timeout=30) as resp:
                 if resp.status != 200:
-                    logger.error(f"   ❌ [Weibo Scraper] HTTP {resp.status}")
+                    logger.error(f"   ❌ [微博抓取] HTTP {resp.status}")
                     return None
 
                 content_bytes = await resp.read()
@@ -506,18 +506,18 @@ class CrawlerService:
                         content_list.append(text)
 
                 if not content_list:
-                    logger.warning("   ⚠️ [Weibo Scraper] 未找到微博卡片，尝试提取全文")
+                    logger.warning("   ⚠️ [微博抓取] 未找到微博卡片，尝试提取全文")
                     body_text = soup.body.get_text(separator="\n", strip=True) if soup.body else ""
                     if "Sina Visitor System" in body_text or "访问受限" in body_text:
-                        logger.error("   ❌ [Weibo Scraper] 触发反爬验证")
+                        logger.error("   ❌ [微博抓取] 触发反爬验证")
                         return None
                     return body_text[:5000]
 
-                logger.debug(f"   ✅ [Weibo Scraper] 抓取到 {len(content_list)} 条微博")
+                logger.debug(f"   ✅ [微博抓取] 抓取到 {len(content_list)} 条微博")
                 return "\n\n".join(content_list)
 
         except Exception as e:
-            logger.error(f"   ❌ [Weibo Scraper] 异常: {e}")
+            logger.error(f"   ❌ [微博抓取] 异常: {e}")
             return None
 
     @contextlib.asynccontextmanager

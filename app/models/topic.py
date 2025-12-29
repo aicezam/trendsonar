@@ -57,8 +57,8 @@ class TopicTimelineItem(Base):
     source_name = Column(String, nullable=True)
     source_url = Column(String, nullable=True)
     
-    # New field to support multiple sources per event
-    sources = Column(JSON, default=list)  # List of {name, url, title, id}
+    # 新增字段以支持每个事件多个来源
+    sources = Column(JSON, default=list)  # {name, url, title, id} 的列表
 
     created_at = Column(DateTime, default=datetime.now, index=True)
 

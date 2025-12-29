@@ -7,18 +7,14 @@
 
 import asyncio
 import gc
-import json
-import sys
-import os
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional, Any
-from pathlib import Path
+from typing import Dict, List, Optional
 
 import numpy as np
 from sqlalchemy import delete, desc, or_, select
 
-from app.core.config import get_settings, BASE_DIR
-from app.core.database import AsyncSessionLocal, check_db_connection, dispose_engine
+from app.core.config import get_settings
+from app.core.database import AsyncSessionLocal, check_db_connection
 from app.core.logger import logger
 from app.core.exceptions import AIConfigurationError
 from app.models.news import News
@@ -27,27 +23,9 @@ from app.services.cluster_service import cluster_service
 from app.services.crawler_service import crawler_service
 from app.services.report_service import report_service
 from app.services.topic_service import topic_service
-from app.services.admin_service import schedule_restart
 from app.utils.tools import normalize_regions_to_countries
 
 settings = get_settings()
-
-STATE_FILE = BASE_DIR / "scheduler_state.json"
-
-def _load_scheduler_state() -> Dict[str, Any]:
-    if not STATE_FILE.exists():
-        return {}
-    try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-def _save_scheduler_state(state: Dict[str, Any]) -> None:
-    try:
-        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        logger.error(f"Failed to save scheduler state: {e}")
-
 
 
 async def auto_batch_analyze_new_news() -> None:
@@ -133,62 +111,61 @@ async def auto_generate_summaries_top_n() -> None:
         logger.debug(f"   📋 需生成摘要: {total_task} 条")
 
         count = 0
-        async with crawler_service.make_crawler() as crawler:
-            for idx, news in enumerate(news_to_process, 1):
-                progress_str = f"({idx}/{total_task})"
-                try:
-                    content = news.content
-                    if not content or len(content) < 50:
-                        logger.debug(f"   {progress_str} 🕷️ 补抓正文: {news.title}")
-                        content = await crawler_service.crawl_content_with_instance(news.url, crawler)
-                        if content:
-                            news.content = content
-                            db.add(news)
-                            await db.commit()
-                        else:
-                            logger.warning(f"   {progress_str} ❌ 无法获取正文，跳过: {news.title}")
-                            continue
-
+        for idx, news in enumerate(news_to_process, 1):
+            progress_str = f"({idx}/{total_task})"
+            try:
+                content = news.content
+                if not content or len(content) < 50:
+                    logger.debug(f"   {progress_str} 🕷️ 补抓正文: {news.title}")
+                    content = await crawler_service.crawl_content(news.url)
                     if content:
-                        logger.debug(f"   {progress_str} 📝 生成摘要: {news.title}")
-                        
-                        # 组合输入：如果有原始摘要（RSS），则一起提供给 AI
-                        input_content = content
-                        if news.summary:
-                            input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
+                        news.content = content
+                        db.add(news)
+                        await db.commit()
+                    else:
+                        logger.warning(f"   {progress_str} ❌ 无法获取正文，跳过: {news.title}")
+                        continue
 
-                        summary = await ai_service.generate_summary(news.title, input_content)
-                        if summary:
-                            news.summary = summary
-                            news.is_ai_summary = True
+                if content:
+                    logger.debug(f"   {progress_str} 📝 生成摘要: {news.title}")
+                    
+                    # 组合输入：如果有原始摘要（RSS），则一起提供给 AI
+                    input_content = content
+                    if news.summary:
+                        input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
 
+                    summary = await ai_service.generate_summary(news.title, input_content)
+                    if summary:
+                        news.summary = summary
+                        news.is_ai_summary = True
+
+                        try:
+                            txt_to_embed = f"{news.title} {summary} {content[:1000]}"
+                            embs = await ai_service.get_embeddings([txt_to_embed])
+                            if embs and embs[0]:
+                                news.embedding = embs[0]
+                        except Exception as e:
+                            logger.error(f"   {progress_str} ⚠️ 向量更新失败: {e}")
+
+                        if not news.keywords:
                             try:
-                                txt_to_embed = f"{news.title} {summary} {content[:1000]}"
-                                embs = await ai_service.get_embeddings([txt_to_embed])
-                                if embs and embs[0]:
-                                    news.embedding = embs[0]
+                                logger.debug(f"   {progress_str} 🧠 同步深度分析: {news.title}")
+                                res = await ai_service.analyze_sentiment(news.title, summary)
+                                if res:
+                                    news.sentiment_score = res["score"]
+                                    news.sentiment_label = res["label"]
+                                    news.category = res.get("category", "其他")
+                                    news.region = res.get("region", "其他")
+                                    news.keywords = res["keywords"]
+                                    news.entities = res["entities"]
                             except Exception as e:
-                                logger.error(f"   {progress_str} ⚠️ 向量更新失败: {e}")
+                                logger.error(f"   {progress_str} ⚠️ 同步分析失败: {e}")
 
-                            if not news.keywords:
-                                try:
-                                    logger.debug(f"   {progress_str} 🧠 同步深度分析: {news.title}")
-                                    res = await ai_service.analyze_sentiment(news.title, summary)
-                                    if res:
-                                        news.sentiment_score = res["score"]
-                                        news.sentiment_label = res["label"]
-                                        news.category = res.get("category", "其他")
-                                        news.region = res.get("region", "其他")
-                                        news.keywords = res["keywords"]
-                                        news.entities = res["entities"]
-                                except Exception as e:
-                                    logger.error(f"   {progress_str} ⚠️ 同步分析失败: {e}")
-
-                            db.add(news)
-                            await db.commit()
-                            count += 1
-                except Exception as e:
-                    logger.error(f"   {progress_str} ⚠️ 处理异常 ({news.title}): {e}")
+                        db.add(news)
+                        await db.commit()
+                        count += 1
+            except Exception as e:
+                logger.error(f"   {progress_str} ⚠️ 处理异常 ({news.title}): {e}")
 
         logger.info(f"✅ 自动摘要完成，共处理 {count} 条")
 
@@ -335,20 +312,8 @@ async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = 
     except Exception as e:
         logger.error(f"❌ 任务执行异常: {e}")
     finally:
-        # 深度资源清理
-        try:
-            # 1. 清理报表服务缓存
-            report_service.clear_local_cache()
-            
-            # 2. 释放数据库连接池
-            await dispose_engine()
-            
-            # 3. 强制 GC
-            gc.collect()
-            
-            logger.info("🧹 [Cleanup] 资源已深度释放 (缓存/DB连接池/GC)")
-        except Exception as e:
-            logger.error(f"❌ 资源释放异常: {e}")
+        gc.collect()
+
 
 async def scheduled_task() -> None:
     """
@@ -364,38 +329,14 @@ async def scheduled_task() -> None:
 
     logger.info("⏰ 定时任务调度器启动...")
 
-    state = _load_scheduler_state()
-
-    def parse_dt(key, default):
-        val = state.get(key)
-        if val:
-            try:
-                return datetime.fromisoformat(val)
-            except: pass
-        return default
-        
-    def parse_date(key):
-        val = state.get(key)
-        if val:
-            try:
-                return datetime.fromisoformat(val).date()
-            except: pass
-        return None
-
-    last_periodic_run = parse_dt("last_periodic_run", datetime.min)
-    last_topic_run = parse_dt("last_topic_run", datetime.min)
-    
-    last_daily_final = parse_date("last_daily_final")
-    last_weekly_final = parse_date("last_weekly_final")
-    last_monthly_final = parse_date("last_monthly_final")
-
-    logger.info(f"📊 调度状态已加载: 上次运行={last_periodic_run}")
+    last_periodic_run = datetime.min
+    last_topic_run = datetime.min
+    last_daily_final = None
+    last_weekly_final = None
+    last_monthly_final = None
 
     while True:
         try:
-            should_restart = False
-            state_changed = False
-
             if not await check_db_connection():
                 logger.warning("⚠️ 数据库连接异常，定时任务暂停运行，等待恢复...")
                 await asyncio.sleep(60)
@@ -418,9 +359,6 @@ async def scheduled_task() -> None:
                 last_periodic_run = datetime.now()
                 if should_run_topics:
                     last_topic_run = datetime.now()
-                
-                state_changed = True
-                should_restart = True
 
             if now.hour == 23 and now.minute == 58:
                 if last_daily_final != now.date():
@@ -428,7 +366,6 @@ async def scheduled_task() -> None:
                     await report_service.generate_and_cache_global_report("daily")
                     last_daily_final = now.date()
                     gc.collect()
-                    state_changed = True
 
             if now.weekday() == 6 and now.hour == 23 and now.minute == 55:
                 if last_weekly_final != now.date():
@@ -436,7 +373,6 @@ async def scheduled_task() -> None:
                     await report_service.generate_and_cache_global_report("weekly")
                     last_weekly_final = now.date()
                     gc.collect()
-                    state_changed = True
 
             tomorrow = now + timedelta(days=1)
             if tomorrow.day == 1 and now.hour == 23 and now.minute == 50:
@@ -445,28 +381,11 @@ async def scheduled_task() -> None:
                     await report_service.generate_and_cache_global_report("monthly")
                     last_monthly_final = now.date()
                     gc.collect()
-                    state_changed = True
-
-            if state_changed:
-                new_state = {
-                    "last_periodic_run": last_periodic_run.isoformat(),
-                    "last_topic_run": last_topic_run.isoformat(),
-                    "last_daily_final": last_daily_final.isoformat() if last_daily_final else None,
-                    "last_weekly_final": last_weekly_final.isoformat() if last_weekly_final else None,
-                    "last_monthly_final": last_monthly_final.isoformat() if last_monthly_final else None,
-                }
-                _save_scheduler_state(new_state)
-
-            if should_restart:
-                logger.info("♻️ [Schedule] 任务周期结束，执行系统自动重启以释放内存...")
-                schedule_restart(delay_seconds=3)
-                await asyncio.sleep(60)
-                continue
 
         except AIConfigurationError as e:
             logger.error(f"🛑 配置错误: {e} 请检查 config.yaml 是否配置正确")
             logger.warning("⚠️ 系统将进入维护模式，每 5 分钟自动重启服务检查一次...")
-            await asyncio.sleep(30)
+            await asyncio.sleep(300)
             
             # 重新加载配置
             from app.core.config import reload_settings
@@ -576,9 +495,9 @@ async def reanalyze_all_categories() -> Dict:
                     await db.commit()
                     success_count = sum(1 for r in results if r)
                     count += success_count
-                    logger.debug(f"   Processed batch {i} - {i + batch_size}, success: {success_count}")
+                    logger.debug(f"   处理批次 {i} - {i + batch_size}，成功: {success_count}")
                 except Exception as e:
-                    logger.error(f"   ❌ Batch commit failed: {e}")
+                    logger.error(f"   ❌ 批次提交失败: {e}")
                     await db.rollback()
                 
                 # 主动回收内存

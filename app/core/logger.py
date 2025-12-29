@@ -131,13 +131,6 @@ def setup_logger(name: str) -> logging.Logger:
     log_level = _resolve_level(settings.LOG_LEVEL)
     logger.setLevel(log_level)
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(log_level)
-
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
     return logger
 
 

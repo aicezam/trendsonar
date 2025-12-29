@@ -7,7 +7,7 @@
 
 from typing import Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy import desc, select, asc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,89 @@ from app.models.topic import Topic, TopicTimelineItem
 from app.services.topic_service import topic_service
 
 router = APIRouter(prefix="/api", tags=["topics"])
+
+
+from pydantic import BaseModel
+
+class TopicCreate(BaseModel):
+    name: str
+
+class TopicUpdate(BaseModel):
+    name: str
+
+@router.post("/topics/manual_create")
+async def manual_create_topic(
+    payload: TopicCreate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_access)
+) -> Dict:
+    """
+    手动创建专题并触发扫描（仅管理员）
+    """
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="专题名称不能为空")
+        
+    try:
+        # 创建专题但不立即扫描，避免阻塞接口
+        topic = await topic_service.create_manual_topic(db, payload.name.strip(), trigger_scan=False)
+        
+        # 显式提交事务，确保后台任务能读到最新数据
+        await db.commit()
+        await db.refresh(topic)
+        
+        # 添加后台任务进行扫描，并允许包含已归类的新闻
+        background_tasks.add_task(topic_service.run_topic_scan_in_background, topic.id, include_used=True)
+        
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    return {
+        "message": "专题创建成功，系统正在后台扫描匹配相关新闻...",
+        "topic": {
+            "id": topic.id,
+            "name": topic.name,
+            "status": topic.status
+        }
+    }
+
+@router.patch("/topics/{topic_id}")
+async def update_topic(
+    topic_id: int,
+    payload: TopicUpdate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_access)
+) -> Dict:
+    """
+    更新专题名称（仅管理员）
+    """
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="专题名称不能为空")
+        
+    try:
+        # 更新名称但不立即扫描
+        topic = await topic_service.update_topic_name(db, topic_id, payload.name.strip(), trigger_scan=False)
+        
+        # 显式提交事务，确保后台任务能读到最新数据
+        await db.commit()
+        await db.refresh(topic)
+        
+        # 添加后台任务进行扫描，并允许包含已归类的新闻
+        background_tasks.add_task(topic_service.run_topic_scan_in_background, topic.id, include_used=True)
+        
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+        
+    return {
+        "message": "专题名称已更新，系统正在后台重新扫描匹配相关新闻...",
+        "topic": {
+            "id": topic.id,
+            "name": topic.name
+        }
+    }
 
 
 @router.get("/topics/list")
@@ -86,7 +169,7 @@ async def get_topic_detail(
     )
     items = (await db.execute(items_stmt)).scalars().all()
 
-    # Collect all related news IDs from both legacy news_id and new sources field
+    # 收集所有相关的新闻 ID，包括旧的 news_id 和新的 sources 字段
     news_ids = set()
     for i in items:
         if i.news_id:

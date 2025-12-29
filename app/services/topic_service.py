@@ -199,8 +199,16 @@ class TopicService:
 
             # === Phase 2: 扫描其余现有专题 ===
             logger.info("🔍 [Phase 2] 扫描其余现有专题，寻找潜在更新...")
+            
+            # 规则：对于最近 N 天内更新过的活跃专题，尝试从高热度新闻池中寻找匹配更新
+            check_cutoff_date = datetime.now() - timedelta(days=settings.TOPIC_UPDATE_LOOKBACK_DAYS)
+            
             for existing_t, existing_vec in active_topic_vecs:
                 if existing_t.id in processed_topic_ids:
+                    continue
+
+                # 检查专题更新时间，如果太久没更新（且不是本次新创建的），则跳过以节省资源
+                if existing_t.updated_time and existing_t.updated_time < check_cutoff_date:
                     continue
                 
                 # 使用现有专题的信息进行匹配
@@ -235,6 +243,157 @@ class TopicService:
             gc.collect()
             logger.info("✅ [TopicService] 内存清理完成")
             
+    async def run_topic_scan_in_background(self, topic_id: int, include_used: bool = False):
+        """
+        后台任务：为指定专题执行扫描
+        """
+        try:
+            async with AsyncSessionLocal() as db:
+                topic = await db.get(Topic, topic_id)
+                if topic:
+                    await self._trigger_topic_scan(db, topic, include_used=include_used)
+        except Exception as e:
+            logger.error(f"后台扫描任务失败: {e}", exc_info=True)
+
+    async def create_manual_topic(self, db: AsyncSession, name: str, trigger_scan: bool = True) -> Topic:
+        """
+        手动创建专题
+        :param trigger_scan: 是否立即触发扫描（默认 True）。如果在 API 调用中，建议设为 False 并使用后台任务。
+        """
+        # 1. 检查是否存在同名专题
+        existing = (await db.execute(select(Topic).where(Topic.name == name))).scalar_one_or_none()
+        if existing:
+            raise ValueError(f"专题 '{name}' 已存在，无法重复创建。")
+
+        # 2. 创建新专题
+        # 生成向量
+        t_embs = await self.ai.get_embeddings([name])
+        t_vec = t_embs[0] if t_embs and t_embs[0] else []
+        
+        new_topic = Topic(
+            name=name,
+            summary="手动创建专题，正在扫描相关新闻...",
+            start_time=datetime.now(),
+            updated_time=datetime.now(),
+            heat_score=0,
+            embedding=t_vec,
+            status="active"
+        )
+        db.add(new_topic)
+        await db.flush()
+        logger.info(f"手动创建专题 '{name}' 成功 (ID: {new_topic.id})")
+        target_topic = new_topic
+
+        # 3. 触发扫描更新 (复用 Phase 2 逻辑)
+        if trigger_scan:
+            await self._trigger_topic_scan(db, target_topic, include_used=True) # 手动创建默认允许抢占/包含已归类新闻
+            
+        return target_topic
+
+    async def update_topic_name(self, db: AsyncSession, topic_id: int, new_name: str, trigger_scan: bool = True) -> Topic:
+        """
+        更新专题名称
+        :param trigger_scan: 是否立即触发扫描。
+        """
+        topic = (await db.execute(select(Topic).where(Topic.id == topic_id))).scalar_one_or_none()
+        if not topic:
+            raise ValueError("专题不存在")
+            
+        # 查重
+        existing = (await db.execute(select(Topic).where(Topic.name == new_name))).scalar_one_or_none()
+        if existing and existing.id != topic_id:
+            raise ValueError(f"专题名 '{new_name}' 已被其他专题占用")
+            
+        old_name = topic.name
+        topic.name = new_name
+        
+        # 重新生成向量
+        t_embs = await self.ai.get_embeddings([new_name])
+        t_vec = t_embs[0] if t_embs and t_embs[0] else []
+        topic.embedding = t_vec
+        
+        db.add(topic)
+        await db.flush()
+        
+        logger.info(f"专题 '{old_name}' 重命名为 '{new_name}'，已更新向量")
+        
+        # 触发扫描
+        if trigger_scan:
+            logger.info("正在触发重新扫描...")
+            await self._trigger_topic_scan(db, topic, include_used=True) # 重命名也允许扩大范围
+        
+        return topic
+
+    async def _trigger_topic_scan(self, db: AsyncSession, target_topic: Topic, include_used: bool = False):
+        """
+        内部复用逻辑：对指定专题执行 Phase 2 扫描
+        :param include_used: 是否包含已经被其他专题归类的新闻。
+                             手动触发（创建/改名）时建议为 True，以便将相关新闻“吸纳”进来。
+        """
+        # 准备排除列表
+        exclude_ids = set()
+        
+        if include_used:
+            # 如果允许包含已归类新闻，则只排除 *当前专题* 已经有的新闻（避免重复处理）
+            current_ids_stmt = select(TopicTimelineItem.news_id).where(TopicTimelineItem.topic_id == target_topic.id).where(TopicTimelineItem.news_id.isnot(None))
+            current_ids = set((await db.execute(current_ids_stmt)).scalars().all())
+            exclude_ids = current_ids
+            logger.info(f"🔍 [Scan] 模式: 包含已归类新闻 (只排除当前专题已有的 {len(exclude_ids)} 条)")
+        else:
+            # 默认模式：排除所有已归类新闻
+            used_stmt = select(TopicTimelineItem.news_id).where(TopicTimelineItem.news_id.isnot(None))
+            used_ids_res = await db.execute(used_stmt)
+            exclude_ids = set(used_ids_res.scalars().all())
+            logger.info(f"🔍 [Scan] 模式: 排除所有已归类新闻 (共 {len(exclude_ids)} 条)")
+
+        days = settings.TOPIC_LOOKBACK_DAYS
+        start_date = datetime.now() - timedelta(days=days)
+        
+        pool_stmt = (
+            select(News)
+            .where(News.publish_date >= start_date)
+            .where(News.id.notin_(exclude_ids) if exclude_ids else True)
+            .order_by(desc(News.heat_score))
+            .limit(settings.TOPIC_RECALL_POOL_SIZE)
+        )
+        news_pool = (await db.execute(pool_stmt)).scalars().all()
+        
+        if not news_pool:
+            logger.info("📭 没有待处理的新闻，跳过专题扫描")
+            return
+
+        # 确保池中新闻有向量
+        pool_vecs = await self._ensure_news_embeddings_batch(db, news_pool)
+        
+        # 确保专题有向量
+        if not target_topic.embedding:
+             logger.warning("专题无向量，跳过扫描")
+             return
+
+        # 执行匹配
+        logger.info(f"🔍 [Scan] 正在为专题 '{target_topic.name}' 扫描相关新闻 (Pool: {len(news_pool)})...")
+        
+        # 手动/定向扫描时，适当降低向量匹配阈值（0.6 -> 0.38），依靠 AI 二次核验来把关
+        # 这样能召回更多语义相关但向量距离稍远的新闻
+        manual_threshold = 0.20
+        
+        result_topic = await self._match_and_update_topic(
+            db, 
+            target_topic.name, 
+            target_topic.summary or target_topic.name, 
+            target_topic.embedding, 
+            target_topic, 
+            news_pool, 
+            pool_vecs, 
+            exclude_ids, # 传递作为 used_ids，用于内部过滤
+            match_threshold=manual_threshold
+        )
+        
+        if result_topic:
+             logger.info(f"✅ 专题 '{target_topic.name}' 扫描更新完成")
+        else:
+             logger.info(f"专题 '{target_topic.name}' 未匹配到新的相关新闻")
+
     async def regenerate_topic_overview_action(self, db: AsyncSession, topic_id: int) -> Optional[str]:
         """
         手动触发：重新生成专题综述
@@ -297,7 +456,8 @@ class TopicService:
         existing_topic_obj: Optional[Topic],
         news_pool: List[News],
         pool_vecs: Dict[int, List[float]],
-        used_ids: Set[int]
+        used_ids: Set[int],
+        match_threshold: float = settings.TOPIC_MATCH_THRESHOLD
     ) -> Optional[Topic]:
         """
         核心逻辑：根据专题信息（名称、描述、向量），在 news_pool 中寻找匹配新闻，
@@ -307,6 +467,8 @@ class TopicService:
         
         # 1. 向量初筛候选新闻
         candidates = []
+        max_sim_found = 0.0
+        
         for n in news_pool:
             # 跳过已经在当前轮次处理过的新闻
             if n.id in used_ids:
@@ -318,8 +480,10 @@ class TopicService:
             
             # 计算相似度
             sim = self._cosine_similarity(t_vec, n_vec)
+            if sim > max_sim_found:
+                max_sim_found = sim
             
-            if sim > settings.TOPIC_MATCH_THRESHOLD: # 初筛阈值
+            if sim > match_threshold: # 初筛阈值
                 candidates.append((n, sim))
         
         # 按相似度排序
@@ -329,11 +493,11 @@ class TopicService:
         
         # 如果是新专题，且候选不足，则跳过；如果是合并旧专题，候选不足也无妨（只是本次没更新）
         if not is_duplicate and len(candidates) <= settings.TOPIC_MIN_NEWS_COUNT:
-            logger.info(f"   ⚠️ [新专题] 初筛候选新闻不足 ({len(candidates)} <= {settings.TOPIC_MIN_NEWS_COUNT})，跳过")
+            logger.info(f"   ⚠️ [新专题] 初筛候选新闻不足 ({len(candidates)} <= {settings.TOPIC_MIN_NEWS_COUNT} / MaxSim: {max_sim_found:.3f})，跳过")
             return None
         
         if is_duplicate and not candidates:
-            logger.info(f"   ⚠️ [旧专题合并] 无候选新闻，跳过")
+            logger.info(f"   ⚠️ [旧专题合并] 无候选新闻 (MaxSim: {max_sim_found:.3f} / Threshold: {match_threshold})，跳过")
             return None
 
         # 2. AI 批量核验
@@ -354,26 +518,14 @@ class TopicService:
                 logger.info(f"   ✅ [Match] {candidates[idx][0].title[:30]}... (Reason: {reason})")
                 confirmed_news.append(candidates[idx][0])
             else:
-                # Optional: Log mismatch if verbose
+                # 可选: 详细模式下记录不匹配信息
                 logger.info(f"   ❌ [Mismatch] {candidates[idx][0].title[:30]}... (Reason: {reason})")
 
-        # === 规则调整：对于已有专题，仅更新“今日”的新闻 ===
+        # === 规则调整：对于已有专题，使用 Top N 热度新闻池进行更新 ===
         if is_duplicate:
-            today_date = datetime.now().date()
-            today_news = []
-            for n in confirmed_news:
-                # 假设 publish_date 为空则视为非今日（或保留？通常爬虫数据应有时间）
-                if n.publish_date and n.publish_date.date() == today_date:
-                    today_news.append(n)
-            
-            if not today_news:
-                logger.info(f"   ⏩ [旧专题] 经日期过滤后无今日新闻，跳过更新")
-                return None
-            
-            if len(today_news) < len(confirmed_news):
-                logger.info(f"   🗓️ [Date Filter] 过滤非今日新闻，剩余 {len(today_news)}/{len(confirmed_news)} 条")
-            
-            confirmed_news = today_news
+             if not confirmed_news:
+                 logger.info(f"   ⏩ [旧专题] 在 Top {settings.TOPIC_AGGREGATION_TOP_N} 新闻中未找到匹配项")
+                 return None
 
         # 再次检查数量限制
         # 新专题：必须满足最小数量限制
@@ -466,7 +618,7 @@ class TopicService:
                 "summary": n.summary or (n.content or "")[:200],
                 "source": n.source,
                 "url": n.url,
-                "publish_date": n.publish_date  # Added for precise time
+                "publish_date": n.publish_date  # 为了精确时间添加
             })
         
         # 遍历每一天，调用 AI 合成事件
@@ -580,7 +732,7 @@ class TopicService:
                 if not primary_news and final_news_list:
                      primary_news = final_news_list[0]
 
-                # Determine event time from primary news if available
+                # 如果可用，从主要新闻确定事件时间
                 event_time = datetime.strptime(d_str, "%Y-%m-%d")
                 if primary_news and primary_news.get("publish_date"):
                     event_time = primary_news["publish_date"]
@@ -666,9 +818,8 @@ class TopicService:
             
     async def scheduled_topic_task(self) -> None:
         """
-        Scheduled entry point.
-        This runs independently if configured, but now we prefer pipeline orchestration.
-        We can keep it but maybe it should just call refresh_topics.
+        后台定时任务：周期性自动执行专题追踪（生成新专题/更新旧专题）。
+        作为独立守护进程运行，确保即使没有外部触发，系统也能按配置的时间间隔自动刷新专题数据。
         """
         logger.info("⏰ 专题追踪定时任务启动...")
         while True:
@@ -683,20 +834,20 @@ class TopicService:
                     await asyncio.sleep(60)
                     continue
 
-                # Run every 4 hours or similar
-                # But user wants it after summary generation.
-                # So this might be just a backup or manual trigger handler
-                await asyncio.sleep(4 * 3600) 
+                # 读取配置的间隔时间（小时），默认为 4 小时
+                interval = getattr(settings, "TOPIC_SCHEDULE_INTERVAL_HOURS", 4)
+                await asyncio.sleep(interval * 3600) 
+                
                 await self.refresh_topics()
             except AIConfigurationError as e:
                 logger.error(f"🛑 配置错误: {e} 请检查 config.yaml 是否配置正确")
                 logger.warning("⚠️ 专题追踪任务进入维护模式，每 5 分钟尝试重启服务检查一次...")
                 await asyncio.sleep(300)
             except Exception as e:
-                logger.error(f"Scheduled topic task error: {e}")
+                logger.error(f"专题追踪定时任务错误: {e}")
                 await asyncio.sleep(300)
 
-    # Helper methods
+    # 辅助方法
     async def _ensure_news_embeddings_batch(self, db: AsyncSession, news_list: List[News]) -> Dict[int, List[float]]:
         out = {}
         to_embed_indices = []
@@ -711,7 +862,7 @@ class TopicService:
                 to_embed_indices.append(idx)
         
         if texts:
-            # Batch embedding call (chunking if needed)
+            # 批量向量化调用（如果需要分块）
             batch_size = 10
             for i in range(0, len(texts), batch_size):
                 batch_texts = texts[i : i + batch_size]
@@ -751,7 +902,7 @@ class TopicService:
                         t = topics[idx]
                         t.embedding = vec
                         db.add(t)
-                        out[idx] = (t, vec) # Update the tuple in out list
+                        out[idx] = (t, vec) # 更新输出列表中的元组
             except Exception as e:
                  logger.error(f"   ⚠️ 专题向量化失败: {e}")
             await db.flush()
@@ -761,7 +912,7 @@ class TopicService:
         if (news.summary or "").strip():
             return
 
-        # Try to crawl content if missing
+        # 如果缺失，尝试抓取内容
         if not news.content or len(news.content) < 50:
              try:
                 content = await crawler_service.crawl_content(news.url)
@@ -772,7 +923,7 @@ class TopicService:
         
         content = news.content or ""
         if len(content) < 50:
-            return # Too short to summarize
+            return # 内容太短，无法总结
             
         try:
             summary = await self.ai.generate_summary(news.title, content, max_words=200)
@@ -782,6 +933,6 @@ class TopicService:
         except Exception:
             pass
 
-# Global instance
+# 全局实例
 from app.services.ai_service import ai_service
 topic_service = TopicService(ai=ai_service)

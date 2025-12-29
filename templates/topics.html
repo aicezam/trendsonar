@@ -5,11 +5,16 @@
 
 {% block content %}
 <div class="app-container page-wrap">
-    <div class="page-title">专题追踪</div>
+    <div class="page-title">
+        专题追踪
+        <button id="addTopicBtn" class="btn-primary" style="display:none; float: right; font-size: 14px; padding: 6px 12px;">+ 手动创建专题</button>
+    </div>
     <div class="hint">自动生成/更新专题并沉淀时间轴。</div>
     <div id="loading" class="loading">加载中...</div>
     <div id="empty" class="empty" style="display:none;">暂无专题。请等待全流程任务运行后自动生成。</div>
     <div id="list" class="topic-list"></div>
+    <div id="loading-more" style="display:none; text-align: center; padding: 20px; color: #666;">正在加载更多数据...</div>
+    <div id="no-more-data" style="display:none; text-align: center; padding: 20px; color: #999;">没有更多数据了</div>
 </div>
 {% endblock %}
 
@@ -43,68 +48,200 @@
         try {
             const resp = await fetch(`/api/topics/${id}`, { method: "DELETE" });
             if (!resp.ok) throw new Error("删除失败");
-            loadTopics();
+            loadTopics(); // 刷新列表
         } catch (err) {
-            alert(err.message);
+            alert("删除失败: " + err.message);
         }
     }
 
-    async function loadTopics() {
+    async function manualCreateTopic() {
+        const name = prompt("【手动创建专题】\n\n注意：\n1. 创建后系统将立即在后台扫描过去几天的新闻进行匹配。\n2. 专题名称越精准，匹配效果越好。\n\n请输入新专题名称（如：俄乌冲突事件全纪录）：");
+        if (!name) return;
+        if (name.trim().length < 2) {
+            alert("名称太短");
+            return;
+        }
+
+        try {
+            document.getElementById("addTopicBtn").disabled = true;
+            document.getElementById("addTopicBtn").textContent = "创建中...";
+            
+            const resp = await fetch("/api/topics/manual_create", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: name.trim() })
+            });
+
+            if (!resp.ok) {
+                const err = await resp.json();
+                throw new Error(err.detail || "请求失败");
+            }
+            
+            alert("✅ 专题创建成功！\n\n系统正在后台根据新专题名称和向量扫描相关新闻，请稍后刷新查看结果。");
+            loadTopics();
+        } catch (e) {
+            alert("创建失败: " + e.message);
+        } finally {
+            const btn = document.getElementById("addTopicBtn");
+            btn.disabled = false;
+            btn.textContent = "+ 手动创建专题";
+        }
+    }
+
+    async function editTopic(e, id, oldName) {
+        e.stopPropagation();
+        const newName = prompt(
+            `【修改专题名称】\n\n当前名称：${oldName}\n\n⚠️ 警告：\n修改名称将重新生成该专题的 AI 向量，并触发重新扫描。\n这可能会导致：\n1. 新闻匹配逻辑发生变化\n2. 部分旧新闻可能不再匹配（取决于后续逻辑）\n3. 系统负载短暂上升\n\n请输入新的名称：`,
+            oldName
+        );
+        
+        if (!newName || newName === oldName) return;
+        if (newName.trim().length < 2) {
+            alert("名称太短");
+            return;
+        }
+
+        try {
+            const resp = await fetch(`/api/topics/${id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: newName.trim() })
+            });
+
+            if (!resp.ok) {
+                const err = await resp.json();
+                throw new Error(err.detail || "请求失败");
+            }
+
+            alert("✅ 修改成功！\n\n系统已重新生成向量并触发后台重新扫描，请稍后查看更新结果。");
+            loadTopics();
+        } catch (e) {
+            alert("修改失败: " + e.message);
+        }
+    }
+
+    if (IS_ADMIN) {
+        const btn = document.getElementById("addTopicBtn");
+        btn.style.display = "inline-block";
+        btn.onclick = manualCreateTopic;
+    }
+
+    let currentPage = 1;
+    const pageSize = 10;
+    let isLoading = false;
+    let hasMore = true;
+
+    function renderTopicCard(t) {
+        const card = el("div", { class: "topic-card" });
+        card.addEventListener("click", () => {
+            window.location.href = `/topics/${t.id}`;
+        });
+
+        const header = el("div", { style: "display: flex; justify-content: space-between; align-items: flex-start;" });
+        
+        const nameDiv = el("div", { class: "topic-name", text: t.name || "未命名专题", style: "flex: 1;" });
+        header.appendChild(nameDiv);
+
+        if (IS_ADMIN) {
+            const editBtn = el("button", {
+                text: "编辑",
+                style: "background: #3b82f6; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 10px; white-space: nowrap;",
+                onClick: (e) => editTopic(e, t.id, t.name)
+            });
+            header.appendChild(editBtn);
+
+            const delBtn = el("button", { 
+                text: "删除",
+                style: "background: #ef4444; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 5px; white-space: nowrap;",
+                onClick: (e) => deleteTopic(e, t.id, t.name)
+            });
+            header.appendChild(delBtn);
+        }
+        card.appendChild(header);
+
+        const meta = el("div", { class: "meta" });
+        meta.appendChild(el("span", { class: "tag", text: `发布时间 ${fmtTime(t.start_time)}` }));
+        meta.appendChild(el("span", { class: "tag", text: `更新时间 ${fmtTime(t.updated_time)}` }));
+        card.appendChild(meta);
+
+        card.appendChild(el("div", { class: "topic-summary", text: t.summary || "暂无描述" }));
+        return card;
+    }
+
+    async function loadTopics(page = 1) {
+        if (isLoading) return;
+        isLoading = true;
+
         const loading = document.getElementById("loading");
         const empty = document.getElementById("empty");
         const list = document.getElementById("list");
-        loading.style.display = "block";
-        empty.style.display = "none";
-        list.innerHTML = "";
+        const loadingMore = document.getElementById("loading-more");
+        const noMoreData = document.getElementById("no-more-data");
+
+        if (page === 1) {
+            loading.style.display = "block";
+            empty.style.display = "none";
+            list.innerHTML = "";
+            loadingMore.style.display = "none";
+            noMoreData.style.display = "none";
+            hasMore = true;
+        } else {
+            loadingMore.style.display = "block";
+        }
 
         try {
-            const resp = await fetch("/api/topics/list?size=100", { method: "GET", cache: "no-store" });
+            const resp = await fetch(`/api/topics/list?page=${page}&size=${pageSize}`, { method: "GET", cache: "no-store" });
             if (!resp.ok) throw new Error("请求失败");
             const data = await resp.json();
             const items = (data && data.items) || [];
-            if (!items.length) {
-                empty.style.display = "block";
-                return;
+
+            if (page === 1) {
+                loading.style.display = "none";
+                if (!items.length) {
+                    empty.style.display = "block";
+                    hasMore = false;
+                    isLoading = false;
+                    return;
+                }
+            } else {
+                loadingMore.style.display = "none";
+            }
+
+            if (items.length < pageSize) {
+                hasMore = false;
+                if (items.length > 0 || page > 1) {
+                     noMoreData.style.display = "block";
+                }
+            } else {
+                hasMore = true;
             }
 
             for (const t of items) {
-                const card = el("div", { class: "topic-card" });
-                card.addEventListener("click", () => {
-                    window.location.href = `/topics/${t.id}`;
-                });
-
-                const header = el("div", { style: "display: flex; justify-content: space-between; align-items: flex-start;" });
-                
-                const nameDiv = el("div", { class: "topic-name", text: t.name || "未命名专题", style: "flex: 1;" });
-                header.appendChild(nameDiv);
-
-                if (IS_ADMIN) {
-                    const delBtn = el("button", { 
-                        text: "删除",
-                        style: "background: #ef4444; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 10px; white-space: nowrap;",
-                        onClick: (e) => deleteTopic(e, t.id, t.name)
-                    });
-                    header.appendChild(delBtn);
-                }
-                card.appendChild(header);
-
-                const meta = el("div", { class: "meta" });
-                meta.appendChild(el("span", { class: "tag", text: `发布时间 ${fmtTime(t.start_time)}` }));
-                meta.appendChild(el("span", { class: "tag", text: `更新时间 ${fmtTime(t.updated_time)}` }));
-                card.appendChild(meta);
-
-                card.appendChild(el("div", { class: "topic-summary", text: t.summary || "暂无描述" }));
-
-                list.appendChild(card);
+                list.appendChild(renderTopicCard(t));
             }
+            
+            currentPage = page;
+
         } catch (e) {
-            empty.style.display = "block";
-            empty.textContent = "加载失败，请稍后重试。";
+            console.error(e);
+            if (page === 1) {
+                loading.style.display = "none";
+                empty.style.display = "block";
+                empty.textContent = "加载失败，请稍后重试。";
+            }
         } finally {
-            loading.style.display = "none";
+            isLoading = false;
         }
     }
 
-    loadTopics();
+    // Scroll listener
+    window.addEventListener('scroll', () => {
+        if (isLoading || !hasMore) return;
+        if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 100) {
+            loadTopics(currentPage + 1);
+        }
+    });
+
+    loadTopics(1);
 </script>
 {% endblock %}

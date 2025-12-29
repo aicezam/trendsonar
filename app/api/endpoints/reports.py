@@ -45,7 +45,7 @@ async def generate_global_report(period: str = Query("weekly", pattern="^(daily|
     """
 
     await report_service.generate_and_cache_global_report(period)
-    return {"status": "ok", "message": f"Global {period} report generated"}
+    return {"status": "ok", "message": f"全局 {period} 报表已生成"}
 
 
 @router.get("/history")

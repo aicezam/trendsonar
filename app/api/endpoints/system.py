@@ -84,7 +84,7 @@ def _get_news_sources_path() -> Path:
     for p in candidates:
         if p.exists():
             return p
-    # Default to data/news_sources.json
+    # 默认为 data/news_sources.json
     return candidates[0]
 
 
@@ -225,13 +225,13 @@ async def chat_api(
                     yield chunk
                 
                 if count == 0:
-                    logger.warning("Stream wrapper yielded 0 chunks, sending fallback message")
+                    logger.warning("流式包装器返回 0 个块，发送兜底消息")
                     yield "AI 未返回任何内容，请查看后台日志，可能有敏感信息，请切换模型重试"
             except Exception as e:
-                logger.error(f"Stream wrapper error: {e}")
+                logger.error(f"流式包装器错误: {e}")
                 yield f"Error: {e}"
             finally:
-                logger.info(f"Stream wrapper finished, total chunks: {count}")
+                logger.info(f"流式包装器结束，总块数: {count}")
 
         return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
 

@@ -156,9 +156,9 @@ class AIService:
                 elif str(settings.BACKUP_AI_BASE_URL) in str(client.base_url):
                     semaphore = self.backup_sem
 
-            # DEBUG Log for prompt
+            # 调试日志：记录提示词
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"🔵 [LLM Request] Model: {model}\nSystem: {system}\nPrompt: {prompt[:2000]}...")
+                logger.debug(f"🔵 [LLM 请求] 模型: {model}\n系统提示词: {system}\n用户提示词: {prompt[:2000]}...")
 
             async def do_call():
                 return await client.chat.completions.create(
@@ -172,7 +172,7 @@ class AIService:
                     extra_body=extra_body if extra_body else None,
                 )
 
-            # Retry logic
+            # 重试逻辑
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -184,7 +184,7 @@ class AIService:
                     
                     content = response.choices[0].message.content
                     if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(f"🟢 [LLM Response] Model: {model}\nContent: {content[:2000]}...")
+                        logger.debug(f"🟢 [LLM 响应] 模型: {model}\n内容: {content[:2000]}...")
                     
                     if not content:
                          logger.warning(f"⚠️ AI 返回内容为空 ({model})")
@@ -199,17 +199,17 @@ class AIService:
                     await asyncio.sleep(wait_time)
                 
                 except APIStatusError as e:
-                    # 401: Invalid API Key - Fatal error
+                    # 401: API Key 无效 - 致命错误
                     if e.status_code == 401:
                         logger.error(f"❌ AI 认证失败 (401) - API Key 无效 ({model}): {e}")
                         raise AIConfigurationError(f"AI API Key 无效 ({model})")
 
-                    # 400 Bad Request usually means content filter or invalid parameters
+                    # 400 Bad Request 通常意味着内容过滤或参数无效
                     if e.status_code == 400:
                         logger.warning(f"❌ AI 请求被拒绝 (400) - 可能触发敏感词过滤 ({model}): {e}")
-                        return None # Fail over to next route
+                        return None # 故障转移到下一个路由
                     
-                    # Server error, retry might help
+                    # 服务端错误，重试可能有效
                     if e.status_code >= 500:
                         if attempt == max_retries - 1:
                             raise e
@@ -251,11 +251,11 @@ class AIService:
     async def batch_evaluate_topic_quality(self, topics: List[Dict[str, str]], existing_topics: List[Dict[str, str]] = None) -> List[Dict[str, str]]:
         """
         输入:
-        - topics: List of {"name":..., "description":...}
-        - existing_topics: List of {"name":..., "description":...} 现有专题列表（可选）
+        - topics: 专题列表 [{"name":..., "description":...}]
+        - existing_topics: 现有专题列表 [{"name":..., "description":...}] （可选）
 
         输出:
-        - List of valid topics (filtered)
+        - 经过筛选的有效专题列表
 
         作用:
         - 批量评估专题质量，过滤掉过于宽泛、非具体事件、或纯粹行业趋势的专题
@@ -289,15 +289,17 @@ class AIService:
             ),
             2: (
                 "1. 【一般事件标准】（满足即可）：\n"
-                "   - **公共价值**：具有一定的公共信息价值，非纯粹的私人琐事。\n"
+                "   - **公共价值**：具有显著的公共信息价值，非纯粹的私人琐事。\n"
                 "   - **具体性**：事件描述清晰，非模糊的行业概念。\n"
-                "   - **排除项**：排除纯粹的商业广告、极小范围的无关紧要事故。允许地方性社会新闻。\n"
+                "   - **讨论度**：引起了一定范围内的讨论或关注，非无人问津的信息。\n"
+                "   - **排除项**：严格排除商业广告、极小范围的无关紧要事故、常规的日常例行报道。\n"
             ),
             3: (
                 "1. 【重大事件评估标准】（必须全部满足）：\n"
-                "   - **影响范围**：必须具有省级、全国或国际级别的影响力。仅仅影响某个小区、街道或个别公司的事件不予通过。\n"
-                "   - **持续时间**：事件预计持续发酵 3 天以上，具有长尾效应。短时的突发小事故（如无重大伤亡的车祸）不予通过。\n"
+                "   - **影响范围**：具有省级、全国级别的影响力，或在所属行业内具有重大影响。排除仅影响个别公司或小区的事件。\n"
+                "   - **持续性**：具有持续发酵的潜力，不仅仅是昙花一现的瞬间消息。\n"
                 "   - **社会热度**：属于当前社会热点，具有广泛的公众讨论度。\n"
+                "   - **特殊放行**：对于涉及邻国冲突、外交纷争等事件（如“泰柬冲突”、“朝韩局势”），属于**国际政治**范畴，无论热度如何，都应视为具有国际影响力的潜力事件予以通过。\n"
             ),
             4: (
                 "1. 【高影响力事件标准】（必须全部满足）：\n"
@@ -386,7 +388,7 @@ class AIService:
                         else:
                             logger.info(f"   ❌ [拒绝] {topic_name}: {reason}")
             else:
-                # Fallback if structure is wrong
+                # 如果结构错误则降级处理
                 logger.warning("   ⚠️ 质量评估返回格式异常，解析失败，保留所有")
                 return topics
 
@@ -416,7 +418,7 @@ class AIService:
         if not titles:
             return []
             
-        system_prompt = "你是一个专业的新闻分析师。请根据提供的新闻标题列表，聚合出近期发生的具体、细颗粒度的专题事件。"
+        system_prompt = "你是一个专业的新闻分析师。请根据提供的新闻标题列表，聚合出近期发生的具体、具有一定持续性的专题事件。"
         
         # 限制数量以防超长
         limit_n = settings.TOPIC_AGGREGATION_TOP_N
@@ -455,9 +457,13 @@ class AIService:
         elif quality_level == 3:
             criteria_desc = (
                 "**生成标准（标准）**：\n"
-                "1. **重大事件导向**：优先聚合具有**省级、全国或国际影响力**的事件。\n"
-                "2. **社会热点**：关注当前公众讨论度高、具有长尾效应的热点。\n"
-                "3. **排除地方琐事**：严禁生成地方性日常事务（如小区纠纷、普通治安案件）。\n"
+                "1. **必须生成**：涉及**国际冲突、外交纷争、战争**的事件（无论热度如何，如“泰柬冲突”）。\n"
+                "2. **重大社会热点**：具有全国性影响且讨论激烈的社会事件。\n"
+                "3. **严格排除（即使有热度也不生成）**：\n"
+                "   - **常规经济/金融波动**（如汇率涨跌、股市波动）。\n"
+                "   - **基础设施建设/通车**（如高铁开通、大桥合龙）。\n"
+                "   - **一般性自然灾害**（未造成重大人员伤亡或次生灾害的地震/天气）。\n"
+                "   - **政策征求意见/常规发布**（非正式落地或引发巨大争议的政策）。\n"
             )
         elif quality_level == 4:
             criteria_desc = (
@@ -475,25 +481,40 @@ class AIService:
             )
 
         prompt = f"""
-请分析以下新闻标题（已标注热度），识别出 {min_count} 至 {max_count} 个（严格限制数量）具体的、细颗粒度的热门专题事件。
+请分析以下新闻标题（已标注热度），识别出 {min_count} 至 {max_count} 个（严格限制数量）具体的、具有主题性的热门专题事件。
 
 {criteria_desc}
 
-**关键要求**：
-1. **严格遵守数量限制**：输出的专题数量必须在 {min_count} 到 {max_count} 之间，绝对不能超过 {max_count} 个。
-2. **优先高热度**：新闻标题前标注了 [热度:数值]，请优先聚合那些**热度高、报道量大**且符合上述生成标准的事件。
-3. **拒绝宏大叙事**：不要生成类似“资本市场与监管”、“航天与国防进展”、“国际地缘政治”这样宽泛的行业或领域名称。
-4. **具体事件导向**：专题必须指向具体的某个新闻事件（单个具体新闻事件）。例如：
-   - ❌ 错误示例：“资本市场动态”、“日方官员拥核言论及靖国神社争议”
-   - ✅ 正确示例：“证监会发布市值管理新规”、“SpaceX星舰第五次试飞”、“乌克兰东部战事升级”。
-5. **缩小范围**：名称中尽量包含具体的实体（人名、地名、机构名）或定语，以限定范围。
-6. **忽略琐碎**：忽略过于孤立或低价值的新闻。
-7. **时间范围**：专题事件必须从最近的时间窗口内获取。
+**专题命名标准化指南（必须严格执行）**：
 
-对于每个专题，提供：
-1. "name": 具体的专题名称（中文，不超过20字，必须具体、细化）。
-2. "description": 该专题事件的简要描述（中文，50-100字，纯文本格式，不含Markdown或HTML）。
-   - 注意：在 description 字符串内部，请勿使用英文双引号 "，如需引用请使用中文引号 “ ” 或单引号 '，以免破坏 JSON 格式。
+1. **标题结构公式**：
+   - **事件型**：`[核心主体] + [事件性质] + [聚合后缀]`
+      * **聚合后缀**（必须包含）：**全纪录、进程、始末、风波、争议、后续影响、最新进展、灾情及救援**
+      * ❌ **错误示例**（禁止像单条新闻标题）：
+        - 泰柬签署停火联合声明
+      * ✅ **正确示例**（必须体现专题性）：
+        - 泰柬边境冲突始末
+      
+    - **会议/活动型**：`[年份] + [活动全称/简称] + [核心看点]`
+      * 例：2024苹果秋季发布会：iPhone16系列发布
+    
+    - **负面/争议型**：`[主体] + [争议行为] + [及影响]`
+     * 例：高市早苗错误言论及影响 / 日本核污水排海全记录
+ 
+ 2. **核心原则**：
+    - **拒绝动作描述**：不要使用“某人做了某事”或“某事发生”这种陈述句作为专题名。
+    - **必须体现时间跨度**：专题名应暗示这是一系列事件的集合，而不仅仅是一个瞬间动作。
+    - **字数限制**：8-20 个汉字。
+    - **客观中立**：避免情绪化形容词。
+
+ 3. **关键要求**：
+    - **严格遵守数量限制**：输出的专题数量必须在 {min_count} 到 {max_count} 之间。
+    - **优先高热度**：优先聚合热度高、报道量大的事件。
+    - **拒绝宏大叙事**：不要生成“国际地缘政治”、“科技新闻汇总”等宽泛名称。
+    - **拒绝单条新闻标题**：如果生成的名称看起来像一条新闻标题，请立即重写，加上“全纪录”、“进程”、“始末”等后缀。
+    - **实体限定**：名称中必须包含核心实体（人名、地名、机构名）。
+    - **时间范围**：专题事件必须从最近的时间窗口内获取。
+    - **不要生成**：非重大、非持续性事件专题。
 
 新闻标题列表：
 {titles_str}
@@ -840,7 +861,7 @@ class AIService:
             if res:
                 return res
             
-            # If we are here, the current route failed or returned empty content
+            # 如果运行到这里，说明当前路由失败或返回空内容
             if i < len(routes) - 1:
                 next_route = routes[i+1]
                 logger.warning(f"⚠️ 路由 {route['model']} ({route['type']}) 调用失败或返回空，尝试切换到 -> {next_route['model']} ({next_route['type']})")
@@ -853,18 +874,18 @@ class AIService:
     async def verify_topic_match_batch(self, tasks: List[Dict[str, str]]) -> List[Tuple[bool, str]]:
         """
         输入:
-        - tasks: List of {"topic_name": ..., "topic_summary": ..., "news_title": ..., "news_summary": ...}
+        - tasks: 任务列表，包含 {"topic_name": ..., "topic_summary": ..., "news_title": ..., "news_summary": ...}
 
         输出:
-        - List of (is_match, reason)
+        - 结果列表，包含 (是否匹配, 理由)
         """
         if not tasks:
             return []
 
-        # Log request content
+        # 记录请求内容
         logger.info(f"🤖 批量核验专题匹配: {len(tasks)} 组")
-        for i, t in enumerate(tasks[:3]):  # Log first 3 for preview
-            logger.info(f"   [{i}] Topic: {t['topic_name']} <-> News: {t['news_title']}")
+        for i, t in enumerate(tasks[:3]):  # 记录前 3 条用于预览
+            logger.info(f"   [{i}] 专题: {t['topic_name']} <-> 新闻: {t['news_title']}")
 
         system_prompt = (
             "你是事件一致性判定助手。请批量判断以下每组新闻是否属于对应专题追踪的同一新闻事件（或其直接后续进展）。\n"
@@ -907,7 +928,7 @@ class AIService:
                     reason = item.get("reason", "无理由")
                     output.append((is_match, reason))
                 
-                # Ensure length matches
+                # 确保长度匹配
                 if len(output) < len(tasks):
                     output.extend([(False, "返回数量不足")] * (len(tasks) - len(output)))
                 
@@ -1087,17 +1108,17 @@ class AIService:
                 logger.info("流式请求已建立，开始读取 chunks")
                 chunk_count = 0
                 async for chunk in stream:
-                    logger.debug(f"Raw chunk received: {chunk}")
+                    logger.debug(f"收到原始块: {chunk}")
                     if not chunk.choices:
-                        logger.debug(f"Chunk without choices: {chunk}")
+                        logger.debug(f"块中无选项: {chunk}")
                         continue
                     content = chunk.choices[0].delta.content
                     if content:
                         chunk_count += 1
-                        # logger.debug(f"Yielding content: {content!r}")
+                        # logger.debug(f"生成内容: {content!r}")
                         yield content
                     else:
-                        logger.debug(f"Chunk with empty content: {chunk}")
+                        logger.debug(f"块内容为空: {chunk}")
                 logger.info(f"流式传输结束, 共发送 {chunk_count} 个 chunks")
         except Exception as e:
             logger.error(f"聊天流错误: {e}", exc_info=True)

@@ -148,7 +148,7 @@ class ReportService:
             elapsed = monotonic() - t0
             if elapsed > 0.5:
                 logger.info(
-                    f"chart-data word_cloud 慢查询: {elapsed:.2f}s | topN={len(data)} | category={category or ''} | range={start_date or ''}~{end_date or ''}"
+                    f"图表数据(词云)慢查询: {elapsed:.2f}s | 数量={len(data)} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
                 )
             return data
         except Exception:
@@ -179,7 +179,7 @@ class ReportService:
             elapsed = monotonic() - t0
             if elapsed > 0.5:
                 logger.info(
-                    f"chart-data word_cloud 慢查询: {elapsed:.2f}s | rows={len(keywords_values)} | category={category or ''} | range={start_date or ''}~{end_date or ''}"
+                    f"图表数据(词云)慢查询: {elapsed:.2f}s | 行数={len(keywords_values)} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
                 )
             return data
 
@@ -217,7 +217,7 @@ class ReportService:
         elapsed = monotonic() - t0
         if elapsed > 0.5:
             logger.info(
-                f"chart-data source 慢查询: {elapsed:.2f}s | topN={len(data)} | category={category or ''} | range={start_date or ''}~{end_date or ''}"
+                f"图表数据(来源)慢查询: {elapsed:.2f}s | 数量={len(data)} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
             )
         return data
 
@@ -282,7 +282,7 @@ class ReportService:
             elapsed = monotonic() - t0
             if elapsed > 0.5:
                 logger.info(
-                    f"chart-data sentiment 慢查询: {elapsed:.2f}s | negN={len(neg_keywords)} | category={category or ''} | range={start_date or ''}~{end_date or ''}"
+                    f"图表数据(情感分布)慢查询: {elapsed:.2f}s | negN={len(neg_keywords)} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
                 )
             return data
         except Exception:
@@ -319,7 +319,7 @@ class ReportService:
             elapsed = monotonic() - t0
             if elapsed > 0.5:
                 logger.info(
-                    f"chart-data sentiment 慢查询: {elapsed:.2f}s | rows={len(rows)} | category={category or ''} | range={start_date or ''}~{end_date or ''}"
+                    f"图表数据(情感)慢查询: {elapsed:.2f}s | 行数={len(rows)} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
                 )
             return {"sentiment_dist": sentiment_dist, "neg_keywords": neg_keywords}
 
@@ -659,7 +659,7 @@ class ReportService:
                     if row:
                         kw, data = row
                         elapsed_ms = int((monotonic() - t0) * 1000)
-                        logger.info(f"📖 读取全局报表数据库缓存 ({kw or 'unknown'}) {elapsed_ms}ms")
+                        logger.info(f"📖 读取全局报表数据库缓存 ({kw or '未知'}) {elapsed_ms}ms")
                         self._global_cache = (monotonic(), str(kw or ""), data)
                         return data
 
@@ -1099,7 +1099,7 @@ class ReportService:
                             "   2. **[风险核心2]**：XXXXXX\n"
                         )
                     
-                    # Append news content
+                    # 追加新闻内容
                     prompt += (
                         "\n"
                         f"分析日期: {time_range_label}\n"
