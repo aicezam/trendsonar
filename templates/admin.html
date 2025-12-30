@@ -4,6 +4,113 @@
 
 {% block head %}
 <link rel="stylesheet" href="/static/codemirror.min.css">
+<style>
+    .prompts-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 15px;
+        padding: 15px 0;
+    }
+    .prompt-card {
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 15px;
+        display: flex;
+        flex-direction: column;
+        transition: box-shadow 0.2s;
+    }
+    .prompt-card:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .prompt-card h4 {
+        margin: 0 0 8px 0;
+        font-size: 16px;
+        color: #333;
+    }
+    .prompt-card p {
+        margin: 0 0 15px 0;
+        font-size: 13px;
+        color: #666;
+        flex: 1;
+        line-height: 1.4;
+    }
+    .prompt-actions {
+        display: flex;
+        justify-content: flex-end;
+    }
+    
+    .admin-subtabs {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+        flex-wrap: wrap;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 10px;
+    }
+    .admin-subtab {
+        padding: 6px 12px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        background: #f9f9f9;
+        cursor: pointer;
+        font-size: 13px;
+        color: #555;
+    }
+    .admin-subtab:hover { background: #eee; }
+    .admin-subtab.active {
+        background: #007bff;
+        color: #fff;
+        border-color: #007bff;
+    }
+
+    /* Modal */
+    .modal-overlay {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.5);
+        z-index: 1000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .modal {
+        background: #fff;
+        width: 800px;
+        max-width: 90%;
+        max-height: 90vh;
+        border-radius: 8px;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    .modal-header {
+        padding: 15px 20px;
+        border-bottom: 1px solid #eee;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .modal-header h3 { margin: 0; font-size: 18px; }
+    .modal-close {
+        background: none; border: none; font-size: 24px; cursor: pointer; color: #999;
+    }
+    .modal-body {
+        padding: 20px;
+        overflow-y: auto;
+    }
+    .modal-footer {
+        padding: 15px 20px;
+        border-top: 1px solid #eee;
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+    }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
+    .form-text { font-size: 14px; color: #555; line-height: 1.5; }
+    .form-hint { font-size: 12px; color: #888; margin-top: 4px; }
+</style>
 {% endblock %}
 
 {% block content %}
@@ -23,6 +130,7 @@
         <div class="admin-tabs">
             <button id="tabConfigBtn" class="admin-tab active" data-tab="config">配置</button>
             <button id="tabSourcesBtn" class="admin-tab" data-tab="sources">新闻源</button>
+            <button id="tabPromptsBtn" class="admin-tab" data-tab="prompts">提示词</button>
             <button id="tabLogsBtn" class="admin-tab" data-tab="logs">日志</button>
         </div>
         <div class="admin-panels">
@@ -49,9 +157,49 @@
                 </div>
                 <pre id="logViewer" class="admin-log"></pre>
             </div>
+            <div id="panelPrompts" class="admin-panel">
+                <div class="admin-log-toolbar">
+                    <div class="admin-hint" style="flex:1; margin:0;">管理 AI 功能模块的提示词配置。修改后实时生效。</div>
+                    <button id="refreshPromptsBtn" class="admin-btn">刷新</button>
+                </div>
+                <div id="promptsGroups" class="admin-subtabs"></div>
+                <div id="promptsGrid" class="prompts-grid"></div>
+            </div>
         </div>
         <div id="adminStatus" class="admin-status"></div>
         {% endif %}
+    </div>
+    <div id="promptModal" class="modal-overlay" style="display: none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modalTitle">编辑提示词</h3>
+                <button class="modal-close" onclick="closePromptModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editPromptKey">
+                <div class="form-group">
+                    <label>标题</label>
+                    <input type="text" id="editPromptTitle" class="admin-input" readonly style="background: #f5f5f5;">
+                </div>
+                <div class="form-group">
+                    <label>描述</label>
+                    <div id="editPromptDesc" class="form-text"></div>
+                </div>
+                <div class="form-group">
+                    <label>System Prompt (系统提示词)</label>
+                    <textarea id="editPromptSystem" class="admin-textarea" rows="8"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>User Prompt (用户提示词模板)</label>
+                    <textarea id="editPromptUser" class="admin-textarea" rows="8"></textarea>
+                    <div class="form-hint">支持 {variable} 形式的占位符，请勿修改占位符名称。</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="admin-btn" onclick="closePromptModal()">取消</button>
+                <button class="admin-btn primary" onclick="savePrompt()">保存修改</button>
+            </div>
+        </div>
     </div>
 </div>
 {% endblock %}
@@ -367,18 +515,22 @@
         const tabConfigBtn = document.getElementById("tabConfigBtn");
         const tabSourcesBtn = document.getElementById("tabSourcesBtn");
         const tabLogsBtn = document.getElementById("tabLogsBtn");
+        const tabPromptsBtn = document.getElementById("tabPromptsBtn");
         
         const panelConfig = document.getElementById("panelConfig");
         const panelSources = document.getElementById("panelSources");
         const panelLogs = document.getElementById("panelLogs");
+        const panelPrompts = document.getElementById("panelPrompts");
 
         if (tabConfigBtn) tabConfigBtn.classList.toggle("active", tab === "config");
         if (tabSourcesBtn) tabSourcesBtn.classList.toggle("active", tab === "sources");
         if (tabLogsBtn) tabLogsBtn.classList.toggle("active", tab === "logs");
+        if (tabPromptsBtn) tabPromptsBtn.classList.toggle("active", tab === "prompts");
         
         if (panelConfig) panelConfig.classList.toggle("active", tab === "config");
         if (panelSources) panelSources.classList.toggle("active", tab === "sources");
         if (panelLogs) panelLogs.classList.toggle("active", tab === "logs");
+        if (panelPrompts) panelPrompts.classList.toggle("active", tab === "prompts");
 
         if (logsTimer) {
             clearInterval(logsTimer);
@@ -391,6 +543,8 @@
             fullLogLines = []; 
             fetchLogs();
             logsTimer = setInterval(fetchLogs, 1500);
+        } else if (tab === "prompts") {
+            loadPrompts();
         } else if (tab === "sources") {
              loadSources();
              // Delay resize to allow DOM to settle
@@ -408,6 +562,143 @@
         location.reload();
     }
 
+    // --- Prompts Management ---
+    let allPrompts = {};
+    let activePromptGroup = "全部";
+
+    async function loadPrompts() {
+        const statusEl = document.getElementById("adminStatus");
+        setStatus(statusEl, "加载提示词中...", "");
+        
+        const resp = await fetch("/api/system/prompts", { method: "GET" });
+        if (!resp.ok) {
+            setStatus(statusEl, "加载提示词失败", "error");
+            return;
+        }
+        
+        const data = await resp.json();
+        allPrompts = data;
+        renderPromptGroups();
+        renderPrompts();
+        setStatus(statusEl, "提示词加载完成", "ok");
+    }
+
+    function renderPromptGroups() {
+        const groups = new Set(["全部"]);
+        Object.values(allPrompts).forEach(p => {
+            if (p.group) groups.add(p.group);
+            else groups.add("未分类");
+        });
+
+        const container = document.getElementById("promptsGroups");
+        if (!container) return;
+        container.innerHTML = "";
+
+        const sortedGroups = Array.from(groups).sort((a, b) => {
+             if (a === "全部") return -1;
+             if (b === "全部") return 1;
+             return a.localeCompare(b);
+        });
+
+        sortedGroups.forEach(g => {
+            const btn = document.createElement("div");
+            btn.className = "admin-subtab" + (g === activePromptGroup ? " active" : "");
+            btn.textContent = g;
+            btn.onclick = () => {
+                activePromptGroup = g;
+                renderPromptGroups(); // Re-render to update active class
+                renderPrompts();
+            };
+            container.appendChild(btn);
+        });
+    }
+
+    function renderPrompts() {
+        const grid = document.getElementById("promptsGrid");
+        if (!grid) return;
+        grid.innerHTML = "";
+
+        // Sort by key
+        const keys = Object.keys(allPrompts).sort();
+        
+        keys.forEach(key => {
+            const item = allPrompts[key];
+            const itemGroup = item.group || "未分类";
+            
+            if (activePromptGroup !== "全部" && itemGroup !== activePromptGroup) {
+                return;
+            }
+
+            const card = document.createElement("div");
+            card.className = "prompt-card";
+            card.innerHTML = `
+                <h4>${item.title || key} <span style="font-weight:normal; font-size:12px; color:#999;">(${key})</span></h4>
+                <div style="font-size:12px; color:#007bff; margin-bottom:5px;">${item.group || "未分类"}</div>
+                <p>${item.description || "暂无描述"}</p>
+                <div class="prompt-actions">
+                    <button class="admin-btn small" onclick="editPrompt('${key}')">编辑</button>
+                </div>
+            `;
+            grid.appendChild(card);
+        });
+    }
+
+    window.editPrompt = function(key) {
+        const item = allPrompts[key];
+        if (!item) return;
+
+        document.getElementById("editPromptKey").value = key;
+        document.getElementById("editPromptTitle").value = item.title || "";
+        document.getElementById("editPromptDesc").textContent = item.description || "";
+        document.getElementById("editPromptSystem").value = item.system_prompt || "";
+        document.getElementById("editPromptUser").value = item.user_prompt || "";
+        
+        document.getElementById("modalTitle").textContent = "编辑提示词 - " + (item.title || key);
+        document.getElementById("promptModal").style.display = "flex";
+    };
+
+    window.closePromptModal = function() {
+        document.getElementById("promptModal").style.display = "none";
+    };
+
+    window.savePrompt = async function() {
+        const key = document.getElementById("editPromptKey").value;
+        const systemPrompt = document.getElementById("editPromptSystem").value;
+        const userPrompt = document.getElementById("editPromptUser").value;
+        
+        if (!key) return;
+
+        const statusEl = document.getElementById("adminStatus");
+        setStatus(statusEl, "保存提示词中...", "");
+
+        const payload = {
+            system_prompt: systemPrompt,
+            user_prompt: userPrompt
+        };
+
+        const resp = await fetch(`/api/system/prompts/${key}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            setStatus(statusEl, err.detail || "保存失败", "error");
+            alert("保存失败: " + (err.detail || "未知错误"));
+            return;
+        }
+
+        const resData = await resp.json();
+        // Update local cache
+        if (resData.data) {
+            allPrompts[key] = resData.data;
+        }
+        
+        closePromptModal();
+        setStatus(statusEl, "提示词保存成功", "ok");
+    };
+
     document.addEventListener("DOMContentLoaded", () => {
         if (!authed) {
             document.getElementById("adminLoginBtn")?.addEventListener("click", doLogin);
@@ -423,6 +714,9 @@
         document.getElementById("tabConfigBtn")?.addEventListener("click", () => setTab("config"));
         document.getElementById("tabSourcesBtn")?.addEventListener("click", () => setTab("sources"));
         document.getElementById("tabLogsBtn")?.addEventListener("click", () => setTab("logs"));
+        document.getElementById("tabPromptsBtn")?.addEventListener("click", () => setTab("prompts"));
+        
+        document.getElementById("refreshPromptsBtn")?.addEventListener("click", loadPrompts);
         
         document.getElementById("refreshLogsBtn")?.addEventListener("click", fetchLogs);
         document.getElementById("clearLogsBtn")?.addEventListener("click", clearLogs);

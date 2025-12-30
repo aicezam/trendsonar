@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, check_db_connection
 from app.core.logger import setup_logger
 from app.core.exceptions import AIConfigurationError
+from app.core.prompts import prompt_manager
 from app.models.news import News
 from app.models.topic import Topic, TopicTimelineItem
 from app.services.ai_service import AIService
@@ -40,6 +41,33 @@ class TopicService:
         if na <= 0 or nb <= 0:
             return 0.0
         return float(np.dot(va, vb) / (na * nb))
+
+    def _find_candidate_news_by_vector(
+        self,
+        t_vec: List[float],
+        news_pool: List[News],
+        pool_vecs: Dict[int, List[float]],
+        used_ids: Set[int],
+        top_k: int = 10,
+        threshold: float = 0.35
+    ) -> List[Tuple[News, float]]:
+        """
+        根据向量相似度查找候选新闻 (不执行 DB 操作，不进行 AI 二次核验)
+        """
+        candidates = []
+        for n in news_pool:
+            if n.id in used_ids:
+                continue
+            n_vec = pool_vecs.get(n.id)
+            if not n_vec:
+                continue
+            
+            sim = self._cosine_similarity(t_vec, n_vec)
+            if sim > threshold:
+                candidates.append((n, sim))
+        
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[:top_k]
 
     async def refresh_topics(self) -> None:
         """
@@ -106,9 +134,10 @@ class TopicService:
             active_topics_stmt = select(Topic).where(Topic.status == "active")
             active_topics = (await db.execute(active_topics_stmt)).scalars().all()
 
-            # 4.1 新增：专题质量评估与过滤
+            # 4.1 新增：专题质量评估与过滤 (初步过滤)
             # 将现有专题转为简单字典供 AI 参考
             existing_topics_data = [{"name": t.name, "description": t.summary or ""} for t in active_topics]
+            # 先做一次粗略筛选，过滤掉明显不靠谱的
             proposed_topics = await self.ai.batch_evaluate_topic_quality(proposed_topics, existing_topics=existing_topics_data)
             
             if not proposed_topics:
@@ -138,7 +167,7 @@ class TopicService:
             # === Phase 1: 处理 AI 提炼的潜在专题 ===
             for p_topic in proposed_topics:
                 t_name = p_topic.get("name", "")
-                t_desc = p_topic.get("description", "")
+                t_desc = p_topic.get("description", "") # 初始描述
                 
                 if not t_name:
                     continue
@@ -160,8 +189,43 @@ class TopicService:
                     if max_sim < settings.FOLLOW_KEYWORDS_THRESHOLD:
                         logger.info(f"   ⏩ 专题 '{t_name}' 与关注关键词相关度不足 ({max_sim:.2f} < {settings.FOLLOW_KEYWORDS_THRESHOLD})，跳过")
                         continue
+                
+                # --- 新增步骤：基于向量预先查找关联新闻，并生成真实摘要 ---
+                # 1. 预查找候选新闻 (Vector Search Only)
+                pre_candidates = self._find_candidate_news_by_vector(
+                    t_vec, news_pool, pool_vecs, used_ids, top_k=10, threshold=0.35
+                )
+                
+                # 如果候选新闻太少，说明可能是幻觉或无实证的专题，直接跳过
+                if len(pre_candidates) < 2:
+                    logger.info(f"   ⏩ 专题 '{t_name}' 预查找候选新闻不足 ({len(pre_candidates)} < 2)，跳过")
+                    continue
+                
+                # 2. 生成真实摘要 (Initial Summary Generation)
+                logger.info(f"   📝 正在为专题 '{t_name}' 生成基于事实的初始摘要 (Sample: {len(pre_candidates)})...")
+                overview_materials = [{"title": n.title, "content": n.content or ""} for n, _ in pre_candidates]
+                
+                # 使用新的轻量级摘要生成 (默认 main 模型)
+                generated_summary = await self.ai.generate_topic_initial_summary(t_name, overview_materials)
+                if generated_summary:
+                    generated_summary = generated_summary.replace("```", "").strip()
+                
+                # 使用生成的摘要替换初始描述 (如果生成失败则沿用初始描述)
+                final_desc = generated_summary if generated_summary else t_desc
+                logger.info(f"   📝 生成摘要: {final_desc[:50]}...")
+                
+                # 3. 二次质量审核 (Quality Audit with Real Summary)
+                # 复用 batch_evaluate 但只传一个
+                audit_list = [{"name": t_name, "description": final_desc}]
+                valid_topics = await self.ai.batch_evaluate_topic_quality(audit_list, existing_topics=existing_topics_data)
+                
+                if not valid_topics:
+                    logger.info(f"   ❌ 专题 '{t_name}' 在基于真实摘要的二次审核中未通过，跳过")
+                    continue
+                
+                # ----------------------------------------------------
 
-                # 5.1 检查是否与现有专题重复
+                # 5.1 检查是否与现有专题重复 (使用新的 final_desc)
                 existing_topic_obj = None
 
                 for existing_t, existing_vec in active_topic_vecs:
@@ -171,7 +235,7 @@ class TopicService:
                         logger.info(f"   🔄 与现有专题 '{existing_t.name}' 相似 (sim={sim:.2f})，正在进行 AI 二次核验...")
                         
                         is_duplicate, reason = await self.ai.check_topic_duplicate(
-                            t_name, t_desc, existing_t.name, existing_t.summary or ""
+                            t_name, final_desc, existing_t.name, existing_t.summary or ""
                         )
                         
                         if is_duplicate:
@@ -182,13 +246,21 @@ class TopicService:
                         else:
                             logger.info(f"   ❌ AI 判定为不同事件 (理由: {reason})")
                 
-                # 执行匹配和更新
+                # 执行匹配和更新 (传递 final_desc 作为 summary)
                 result_topic = await self._match_and_update_topic(
-                    db, t_name, t_desc, t_vec, existing_topic_obj, 
+                    db, t_name, final_desc, t_vec, existing_topic_obj, 
                     news_pool, pool_vecs, used_ids
                 )
                 
                 if result_topic:
+                    # 如果是新创建的专题，且没有现成的 record，可以将 initial summary 先存入 record，
+                    # 或者保持 record 为空等待后续生成 Overview。
+                    # 这里为了数据完整性，暂且将 summary 存入 record，避免为空。
+                    if not existing_topic_obj and not result_topic.record and generated_summary:
+                         result_topic.record = generated_summary
+                         db.add(result_topic)
+                         await db.flush()
+                    
                     if existing_topic_obj:
                         updated_topics_count += 1
                     else:
@@ -429,15 +501,7 @@ class TopicService:
         if overview_text:
             topic.record = overview_text
             # 顺便更新 summary
-            summary_prompt = (
-                "请根据以下专题综述，提炼一段 **高浓缩的事件概览**（100-150字）。\n"
-                "要求：\n"
-                "1. 包含事件的核心冲突（Who did What）。\n"
-                "2. 包含关键的背景信息（如涉及金额、物品名称）。\n"
-                "3. 包含当前的最新状态。\n"
-                "4. 纯文本，无Markdown。\n\n"
-                f"{overview_text[:2000]}"
-            )
+            summary_prompt = prompt_manager.get_user_prompt("topic_overview_summary", overview_text=overview_text[:2000])
             new_summary = await self.ai.chat_completion(summary_prompt)
             if new_summary:
                 topic.summary = new_summary.replace("```", "").strip()
@@ -791,16 +855,7 @@ class TopicService:
             if overview_text:
                 new_summary = None
                 # 为了节省 token，直接让 AI 基于 overview_text 生成 summary
-                summary_prompt = (
-                    "请根据以下专题综述，提炼一段 **高浓缩的事件概览**（100-150字）。\n"
-                    "要求：\n"
-                    "1. 包含事件的核心冲突（Who did What）。\n"
-                    "2. 包含关键的背景信息（如涉及金额、物品名称）。\n"
-                    "3. 包含当前的最新状态。\n"
-                    "4. 纯文本，无Markdown。\n"
-                    "5. **直接输出**：不要包含任何“好的”、“根据您的要求”等客套话，直接输出摘要内容。\n\n"
-                    f"{overview_text[:2000]}"
-                )
+                summary_prompt = prompt_manager.get_user_prompt("topic_overview_summary", overview_text=overview_text[:2000])
                 new_summary = await self.ai.chat_completion(summary_prompt, route_key="TOPIC_OVERVIEW")
                 
                 # 更新 Topic

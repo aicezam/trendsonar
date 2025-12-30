@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from app.core.database import AsyncSessionLocal, check_db_connection
 from app.core.logger import logger
+from app.core.prompts import prompt_manager
 from app.models.news import News
 from app.models.report import ReportCache
 from app.services.ai_service import ai_service
@@ -1018,95 +1019,21 @@ class ReportService:
                     # --- AI 提示词分流逻辑 ---
                     # 场景1：关键词深度分析 (Keyword Depth Analysis)
                     if keyword:
-                        prompt = (
-                            f"你是一个专业舆情分析师。请基于下面关于“{keyword}”的“Top100 新闻（标题+正文）”输出一份markdown格式的深度舆情分析报告。\n"
-                            "必须严格按以下模板格式输出（只输出内容，不要输出任何解释、不要输出原始新闻清单、不要输出“好的”等任何客套话）：\n"
-                            "\n"
-                            f"# “{keyword}”深度舆情分析报告\n"
-                            f"**分析日期**：{time_range_label}  **数据来源**：{scope_str} Top100新闻\n"
-                            "## 一、舆情综述\n"
-                            f"（简要概括“{keyword}”在当前时间段内的整体舆情态势、热度变化及情感倾向，150字以内）\n"
-                            "## 二、核心关注点\n"
-                            "（分析围绕该关键词，公众和媒体最关注的具体议题或事件细节。使用有序列表 1. 2. 3. 输出 3-5 点）\n"
-                            "1. **[关注点]**：详细描述（引用新闻事实）。\n"
-                            "## 三、主要观点与争议\n"
-                            "（梳理各方对该关键词相关事件的观点，包括支持、反对或中立的看法）\n"
-                            "1. **[观点方向]**：具体内容。\n"
-                            "## 四、关联主体与影响\n"
-                            "（分析该舆情涉及的关键人物、企业或机构，以及对它们产生的影响）\n"
-                            "## 五、研判与建议\n"
-                            "（针对该关键词的舆情现状，提出简要的应对或关注建议）\n"
-                            "**写作约束（必须遵守）：**\n"
-                            f"1. **聚焦**：内容必须紧扣关键词“{keyword}”，无关信息不要写。\n"
-                            "2. **去标签化**：禁止在正文中输出“观点方向：”等元数据标签。\n"
-                            "3. **关键信息加粗**：人名、机构名、核心数据必须加粗。\n"
-                            "4. **真实性**：基于提供的新闻数据分析，不要编造。\n"
-                            "5. **格式**：严格按markdown格式输出900-1500字，不要输出任何解释、不要输出原始新闻清单、不要输出“好的”等任何客套话。\n"
+                        prompt = prompt_manager.get_user_prompt(
+                            "report_keyword_analysis",
+                            keyword=keyword,
+                            time_range_label=time_range_label,
+                            scope_str=scope_str,
+                            news_lines="\n\n".join(news_lines) if news_lines else "无可用新闻样本"
                         )
                     # 场景2：全局/大盘综述 (Global Overview)
                     else:
-                        prompt = (
-                            "你是一个专业舆情分析师。请基于下面“当天 Top100 新闻（标题+正文）”输出一份markdown格式的舆情综述。\n"
-                            "必须严格按以下模板格式输出（只输出内容，不要输出任何解释、不要输出原始新闻清单、不要输出“好的”等任何客套话）：\n"
-                            "\n"
-                            "# 综合舆情分析报告\n"
-                            f"**分析日期**：{time_range_label}  **数据来源**：{scope_str} Top100新闻\n"
-                            "## 一、热点主题归纳\n"
-                            "（首先输出一段不带任何前缀的普通段落作为总述，概括今日整体舆情风向，重点加粗关键领域；总述后空1行）\n"
-                            "（接下来用有序列表 1. 2. 3. 输出 4-7 条分主题，每条格式如下：）\n"
-                            "1. **[精炼的主题词]**：直接叙述事件详情与核心看点（2-4句）。**禁止**出现“主题名：”“主题概述：”“热度层级”等文字标签。\n"
-                            "## 二、关键主体\n"
-                            "**国家/地区行为体**：\n"
-                            "（3-6 条，格式：1. **[国家/地区名]**：直接描述其立场或动作（2-3句）。不要写“主体名称：”这类前缀）\n"
-                            "**企业/机构**：\n"
-                            "（3-8 条，格式：1. **[企业/机构名]**：直接描述其动作或面临的影响。重点加粗涉及的金额、产品名或合作方）\n"
-                            "**公众人物**：\n"
-                            "（2-6 条，格式：1. **[人名]**：直接描述触发点或争议点。不要写“触发点：”这类前缀）\n"
-                            "## 三、主要矛盾/驱动因素\n"
-                            "（3-6 条，每条格式：1. **[核心驱动力/矛盾点]**：引用新闻中的**事实、具体表述**作为证据线索。不要写“建议/对策”）\n"
-                            "## 四、风险点\n"
-                            "（3-8 条，每条格式：1. **[风险核心]**：描述触发条件及可能影响。**禁止**出现“风险点：”“触发条件：”等标签，将这些逻辑融入自然语句中）\n"
-                            "**重要写作约束（必须遵守）：**\n"
-                            "1. **去标签化**：绝对禁止在正文中输出“主题名：”、“证据线索：”、“主体名称：”等元数据标签。请直接用 **加粗名词** + 冒号 + 正文 的形式。\n"
-                            "2. **关键信息加粗**：正文中出现的所有 **人名、机构名、核心地名、具体金额、关键数据、重要专有名词** 必须使用 markdown 加粗格式。\n"
-                            "3. **结构完整**：必须覆盖上述五个小节，不得新增或缺失。\n"
-                            "4. **真实性**：如信息不足请写“数据不足”，不要编造。\n"
-                            "5. **篇幅**：总字数控制在 900-1500 字，每条新闻事件需详细描述。\n"
-                            "6. **示例格式**：\n"
-                            "   ## 一、热点主题归纳\n"
-                            "   1. **[主题词1]**：XXXXXX\n"
-                            "   2. **[主题词2]**：XXXXXX\n"
-                            "   3. ……\n"
-                            "   ## 二、关键主体\n"
-                            "   **国家/地区**：\n"
-                            "   1. **[国家/地区名1]**：XXXXXX\n"
-                            "   2. **[国家/地区名2]**：XXXXXX\n"
-                            "   3. ……\n"
-                            "   **企业/机构**：\n"
-                            "   1. **[企业/机构名1]**：XXXXXX\n"
-                            "   2. **[企业/机构名2]**：XXXXXX\n"
-                            "   3. ……\n"
-                            "   **公众人物**：\n"
-                            "   1. **[人名1]**：XXXXXX\n"
-                            "   2. **[人名2]**：XXXXXX\n"
-                            "   3. ……\n"
-                            "   ## 三、主要矛盾/驱动因素\n"
-                            "   1. **[核心驱动力/矛盾点1]**：XXXXXX\n"
-                            "   2. **[核心驱动力/矛盾点2]**：XXXXXX\n"
-                            "   3. ……\n"
-                            "   ## 四、风险点\n"
-                            "   1. **[风险核心1]**：XXXXX\n"
-                            "   2. **[风险核心2]**：XXXXXX\n"
+                        prompt = prompt_manager.get_user_prompt(
+                            "report_global_analysis",
+                            time_range_label=time_range_label,
+                            scope_str=scope_str,
+                            news_lines="\n\n".join(news_lines) if news_lines else "无可用新闻样本"
                         )
-                    
-                    # 追加新闻内容
-                    prompt += (
-                        "\n"
-                        f"分析日期: {time_range_label}\n"
-                        f"筛选条件: {scope_str}\n"
-                        "新闻样本（Top100，已按热度排序，仅供你分析）：\n"
-                        + ("\n\n".join(news_lines) if news_lines else "无可用新闻样本")
-                    )
 
                     ai_analysis = await ai_service.chat_completion(prompt, route_key="REPORT")
                 except Exception as e:

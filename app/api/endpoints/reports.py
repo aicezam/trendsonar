@@ -8,7 +8,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 
 from app.services.report_service import report_service
 
@@ -138,4 +138,40 @@ async def get_chart_data(
     """
 
     return await report_service.get_chart_data(type, category, region, q, start_date, end_date)
+
+
+@router.post("/generate")
+async def generate_report_background(
+    background_tasks: BackgroundTasks,
+    q: Optional[str] = "",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    category: Optional[str] = None,
+    region: Optional[str] = None,
+    source: Optional[str] = None,
+    limit: Optional[int] = None,
+):
+    """
+    输入:
+    - 报表生成参数
+
+    输出:
+    - 任务提交状态
+
+    作用:
+    - 异步触发报表生成任务
+    """
+    background_tasks.add_task(
+        report_service.get_analysis_data,
+        keyword=q,
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+        limit=limit,
+        generate_ai=True,
+        use_cache=False 
+    )
+    return {"status": "queued", "message": "报表正在后台生成中，请稍候在历史记录中查看"}
 

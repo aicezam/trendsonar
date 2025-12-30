@@ -57,6 +57,7 @@ AI_ROUTE:
   TOPIC_MATCH: "backup"    # 专题匹配核验 (判断新闻是否属于专题)
   TOPIC_TIMELINE: "backup" # 时间轴事件生成 (高信息密度描述)
   TOPIC_OVERVIEW: "backup" # 专题综述生成 (深度分析)
+  TOPIC_INITIAL_SUMMARY: "main" # 专题初始摘要 (基于事实的快速摘要，用于审核)
   # --- 报表生成 ---
   REPORT: "backup"         # 日报/周报生成
   # --- 交互对话 ---
@@ -104,9 +105,9 @@ TOPIC_AGGREGATION_TOP_N: 300
 # 每次生成的新专题数量范围 (min-max)，格式 "3-10"
 TOPIC_GENERATION_COUNT: "1-5"
 # 向量召回池大小：在最近 N 条新闻中进行向量搜索 (默认 2000)
-TOPIC_RECALL_POOL_SIZE: 3000
+TOPIC_RECALL_POOL_SIZE: 3000  
 # 向量初筛阈值（0.0-1.0）：用于向量预筛候选新闻 (默认 0.6)
-TOPIC_MATCH_THRESHOLD: 0.6
+TOPIC_MATCH_THRESHOLD: 0.4
 # 向量召回候选数：每个专题最多对前 N 条高相似度新闻进行 AI 核验 (默认 20)
 TOPIC_MATCH_MAX_CANDIDATES: 30
 # 专题质量门槛：只有当核验通过的新闻数量 > N 时才创建专题 (默认 3)

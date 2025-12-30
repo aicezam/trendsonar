@@ -251,6 +251,26 @@
     </div>
 </div>
 
+<!-- Background Task Notification -->
+<div id="bgNotification" style="display:none; position:fixed; top:80px; right:20px; background:#fff; padding:15px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); z-index:9999; border-left: 4px solid #3b82f6; max-width: 320px; animation: slideIn 0.3s ease-out;">
+    <div style="font-weight:bold; margin-bottom:5px; color:#1e293b;">🚀 报表正在后台生成</div>
+    <div style="font-size:0.85rem; color:#64748b; margin-bottom:10px; line-height: 1.4;">
+        系统正在进行深度分析，这可能需要 1-2 分钟。<br>
+        您可以继续浏览或离开页面，生成完成后将自动加载，或在历史记录中查看。
+    </div>
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span id="pollingStatus" style="font-size:0.75rem; color:#3b82f6;">⏳ 正在处理...</span>
+        <button onclick="hideBackgroundNotification()" style="border:1px solid #e2e8f0; background:#fff; color:#64748b; cursor:pointer; padding: 4px 10px; border-radius: 4px; font-size: 0.8rem;">隐藏</button>
+    </div>
+</div>
+
+<style>
+@keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+</style>
+
 {% endblock %}
 {% block scripts %}
 <script>
@@ -629,12 +649,63 @@
     }
 
     // --- Core Generation ---
+    // Global Polling State
+    let pollingInterval = null;
+    let pollingKeyword = null;
+    let pollingStartTime = null;
+
+    function showBackgroundNotification() {
+        document.getElementById('bgNotification').style.display = 'block';
+        document.getElementById('pollingStatus').textContent = "⏳ 正在处理...";
+    }
+    
+    function hideBackgroundNotification() {
+        document.getElementById('bgNotification').style.display = 'none';
+        stopPolling();
+    }
+    
+    function stopPolling() {
+        if (pollingInterval) {
+            clearInterval(pollingInterval);
+            pollingInterval = null;
+        }
+    }
+    
+    function startPolling(keyword) {
+        stopPolling();
+        pollingKeyword = keyword;
+        pollingStartTime = new Date();
+        
+        pollingInterval = setInterval(async () => {
+            try {
+                // Check recent reports
+                const res = await fetch(`/api/report/recent?limit=1&keyword=${encodeURIComponent(keyword || '')}`);
+                const data = await res.json();
+                if (data && data.length > 0) {
+                    const latest = data[0];
+                    const reportTime = new Date(latest.created_at);
+                    
+                    // If report is newer than start time (with 10s buffer for clock skew)
+                    if (reportTime > new Date(pollingStartTime.getTime() - 10000)) {
+                        stopPolling();
+                        document.getElementById('pollingStatus').textContent = "✅ 生成完成！正在加载...";
+                        setTimeout(() => {
+                             loadHistoryReport(latest.id, keyword);
+                             hideBackgroundNotification();
+                             loadRecentReports(); 
+                        }, 1000);
+                    }
+                }
+            } catch(e) { console.error("Polling error", e); }
+        }, 5000);
+    }
+
     function openSettingsModal() { document.getElementById('settingsModal').classList.add('show'); }
     function closeSettingsModal() { document.getElementById('settingsModal').classList.remove('show'); }
-    function confirmGenerate() { closeSettingsModal(); generateReport(); }
+    function confirmGenerate() { closeSettingsModal(); generateReport(true); }
     document.getElementById('settingsModal').addEventListener('click', function(e) { if (e.target === this) closeSettingsModal(); });
 
-    async function generateReport() {
+    async function generateReport(isBackground = false) {
         const keyword = document.getElementById('keyword').value.trim();
         const start = document.getElementById('startDate').value;
         const end = document.getElementById('endDate').value;
@@ -656,7 +727,7 @@
                 source = selectedSrc.join(',');
             }
         }
-
+        
         const allRegCb = document.getElementById('reg-all');
         let region = 'all';
         if (allRegCb && !allRegCb.checked) {
@@ -664,6 +735,34 @@
             if (selectedReg.length > 0) {
                 region = selectedReg.join(',');
             }
+        }
+
+        // Save params
+        window.currentReportParams = { keyword, start, end, limit, category, source, region };
+        
+        if (isBackground) {
+             pollingStartTime = new Date();
+             const params = new URLSearchParams({
+                 q: keyword,
+                 start_date: start || '',
+                 end_date: end || '',
+                 category: category === 'all' ? '' : category,
+                 source: source,
+                 region: region === 'all' ? '' : region,
+                 limit: limit,
+                 generate_ai: 'true'
+             });
+             
+             try {
+                 const res = await fetch(`/api/report/generate?${params.toString()}`, { method: 'POST' });
+                 if (!res.ok) throw new Error("提交失败");
+                 
+                 showBackgroundNotification();
+                 startPolling(keyword);
+             } catch(e) {
+                 alert("任务提交失败: " + e.message);
+             }
+             return;
         }
 
         document.getElementById('loading').style.display = 'flex';
@@ -853,14 +952,10 @@
     }
 
     function reAnalyze() {
-        if (!window.currentReportParams) {
-            console.warn("未找到历史参数，使用当前面板条件进行重新分析");
-            generateReport();
-            return;
+        if (window.currentReportParams) {
+            restoreFilters(window.currentReportParams);
         }
-        const p = window.currentReportParams;
-        restoreFilters(p);
-        generateReport();
+        openSettingsModal();
     }
 
     function restoreFilters(p) {
