@@ -48,6 +48,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/marked.min.js"></script>
 <script>
     const TOPIC_ID = {{ topic_id }};
     let currentSort = "asc"; // 默认正序
@@ -185,7 +186,17 @@
                 }
             }
 
-            document.getElementById("record").textContent = (topic.record || "").trim() || "暂无专题综述（等待更多时间轴条目或下一次更新）。";
+            const recordContent = (topic.record || "").trim();
+            const recordEl = document.getElementById("record");
+            if (recordContent) {
+                recordEl.innerHTML = marked.parse(recordContent);
+                recordEl.classList.remove("text");
+                recordEl.classList.add("markdown-body");
+            } else {
+                recordEl.textContent = "暂无专题综述（等待更多时间轴条目或下一次更新）。";
+                recordEl.classList.add("text");
+                recordEl.classList.remove("markdown-body");
+            }
 
             const newsListEl = document.getElementById("newsList");
             newsListEl.innerHTML = "";
