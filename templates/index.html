@@ -26,23 +26,23 @@
                 </div>
             </div>
 
-            <div class="menu-section">
+            <div class="menu-section" style="display:none;">
                 <div class="menu-label">领域筛选</div>
-                <div id="mobileCategoryContainer" class="mobile-check-list">
+                <div id="mobileCategoryContainer" class="ms-container full-width">
                     <!-- JS Generated -->
                 </div>
             </div>
 
             <div class="menu-section">
                 <div class="menu-label">地区筛选</div>
-                <div id="mobileRegionContainer" class="mobile-check-list">
+                <div id="mobileRegionContainer" class="ms-container full-width">
                     <!-- JS Generated -->
                 </div>
             </div>
 
             <div class="menu-section">
                 <div class="menu-label">来源筛选</div>
-                <div id="mobileSourceContainer" class="mobile-check-list">
+                <div id="mobileSourceContainer" class="ms-container full-width">
                     <!-- JS Generated -->
                 </div>
             </div>
@@ -59,7 +59,42 @@
         </div>
     </div>
 
+    <!-- Desktop Filter Drawer -->
+    <div id="desktopDrawerOverlay" class="desktop-drawer-overlay">
+        <div class="desktop-drawer-content">
+            <div class="drawer-header">
+                <h3>高级筛选</h3>
+                <button id="closeDesktopDrawer" class="btn-icon">&times;</button>
+            </div>
+            <div class="drawer-body">
+                <div class="filter-section-drawer">
+                    <label>时间范围</label>
+                    <select id="desktopTimeSelect" class="select-filter" style="width: 100%;">
+                        <!-- JS generated -->
+                    </select>
+                    <div id="desktopDateRange" style="display:none; flex-direction: column; gap: 8px; margin-top: 8px;">
+                         <input type="date" id="desktopStartDate" class="input-date" style="width: 100%;">
+                         <input type="date" id="desktopEndDate" class="input-date" style="width: 100%;">
+                    </div>
+                </div>
+
+                <div class="filter-section-drawer">
+                    <label>地区筛选</label>
+                    <div id="desktopRegionSelect" class="ms-container full-width"></div>
+                </div>
+            </div>
+            <div class="drawer-footer">
+                <button id="applyDesktopFilter" class="btn-primary">确认筛选</button>
+            </div>
+        </div>
+    </div>
+
     <div class="container">
+        <!-- Category Tabs -->
+        <div id="categoryTabs" class="category-tabs-container">
+            <!-- JS Generated -->
+        </div>
+
         <!-- Mobile Top Bar -->
         <div class="mobile-top-bar">
             <div class="mobile-search-group">
@@ -71,34 +106,20 @@
 
         <!-- Desktop Toolbar -->
         <div class="desktop-toolbar">
-            <div class="toolbar-row">
-                <div class="filter-group">
-                    <select id="desktopTimeSelect" class="select-filter">
-                        <!-- JS generated -->
-                    </select>
-                    <div id="desktopDateRange" style="display:none; align-items: center;">
-                        <div style="width: 1px; height: 16px; background: #e5e7eb; margin: 0 4px;"></div>
-                        <input type="date" id="desktopStartDate" class="input-date" style="border: none; outline: none; width: 110px;">
-                        <span style="color: #9ca3af; margin: 0 2px;">-</span>
-                        <input type="date" id="desktopEndDate" class="input-date" style="border: none; outline: none; width: 110px;">
-                    </div>
-                </div>
-
-                <div class="filter-group">
-                    <button class="btn-filter" data-sort="heat" id="desktopSortHeat">🔥 热度</button>
-                    <button class="btn-filter" data-sort="date" id="desktopSortDate">🕒 时间</button>
-                </div>
+            <div class="flex-row segmented" style="margin-right: 0;">
+                <button class="btn-filter" data-sort="heat" id="desktopSortHeat">🔥 热度</button>
+                <button class="btn-filter" data-sort="date" id="desktopSortDate">🕒 时间</button>
+            </div>
+            <!-- Removed Category Dropdown -->
+            <div id="desktopSourceSelect" class="ms-container"></div>
+            
+            <div class="search-box" style="flex: 1;">
+                <input type="text" id="desktopSearchInput" class="input-text search-input-desktop" placeholder="🔍搜索新闻 (支持模糊搜索与语义搜索)...">
             </div>
 
-            <div style="display: flex; gap: 12px; align-items: center; width: 100%;">
-                <div id="desktopRegionSelect" class="ms-container"></div>
-                <div id="desktopCategorySelect" class="ms-container"></div>
-                <div id="desktopSourceSelect" class="ms-container"></div>
-
-                <div class="search-box" style="flex: 1;">
-                    <input type="text" id="desktopSearchInput" class="input-text search-input-desktop" placeholder="🔍搜索新闻 (支持模糊搜索与语义搜索)...">
-                </div>
-            </div>
+            <button id="openDesktopDrawerBtn" class="btn-more-filter">
+                <span style="margin-right: 4px;">⚡</span> 更多筛选
+            </button>
         </div>
 
         <!-- News List -->
@@ -212,10 +233,15 @@
             mobileTimeContainer: document.getElementById('mobileTimeOptions'),
             desktopTimeSelect: document.getElementById('desktopTimeSelect'),
             
-            // Updated IDs for Containers
-            mobileCategoryContainer: document.getElementById('mobileCategoryContainer'),
-            desktopCategorySelect: 'desktopCategorySelect', // ID string for class
+            // Drawer Elements
+            desktopDrawerOverlay: document.getElementById('desktopDrawerOverlay'),
+            openDesktopDrawerBtn: document.getElementById('openDesktopDrawerBtn'),
+            closeDesktopDrawer: document.getElementById('closeDesktopDrawer'),
+            applyDesktopFilter: document.getElementById('applyDesktopFilter'),
 
+            // Updated IDs for Containers
+            categoryTabs: document.getElementById('categoryTabs'),
+            
             mobileRegionContainer: document.getElementById('mobileRegionContainer'),
             desktopRegionSelect: 'desktopRegionSelect',
 
@@ -243,8 +269,13 @@
 
         // MultiSelect Class
         class MultiSelect {
-            constructor(containerId, placeholder, options, selectedValues, onChange) {
-                this.container = document.getElementById(containerId);
+            constructor(containerIdOrElement, placeholder, options, selectedValues, onChange) {
+                if (typeof containerIdOrElement === 'string') {
+                    this.container = document.getElementById(containerIdOrElement);
+                } else {
+                    this.container = containerIdOrElement;
+                }
+                
                 this.placeholder = placeholder;
                 this.options = options || [];
                 this.selected = new Set(selectedValues ? selectedValues.split(',').filter(x=>x && x!=='all') : []);
@@ -354,44 +385,10 @@
         }
 
         // Global instances
-        let msRegion, msCategory, msSource;
+        let msRegion, msSource;
+        let msMobileRegion, msMobileSource;
 
-        // Mobile List Render
-        function renderMobileCheckList(container, options, selectedValues, onChange) {
-            if (!container) return;
-            container.innerHTML = '';
-            const selected = new Set(selectedValues ? selectedValues.split(',').filter(x=>x && x!=='all') : []);
-            
-            options.forEach(opt => {
-                const row = document.createElement('div');
-                row.className = 'mobile-check-item ' + (selected.has(opt.value) ? 'checked' : '');
-                
-                const cb = document.createElement('input');
-                cb.type = 'checkbox';
-                cb.checked = selected.has(opt.value);
-                
-                row.onclick = () => {
-                    if (selected.has(opt.value)) selected.delete(opt.value);
-                    else selected.add(opt.value);
-                    
-                    cb.checked = selected.has(opt.value);
-                    row.classList.toggle('checked', cb.checked);
-                    onChange(Array.from(selected).join(','));
-                };
-                
-                cb.onclick = (e) => e.stopPropagation();
-                cb.onchange = (e) => {
-                     if (e.target.checked) selected.add(opt.value);
-                     else selected.delete(opt.value);
-                     row.classList.toggle('checked', e.target.checked);
-                     onChange(Array.from(selected).join(','));
-                };
-                
-                row.appendChild(cb);
-                row.appendChild(document.createTextNode(opt.label));
-                container.appendChild(row);
-            });
-        }
+
 
         // --- Initialization ---
         async function init() {
@@ -425,6 +422,19 @@
             els.mobileMenu.onclick = (e) => {
                 if(e.target === els.mobileMenu) els.mobileMenu.classList.remove('show');
             };
+
+            // Desktop Drawer
+            if (els.openDesktopDrawerBtn) {
+                els.openDesktopDrawerBtn.onclick = () => els.desktopDrawerOverlay.classList.add('show');
+                els.closeDesktopDrawer.onclick = () => els.desktopDrawerOverlay.classList.remove('show');
+                els.desktopDrawerOverlay.onclick = (e) => {
+                    if (e.target === els.desktopDrawerOverlay) els.desktopDrawerOverlay.classList.remove('show');
+                };
+                els.applyDesktopFilter.onclick = () => {
+                    els.desktopDrawerOverlay.classList.remove('show');
+                    fetchNews(true);
+                };
+            }
 
             // Search
             const onSearch = (e) => {
@@ -509,12 +519,12 @@
                 msRegion = new MultiSelect(els.desktopRegionSelect, '全部地区', options, state.filter.region, (val) => {
                     state.filter.region = val;
                     // Sync Mobile
-                    renderMobileCheckList(els.mobileRegionContainer, options, val, (v) => { state.filter.region = v; });
+                    if(msMobileRegion) msMobileRegion.updateSelected(val);
                     fetchNews(true);
                 });
                 
                 // Mobile
-                renderMobileCheckList(els.mobileRegionContainer, options, state.filter.region, (val) => {
+                msMobileRegion = new MultiSelect(els.mobileRegionContainer, '全部地区', options, state.filter.region, (val) => {
                     state.filter.region = val;
                     // Sync Desktop
                     if(msRegion) msRegion.updateSelected(val);
@@ -531,23 +541,59 @@
                 const res = await fetch('/api/categories');
                 if(!res.ok) throw new Error(res.status);
                 const list = await res.json();
-                const options = list.map(c => ({label: c, value: c}));
+
+                // Sort "其他" to the end
+                const otherIndex = list.indexOf('其他');
+                if (otherIndex > -1) {
+                    list.push(list.splice(otherIndex, 1)[0]);
+                }
                 
-                msCategory = new MultiSelect(els.desktopCategorySelect, '全部领域', options, state.filter.category, (val) => {
-                    state.filter.category = val;
-                    renderMobileCheckList(els.mobileCategoryContainer, options, val, (v) => { state.filter.category = v; });
-                    fetchNews(true);
-                });
-                
-                renderMobileCheckList(els.mobileCategoryContainer, options, state.filter.category, (val) => {
-                    state.filter.category = val;
-                    if(msCategory) msCategory.updateSelected(val);
-                });
+                // Add "All" option
+                const allCategories = ['全部', ...list];
+                renderCategoryTabs(allCategories);
                 
             } catch (e) { 
                 console.error("Fetch Categories Error:", e);
-                msCategory = new MultiSelect(els.desktopCategorySelect, '加载失败', [], '', ()=>{});
+                renderCategoryTabs(['全部']);
             }
+        }
+        
+        function renderCategoryTabs(categories) {
+            if (!els.categoryTabs) return;
+            els.categoryTabs.innerHTML = '';
+            
+            categories.forEach(cat => {
+                const btn = document.createElement('div');
+                btn.className = 'category-tab-item';
+                btn.textContent = cat;
+                
+                // Active state
+                const isAll = (state.filter.category === 'all' || !state.filter.category);
+                const isActive = (cat === '全部' && isAll) || (cat === state.filter.category);
+                
+                if (isActive) btn.classList.add('active');
+                
+                btn.onclick = () => {
+                    const val = (cat === '全部') ? 'all' : cat;
+                    state.filter.category = val;
+                    
+                    // Update UI immediately
+                    Array.from(els.categoryTabs.children).forEach(c => c.classList.remove('active'));
+                    btn.classList.add('active');
+                    
+                    // Auto scroll to center
+                    const container = els.categoryTabs;
+                    const scrollLeft = btn.offsetLeft - (container.offsetWidth / 2) + (btn.offsetWidth / 2);
+                    container.scrollTo({
+                        left: scrollLeft,
+                        behavior: 'smooth'
+                    });
+
+                    fetchNews(true);
+                };
+                
+                els.categoryTabs.appendChild(btn);
+            });
         }
 
         async function fetchSources() {
@@ -559,11 +605,11 @@
                 
                 msSource = new MultiSelect(els.desktopSourceSelect, '全部来源', options, state.filter.source, (val) => {
                     state.filter.source = val;
-                    renderMobileCheckList(els.mobileSourceContainer, options, val, (v) => { state.filter.source = v; });
+                    if(msMobileSource) msMobileSource.updateSelected(val);
                     fetchNews(true);
                 });
                 
-                renderMobileCheckList(els.mobileSourceContainer, options, state.filter.source, (val) => {
+                msMobileSource = new MultiSelect(els.mobileSourceContainer, '全部来源', options, state.filter.source, (val) => {
                     state.filter.source = val;
                     if(msSource) msSource.updateSelected(val);
                 });
