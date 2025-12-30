@@ -12,8 +12,8 @@
         padding: 15px 0;
     }
     .prompt-card {
-        background: #fff;
-        border: 1px solid #ddd;
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
         border-radius: 6px;
         padding: 15px;
         display: flex;
@@ -21,17 +21,17 @@
         transition: box-shadow 0.2s;
     }
     .prompt-card:hover {
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        box-shadow: var(--shadow-md);
     }
     .prompt-card h4 {
         margin: 0 0 8px 0;
         font-size: 16px;
-        color: #333;
+        color: var(--text-main);
     }
     .prompt-card p {
         margin: 0 0 15px 0;
         font-size: 13px;
-        color: #666;
+        color: var(--text-secondary);
         flex: 1;
         line-height: 1.4;
     }
@@ -45,23 +45,23 @@
         gap: 10px;
         margin-bottom: 15px;
         flex-wrap: wrap;
-        border-bottom: 1px solid #eee;
+        border-bottom: 1px solid var(--border-color);
         padding-bottom: 10px;
     }
     .admin-subtab {
         padding: 6px 12px;
-        border: 1px solid #ddd;
+        border: 1px solid var(--border-color);
         border-radius: 4px;
-        background: #f9f9f9;
+        background: var(--bg-soft);
         cursor: pointer;
         font-size: 13px;
-        color: #555;
+        color: var(--text-secondary);
     }
-    .admin-subtab:hover { background: #eee; }
+    .admin-subtab:hover { background: var(--bg-body); }
     .admin-subtab.active {
-        background: #007bff;
+        background: var(--primary-color);
         color: #fff;
-        border-color: #007bff;
+        border-color: var(--primary-color);
     }
 
     /* Modal */
@@ -75,25 +75,25 @@
         justify-content: center;
     }
     .modal {
-        background: #fff;
+        background: var(--bg-card);
         width: 800px;
         max-width: 90%;
         max-height: 90vh;
         border-radius: 8px;
         display: flex;
         flex-direction: column;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        box-shadow: var(--shadow-lg);
     }
     .modal-header {
         padding: 15px 20px;
-        border-bottom: 1px solid #eee;
+        border-bottom: 1px solid var(--border-color);
         display: flex;
         justify-content: space-between;
         align-items: center;
     }
-    .modal-header h3 { margin: 0; font-size: 18px; }
+    .modal-header h3 { margin: 0; font-size: 18px; color: var(--text-main); }
     .modal-close {
-        background: none; border: none; font-size: 24px; cursor: pointer; color: #999;
+        background: none; border: none; font-size: 24px; cursor: pointer; color: var(--text-light);
     }
     .modal-body {
         padding: 20px;
@@ -101,15 +101,15 @@
     }
     .modal-footer {
         padding: 15px 20px;
-        border-top: 1px solid #eee;
+        border-top: 1px solid var(--border-color);
         display: flex;
         justify-content: flex-end;
         gap: 10px;
     }
     .form-group { margin-bottom: 15px; }
-    .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
-    .form-text { font-size: 14px; color: #555; line-height: 1.5; }
-    .form-hint { font-size: 12px; color: #888; margin-top: 4px; }
+    .form-group label { display: block; margin-bottom: 5px; font-weight: 500; color: var(--text-main); }
+    .form-text { font-size: 14px; color: var(--text-secondary); line-height: 1.5; }
+    .form-hint { font-size: 12px; color: var(--text-light); margin-top: 4px; }
 </style>
 {% endblock %}
 
@@ -179,7 +179,7 @@
                 <input type="hidden" id="editPromptKey">
                 <div class="form-group">
                     <label>标题</label>
-                    <input type="text" id="editPromptTitle" class="admin-input" readonly style="background: #f5f5f5;">
+                    <input type="text" id="editPromptTitle" class="admin-input" readonly style="background: var(--bg-soft);">
                 </div>
                 <div class="form-group">
                     <label>描述</label>
@@ -632,8 +632,8 @@
             const card = document.createElement("div");
             card.className = "prompt-card";
             card.innerHTML = `
-                <h4>${item.title || key} <span style="font-weight:normal; font-size:12px; color:#999;">(${key})</span></h4>
-                <div style="font-size:12px; color:#007bff; margin-bottom:5px;">${item.group || "未分类"}</div>
+                <h4>${item.title || key} <span style="font-weight:normal; font-size:12px; color:var(--text-light);">(${key})</span></h4>
+                <div style="font-size:12px; color:var(--primary-color); margin-bottom:5px;">${item.group || "未分类"}</div>
                 <p>${item.description || "暂无描述"}</p>
                 <div class="prompt-actions">
                     <button class="admin-btn small" onclick="editPrompt('${key}')">编辑</button>
