@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     """
 
     APP_NAME: str = "TrendSonar"
-    VERSION: str = "0.1.6"
+    VERSION: str = "0.1.7"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
     PORT: int = 8193
@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     TOPIC_AGGREGATION_TOP_N: int = 300
     TOPIC_GENERATION_COUNT: str = "3-10"
     TOPIC_RECALL_POOL_SIZE: int = 2000
-    TOPIC_MATCH_THRESHOLD: float = 0.6
+    TOPIC_MATCH_THRESHOLD: float = 0.5
     TOPIC_MATCH_MAX_CANDIDATES: int = 20
     TOPIC_MIN_NEWS_COUNT: int = 3
     TOPIC_UPDATE_LOOKBACK_DAYS: int = 3
@@ -107,6 +107,7 @@ class Settings(BaseSettings):
         "TOPIC_MATCH": "main",
         "TOPIC_TIMELINE": "main",
         "TOPIC_OVERVIEW": "main",
+        "TOPIC_INITIAL_SUMMARY": "main",
         "REPORT": "main",
         "CHAT": "main"
     }

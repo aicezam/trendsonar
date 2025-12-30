@@ -458,11 +458,66 @@ class CrawlerService:
             await db.commit()
             logger.info(f"📥 入库新增 {count} 条")
 
-    async def crawl_weibo_simple(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
+    async def _refresh_weibo_cookie(self) -> Optional[str]:
+        """
+        自动刷新微博访客 Cookie
+        """
+        logger.info("🔄 正在尝试自动刷新微博 Cookie...")
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
+                
+                # 访问微博搜索页面，触发访客认证
+                try:
+                    await page.goto("https://s.weibo.com/weibo?q=Python", timeout=30000)
+                    await page.wait_for_load_state("networkidle")
+                except Exception as e:
+                    logger.warning(f"页面加载超时或出错，尝试直接获取Cookie: {e}")
+
+                cookies = await context.cookies()
+                await browser.close()
+                
+                # 提取并拼接 Cookie
+                cookie_list = [f"{c['name']}={c['value']}" for c in cookies]
+                cookie_str = "; ".join(cookie_list)
+                
+                if "SUB=" in cookie_str:
+                    logger.info("✅ 微博 Cookie 刷新成功")
+                    # 更新内存中的配置
+                    settings.WEIBO_COOKIE = cookie_str
+
+                    # 尝试持久化到 config.yaml
+                    try:
+                        from app.utils.config_io import load_yaml_dict, dump_yaml_text, save_yaml_text
+                        from app.core.config import CONFIG_PATH
+                        
+                        config_data = load_yaml_dict(CONFIG_PATH)
+                        config_data["WEIBO_COOKIE"] = cookie_str
+                        save_yaml_text(CONFIG_PATH, dump_yaml_text(config_data))
+                        logger.info("💾 微博 Cookie 已保存到 config.yaml")
+                    except Exception as e:
+                        logger.error(f"❌ 保存 Cookie 到配置文件失败: {e}")
+
+                    return cookie_str
+                else:
+                    logger.warning("⚠️ 微博 Cookie 刷新失败: 未找到 SUB 字段")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"❌ 微博 Cookie 刷新异常: {e}")
+            return None
+
+    async def crawl_weibo_simple(self, session: aiohttp.ClientSession, url: str, retry: bool = True) -> Optional[str]:
         """
         输入:
         - `session`: HTTP 会话
         - `url`: 微博详情页链接
+        - `retry`: 是否在失败时尝试刷新 Cookie 并重试
 
         输出:
         - 抓取到的正文文本；失败返回 None
@@ -510,6 +565,12 @@ class CrawlerService:
                     body_text = soup.body.get_text(separator="\n", strip=True) if soup.body else ""
                     if "Sina Visitor System" in body_text or "访问受限" in body_text:
                         logger.error("   ❌ [微博抓取] 触发反爬验证")
+                        
+                        if retry:
+                            new_cookie = await self._refresh_weibo_cookie()
+                            if new_cookie:
+                                return await self.crawl_weibo_simple(session, url, retry=False)
+
                         return None
                     return body_text[:5000]
 
