@@ -174,7 +174,7 @@ class AIService:
                 )
 
             # 重试逻辑
-            max_retries = 3
+            max_retries = 4
             for attempt in range(max_retries):
                 try:
                     if semaphore:
@@ -189,6 +189,11 @@ class AIService:
                     
                     if not content:
                          logger.warning(f"⚠️ AI 返回内容为空 ({model})")
+                         if attempt < max_retries - 1:
+                             logger.info(f"   🔄 空内容重试 ({attempt + 1}/{max_retries})...")
+                             await asyncio.sleep(1)
+                             continue
+                         return None
 
                     return content
                 
