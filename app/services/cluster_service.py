@@ -8,7 +8,7 @@
 import json
 import gc
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from sqlalchemy import delete, select
@@ -18,6 +18,7 @@ from app.core.config import BASE_DIR, get_settings
 from app.core.database import AsyncSessionLocal
 from app.core.logger import setup_logger
 from app.models.news import News
+from app.models.clustering_history import ClusteringHistory
 from app.services.ai_service import AIService, ai_service
 
 settings = get_settings()
@@ -139,6 +140,8 @@ class ClusteringService:
             from datetime import datetime, timedelta
 
             time_window = datetime.now() - timedelta(hours=settings.CLUSTERING_TIME_WINDOW_HOURS)
+            logger.info(f"   ⏱️ 聚类时间窗口: {settings.CLUSTERING_TIME_WINDOW_HOURS}h (Cutoff: {time_window.strftime('%Y-%m-%d %H:%M:%S')})")
+            
             result = await db.execute(
                 select(News).where(News.publish_date >= time_window).order_by(News.heat_score.desc())
             )
@@ -156,6 +159,16 @@ class ClusteringService:
                         item.embedding = emb
                 await db.commit()
 
+            # 加载历史核验记录 (改为加载最近的 5000 条记录)
+            history_result = await db.execute(
+                select(ClusteringHistory.news_id_a, ClusteringHistory.news_id_b)
+                .order_by(ClusteringHistory.id.desc())
+                .limit(5000)
+            )
+            failed_pairs = set((row.news_id_a, row.news_id_b) for row in history_result)
+            if failed_pairs:
+                logger.info(f"   📜 已加载 {len(failed_pairs)} 条最近的历史核验记录")
+
             pool = []
             for item in items:
                 if not item.embedding:
@@ -168,15 +181,27 @@ class ClusteringService:
             total_items = len(pool)
             logger.info(f"   🔍 开始预扫描 {total_items} 条数据...")
 
+            skipped_count = 0
             for i in range(len(pool)):
                 if i > 0 and i % 500 == 0:
                     logger.debug(f"      [预扫描] 已处理 {i}/{total_items} ...")
                 for j in range(i + 1, len(pool)):
+                    # 检查是否在历史拒绝列表中
+                    id_a, id_b = pool[i]["id"], pool[j]["id"]
+                    if id_a > id_b:
+                        id_a, id_b = id_b, id_a
+                    
+                    if (id_a, id_b) in failed_pairs:
+                        skipped_count += 1
+                        continue
+
                     sim = self.calculate_cosine_similarity(pool[i]["vec"], pool[j]["vec"])
                     if sim >= settings.CLUSTERING_THRESHOLD:
                         candidates[j].append((i, sim))
 
-            logger.info("   ✅ 预扫描完成")
+            total_candidates = sum(len(v) for v in candidates.values())
+            processed_candidates = 0
+            logger.info(f"   ✅ 预扫描完成 (共发现 {total_candidates} 个潜在合并对, 🛡️ 基于历史拦截跳过 {skipped_count} 对)")
 
             # ------------------------------------------------
 
@@ -187,6 +212,7 @@ class ClusteringService:
                     logger.debug(f"      [聚类循环] 第 {loop_count} 轮扫描...")
 
                 batch_requests = []
+                merged_indices_in_this_round = []
                 processed_in_this_round = False
 
                 for j in range(len(pool)):
@@ -197,6 +223,16 @@ class ClusteringService:
                         continue
 
                     leader_idx, sim = candidates[j][0]
+                    
+                    # 尝试找到最终的 Leader
+                    real_l_idx = self._get_active_leader_idx(pool, leader_idx)
+                    if real_l_idx is not None and real_l_idx != j:
+                        leader_idx = real_l_idx
+                    else:
+                        candidates[j].pop(0)
+                        processed_in_this_round = True
+                        continue
+
                     leader = pool[leader_idx]
 
                     if leader["merged"]:
@@ -205,7 +241,13 @@ class ClusteringService:
                         continue
 
                     if sim >= 0.98:
+                        processed_candidates += len(candidates[j])
+                        logger.debug(f"      🔗 高相似度自动合并: [{leader['obj'].title}] <== [{follower['obj'].title}] (Sim: {sim:.4f})")
                         await self._merge_news(db, leader, follower)
+                        
+                        pool[j]["merged_to"] = leader_idx
+                        merged_indices_in_this_round.append(j)
+                        
                         candidates[j] = []
                         processed_in_this_round = True
                     else:
@@ -226,8 +268,17 @@ class ClusteringService:
 
                 if batch_requests:
                     req_count = len(batch_requests)
-                    logger.info(f"   🤖 批量核验 {req_count} 对...")
+                    current_progress_start = processed_candidates + 1
+                    current_progress_end = min(processed_candidates + req_count, total_candidates)
+                    logger.info(f"   🤖 批量核验 {req_count} 对 (进度: {current_progress_start}-{current_progress_end}/{total_candidates})...")
+                    
+                    # 批量调用 AI 接口
                     verify_results = await self.ai.verify_cluster_batch(batch_requests)
+                    
+                    if len(verify_results) != len(batch_requests):
+                        logger.error(f"      ❌ AI 返回结果数量不匹配! 请求: {len(batch_requests)}, 返回: {len(verify_results)}")
+                    else:
+                        logger.debug(f"      🤖 AI 返回 {len(verify_results)} 条核验结果")
 
                     for idx, (req, is_match) in enumerate(zip(batch_requests, verify_results), 1):
                         l_idx = req["leader_idx"]
@@ -235,19 +286,57 @@ class ClusteringService:
                         progress_prefix = f"({idx}/{req_count})"
 
                         if is_match:
+                            processed_candidates += len(candidates[f_idx])
                             logger.debug(
                                 f"      {progress_prefix} 🔗 AI确认: [{pool[l_idx]['obj'].title}] <== [{pool[f_idx]['obj'].title}]"
                             )
                             await self._merge_news(db, pool[l_idx], pool[f_idx])
+                            
+                            pool[f_idx]["merged_to"] = l_idx
+                            merged_indices_in_this_round.append(f_idx)
+                            
                             candidates[f_idx] = []
                         else:
+                            processed_candidates += 1
                             logger.debug(
                                 f"      {progress_prefix} 🛡️ AI拦截: [{pool[l_idx]['obj'].title}] vs [{pool[f_idx]['obj'].title}]"
                             )
+                            
+                            # 记录到历史表，防止下次重复核验
+                            l_id = pool[l_idx]["id"]
+                            f_id = pool[f_idx]["id"]
+                            if l_id > f_id:
+                                l_id, f_id = f_id, l_id
+                            
+                            if (l_id, f_id) not in failed_pairs:
+                                # 确保使用 session 中的对象添加
+                                try:
+                                    history_record = ClusteringHistory(news_id_a=l_id, news_id_b=f_id)
+                                    db.add(history_record)
+                                    # 立即 flush 确保写入 session，并检测潜在约束冲突
+                                    await db.flush()
+                                    failed_pairs.add((l_id, f_id))
+                                except Exception as e:
+                                    logger.error(f"      ❌ 历史记录写入失败 ({l_id}, {f_id}): {e}")
+
                             if candidates[f_idx]:
                                 candidates[f_idx].pop(0)
 
-                    processed_in_this_round = True
+                # 每一批次后立即提交，防止任务中断导致进度丢失
+                try:
+                    await db.commit()
+                    if batch_requests or merged_indices_in_this_round:
+                        logger.debug("      ✅ 批次提交成功")
+                except Exception as e:
+                    logger.error(f"      ❌ 批次提交失败: {e}")
+                    await db.rollback()
+                    # 回滚内存状态
+                    for idx in merged_indices_in_this_round:
+                        pool[idx]["merged"] = False
+                        if "merged_to" in pool[idx]:
+                            del pool[idx]["merged_to"]
+
+                processed_in_this_round = True
 
                 if not processed_in_this_round:
                     break
@@ -260,6 +349,19 @@ class ClusteringService:
             del candidates
             del items
             gc.collect()
+
+    def _get_active_leader_idx(self, pool: List[Dict], idx: int) -> Optional[int]:
+        """递归查找当前节点被合并到的最终 Leader"""
+        current = idx
+        path = set()
+        while pool[current].get("merged"):
+            if current in path:
+                return None # 环路检测
+            path.add(current)
+            if "merged_to" not in pool[current]:
+                return None # 无法追踪
+            current = pool[current]["merged_to"]
+        return current
 
     async def _merge_news(self, db: AsyncSession, leader: Dict[str, Any], follower: Dict[str, Any]) -> None:
         """

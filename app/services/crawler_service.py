@@ -25,6 +25,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.logger import setup_logger
 from app.models.news import News
 from app.services.ai_service import ai_service
+from app.utils.tools import clean_html_content, clean_summary_text
 
 settings = get_settings()
 logger = setup_logger("CrawlerService")
@@ -599,7 +600,7 @@ class CrawlerService:
             log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
             is_verbose = log_level == logging.DEBUG
             
-            browser_conf = BrowserConfig(headless=True)
+            browser_conf = BrowserConfig(headless=True, verbose=is_verbose)
             
             async with AsyncWebCrawler(config=browser_conf) as crawler:
                 yield crawler
@@ -623,7 +624,7 @@ class CrawlerService:
         if not crawler:
             return await self.crawl_content(target_url)
 
-        logger.info(f"抓取新闻 (复用实例): {target_url}")
+        logger.debug(f"抓取新闻 (复用实例): {target_url}")
 
         if "weibo.com" in target_url or "weibo.cn" in target_url:
             try:
@@ -648,8 +649,8 @@ class CrawlerService:
 
             if result and result.markdown:
                 if hasattr(result.markdown, "raw_markdown"):
-                    return result.markdown.raw_markdown
-                return str(result.markdown)
+                    return clean_html_content(result.markdown.raw_markdown)
+                return clean_html_content(str(result.markdown))
 
         except Exception as e:
             logger.error(f"❌ 抓取失败: {e}")
@@ -667,7 +668,7 @@ class CrawlerService:
         - 抓取新闻正文，用于摘要生成与深度分析
         """
 
-        logger.info(f"抓取新闻: {target_url}")
+        logger.debug(f"抓取新闻: {target_url}")
 
         if "weibo.com" in target_url or "weibo.cn" in target_url:
             try:
@@ -683,7 +684,7 @@ class CrawlerService:
             log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
             is_verbose = log_level == logging.DEBUG
             
-            browser_conf = BrowserConfig(headless=True)
+            browser_conf = BrowserConfig(headless=True, verbose=is_verbose)
             run_conf = CrawlerRunConfig(
                 cache_mode=CacheMode.BYPASS,
                 verbose=is_verbose
@@ -694,8 +695,8 @@ class CrawlerService:
 
             if result and result.markdown:
                 if hasattr(result.markdown, "raw_markdown"):
-                    return result.markdown.raw_markdown
-                return str(result.markdown)
+                    return clean_html_content(result.markdown.raw_markdown)
+                return clean_html_content(str(result.markdown))
 
         except Exception as e:
             logger.error(f"❌ 抓取失败: {e}")

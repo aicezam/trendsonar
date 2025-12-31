@@ -119,7 +119,8 @@ async def auto_batch_analyze_new_news() -> None:
             batch = news_list[i : i + batch_size]
             batch_data = [{"id": n.id, "title": n.title} for n in batch]
 
-            logger.debug(f"   🚀 正在分析批次 {i // batch_size + 1} (大小: {len(batch)})...")
+            current_end = min(i + batch_size, total)
+            logger.info(f"   🚀 正在分析: {i + 1}-{current_end}/{total} (本批: {len(batch)})...")
             results = await ai_service.batch_analyze_sentiment(batch_data)
 
             updates = 0
@@ -184,7 +185,7 @@ async def auto_generate_summaries_top_n() -> None:
                         continue
 
                 if content:
-                    logger.debug(f"   {progress_str} 📝 生成摘要: {news.title}")
+                    logger.info(f"   {progress_str} 📝 生成摘要: {news.title}")
                     
                     # 组合输入：如果有原始摘要（RSS），则一起提供给 AI
                     input_content = content
@@ -225,6 +226,63 @@ async def auto_generate_summaries_top_n() -> None:
                 logger.error(f"   {progress_str} ⚠️ 处理异常 ({news.title}): {e}")
 
         logger.info(f"✅ 自动摘要完成，共处理 {count} 条")
+
+
+async def auto_generate_summaries_categories_top_n() -> None:
+    """
+    为每个领域的 Top 5 新闻生成摘要
+    """
+    logger.info("🤖 开始为各领域 Top 5 自动生成摘要...")
+    categories = settings.NEWS_CATEGORIES
+    top_n = 5
+    
+    async with AsyncSessionLocal() as db:
+        today_start = datetime.combine(datetime.now().date(), time.min)
+        
+        for cat in categories:
+            stmt = (
+                select(News)
+                .where(News.publish_date >= today_start)
+                .where(News.category == cat)
+                .order_by(desc(News.heat_score))
+                .limit(top_n)
+            )
+            result = await db.execute(stmt)
+            news_list = result.scalars().all()
+            
+            # 筛选出未生成 AI 摘要的
+            news_to_process = [n for n in news_list if not n.is_ai_summary]
+            if not news_to_process:
+                continue
+                
+            logger.debug(f"   📋 [{cat}] 需生成摘要: {len(news_to_process)} 条")
+            
+            for i, news in enumerate(news_to_process, 1):
+                try:
+                    logger.info(f"   [{cat}] ({i}/{len(news_to_process)}) 📝 生成摘要: {news.title}")
+                    content = news.content
+                    if not content or len(content) < 50:
+                        content = await crawler_service.crawl_content(news.url)
+                        if content:
+                            news.content = content
+                            db.add(news) # 立即保存正文
+                        else:
+                            continue
+                            
+                    input_content = content
+                    if news.summary:
+                         input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
+                         
+                    summary = await ai_service.generate_summary(news.title, input_content)
+                    if summary:
+                        news.summary = summary
+                        news.is_ai_summary = True
+                        db.add(news)
+                except Exception as e:
+                    logger.error(f"   ⚠️ 生成摘要失败 ({news.title}): {e}")
+            
+            await db.commit()
+    logger.info("✅ 各领域 Top 5 摘要生成完成")
 
 
 async def auto_analyze_sentiment_top_n() -> None:
@@ -345,6 +403,7 @@ async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = 
         await auto_batch_analyze_new_news()
 
         await auto_generate_summaries_top_n()
+        await auto_generate_summaries_categories_top_n()
 
         await auto_analyze_sentiment_top_n()
 
@@ -499,6 +558,7 @@ async def run_manual() -> None:
         await crawler_service.save_raw_news(items)
         await cluster_service.execute_clustering()
         await auto_generate_summaries_top_n()
+        await auto_generate_summaries_categories_top_n()
         await auto_analyze_sentiment_top_n()
 
         await report_service.generate_and_cache_global_report("daily")

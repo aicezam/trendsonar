@@ -598,11 +598,11 @@ class TopicService:
             logger.info(f"   ⚠️ [新专题] AI 核验通过数量不足 ({len(confirmed_news)} < {settings.TOPIC_MIN_NEWS_COUNT})，跳过")
             return None
             
-        # 检查热度指标 (用户要求: 热度 > 6)
+        # 检查热度指标 ( > 3.5 以允许普通新闻成专题)
         # 计算热度（取新闻最大热度）
         max_heat = max([float(n.heat_score or 0) for n in confirmed_news]) if confirmed_news else 0
-        if not is_duplicate and max_heat <= 6:
-             logger.info(f"   ⚠️ [新专题] 热度不足 ({max_heat} <= 4)，跳过")
+        if not is_duplicate and max_heat < 3.5:
+             logger.info(f"   ⚠️ [新专题] 热度不足 ({max_heat} < 3.5)，跳过")
              return None
         
         # 旧专题：不限制最小数量，只要有新的就合并

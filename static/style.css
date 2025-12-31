@@ -280,7 +280,7 @@ body.page-index .mobile-top-bar { background: var(--bg-card); padding: 12px; dis
     scrollbar-width: none; /* Firefox */
     -ms-overflow-style: none;  /* IE 10+ */
     white-space: nowrap;
-    border-bottom: 1px solid var(--border-color);
+    /* border-bottom: 1px solid var(--border-color); */
 }
 .category-tabs-container::-webkit-scrollbar { 
     display: none;  /* Chrome Safari */

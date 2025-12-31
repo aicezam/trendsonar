@@ -85,6 +85,7 @@ async def init_db() -> None:
     from app.models.news import News  # noqa: F401
     from app.models.report import ReportCache  # noqa: F401
     from app.models.topic import Topic, TopicTimelineItem  # noqa: F401
+    from app.models.clustering_history import ClusteringHistory  # noqa: F401
 
     engine = get_engine()
     async with engine.begin() as conn:

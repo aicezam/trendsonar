@@ -107,6 +107,9 @@ def configure_logging() -> None:
         "crawl4ai",
         "playwright",
         "urllib3",
+        "httpx",
+        "httpcore",
+        "openai",
     ):
         logging.getLogger(name).setLevel(noisy_level)
 

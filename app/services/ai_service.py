@@ -208,7 +208,8 @@ class AIService:
                     # 400 Bad Request 通常意味着内容过滤或参数无效
                     if e.status_code == 400:
                         logger.warning(f"❌ AI 请求被拒绝 (400) - 可能触发敏感词过滤 ({model}): {e}")
-                        return None # 故障转移到下一个路由
+                        # 触发外部的切换逻辑，如果是路由模式，会捕获 None 然后切换
+                        return None 
                     
                     # 服务端错误，重试可能有效
                     if e.status_code >= 500:
@@ -650,12 +651,12 @@ class AIService:
         route_value = settings.AI_ROUTE.get(route_key, "main").lower()
         return route_value == "backup"
 
-    async def generate_summary(self, title: str, content: str, max_words: int = 300) -> Optional[str]:
+    async def generate_summary(self, title: str, content: str, max_words: Optional[int] = None) -> Optional[str]:
         """
         输入:
         - `title`: 新闻标题
         - `content`: 新闻正文
-        - `max_words`: 最大字数限制 (默认 300)
+        - `max_words`: 最大字数限制 (可选，默认使用配置)
 
         输出:
         - 摘要文本 (如果失败返回 None)
@@ -665,8 +666,18 @@ class AIService:
         """
         if not content:
             return None
+            
+        # 使用配置的默认长度
+        if max_words is None:
+            max_words = getattr(settings, "SUMMARY_OUTPUT_LENGTH", 300)
+            
+        # 截取输入内容
+        input_limit = getattr(settings, "SUMMARY_INPUT_MAX_LENGTH", 5000)
+        if input_limit > 0 and len(content) > input_limit:
+            content = content[:input_limit] + "\n...(已截断)"
+
         system_prompt = prompt_manager.get_system_prompt("summary_generation", max_words=max_words)
-        user_prompt = prompt_manager.get_user_prompt("summary_generation", title=title, content=content[:100000])
+        user_prompt = prompt_manager.get_user_prompt("summary_generation", title=title, content=content)
 
         prefer_backup = self._get_prefer_backup("SUMMARY")
         routes = self._iter_llm_routes(prefer_backup)
@@ -1063,7 +1074,10 @@ class AIService:
                 return None
 
         routes = self._iter_llm_routes(self._get_prefer_backup("CLUSTERING"))
-        for route in routes:
+        # 将 routes 转换为列表以便索引
+        route_list = list(routes)
+        
+        for i, route in enumerate(route_list):
             # 如果是 backup 通道，尝试 3 次；如果是 main 通道，尝试 1 次
             is_backup = (route["base_url"] == settings.BACKUP_AI_BASE_URL)
             max_attempts = 3 if is_backup else 1
@@ -1081,8 +1095,15 @@ class AIService:
                 
                 if res is not None:
                     return res
-                if is_backup:
+                
+                # 如果运行到这里，说明尝试失败（返回了 None）
+                if is_backup and attempt < max_attempts - 1:
                     logger.warning(f"⚠️ 备用AI核验失败 (第{attempt + 1}次)，准备重试...")
+
+            # 当前路由的所有尝试都失败了
+            if i < len(route_list) - 1:
+                next_route = route_list[i+1]
+                logger.warning(f"⚠️ 路由 {route['model']} (CLUSTERING) 调用失败，尝试切换到 -> {next_route['model']}")
 
         logger.error("❌ 所有通道核验均失败，跳过本批次")
         return [False] * len(pairs)
@@ -1157,12 +1178,7 @@ class AIService:
         res = await self._call_llm_with_routes(user_prompt, system_prompt, prefer_backup=prefer_backup)
         if res:
             return res.strip()
-        return "暂无法生成综述。"
+        return ""
 
 
-
-
-
-
-
-ai_service = AIService()
+ai_service = AIService() 

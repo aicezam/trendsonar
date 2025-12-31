@@ -16,10 +16,13 @@ from sqlalchemy import and_, case, cast, delete, desc, func, literal, or_, selec
 from sqlalchemy.dialects.postgresql import JSONB
 
 from app.core.database import AsyncSessionLocal, check_db_connection
+from app.core.config import get_settings
 from app.core.logger import logger
 from app.core.prompts import prompt_manager
 from app.models.news import News
 from app.models.report import ReportCache
+
+settings = get_settings()
 from app.services.ai_service import ai_service
 
 

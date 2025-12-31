@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     AUTO_ANALYSIS_TOP_N: int = 5
     ANALYSIS_BATCH_SIZE: int = 10
 
+    # Token 优化配置
+    ANALYSIS_INPUT_MAX_LENGTH: int = 1000
+    SUMMARY_INPUT_MAX_LENGTH: int = 5000
+    SUMMARY_ORIGIN_MAX_LENGTH: int = 300
+    SUMMARY_OUTPUT_LENGTH: int = 300
+
     WEIBO_COOKIE: str = ""
 
     FOLLOW_KEYWORDS: str = ""

@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta
-from typing import Optional, Tuple
+import unicodedata
+from datetime import datetime
+from typing import Dict, List, Optional
 
 
 def clean_html_tags(text: str) -> str:
@@ -32,6 +33,66 @@ def clean_html_tags(text: str) -> str:
     # 3. 移除多余空白
     clean = re.sub(r'\s+', ' ', clean).strip()
     return clean
+
+
+def clean_html_content(html: str) -> str:
+    """
+    深度清洗 HTML/Markdown 内容，去除广告、脚本、样式及无关干扰信息。
+    """
+    if not html:
+        return ""
+    
+    text = html
+
+    # 如果是 HTML，先去除脚本和样式
+    if "<html" in text or "<div" in text or "<p>" in text:
+        # 1. 移除 script 和 style 及其内容
+        text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', text, flags=re.IGNORECASE | re.DOTALL)
+        # 2. 移除注释
+        text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+        # 3. 移除常见的无关标签 (iframe, noscript)
+        text = re.sub(r'<(iframe|noscript)[^>]*>.*?</\1>', '', text, flags=re.IGNORECASE | re.DOTALL)
+    
+    # 通用清洗（适用于 HTML 和 Markdown）
+    # 移除常见的非正文关键词段落
+    noise_patterns = [
+        r'版权声明.*',
+        r'推荐阅读.*',
+        r'相关阅读.*',
+        r'延伸阅读.*',
+        r'编辑：.*',
+        r'责任编辑：.*',
+        r'来源：.*',
+        r'广告.*',
+        r'关注我们.*',
+    ]
+    
+    for pattern in noise_patterns:
+        # 匹配单独一行的噪音，或者段落末尾的噪音
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+
+    return text.strip()
+
+
+def clean_summary_text(content: str) -> str:
+    """
+    清洗 RSS 摘要，去除 HTML 标签和图片，只保留纯文本。
+    """
+    if not content:
+        return ""
+    
+    # 1. 移除 img 标签 (特别针对 RSS 中的图片)
+    content = re.sub(r'<img[^>]*>', '', content, flags=re.IGNORECASE)
+    
+    # 2. 移除所有 HTML 标签
+    content = re.sub(r'<[^>]+>', ' ', content)
+    
+    # 3. 解码 HTML 实体 (可选，但 tools.py 里没引入 html 库，这里简单处理空白)
+    
+    # 4. 移除多余空白
+    content = re.sub(r'\s+', ' ', content).strip()
+    
+    return content
 
 
 def parse_query_time_range(query: str) -> Tuple[Optional[datetime], Optional[datetime]]:
