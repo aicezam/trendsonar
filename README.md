@@ -141,7 +141,9 @@ TrendSonar 的分析质量主要取决于以下因素：
 
 ## 🌟 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=aicezam/trendsonar&type=Date)](https://www.star-history.com/#aicezam/trendsonar&Date)
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=aicezam/trendsonar&type=date&legend=top-left)](https://www.star-history.com/#aicezam/trendsonar&type=date&legend=top-left)
 
 
 ## 📆 更新日志
