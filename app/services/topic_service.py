@@ -128,21 +128,21 @@ class TopicService:
             proposed_topics = await self.ai.propose_topics_from_titles(seed_titles)
             if not proposed_topics:
                 logger.info("⚠️ AI 未提炼出任何专题")
-                return
+                proposed_topics = []
 
             # 获取现有的 Active 专题，用于查重和延伸判断
             active_topics_stmt = select(Topic).where(Topic.status == "active")
             active_topics = (await db.execute(active_topics_stmt)).scalars().all()
 
             # 4.1 新增：专题质量评估与过滤 (初步过滤)
-            # 将现有专题转为简单字典供 AI 参考
-            existing_topics_data = [{"name": t.name, "description": t.summary or ""} for t in active_topics]
-            # 先做一次粗略筛选，过滤掉明显不靠谱的
-            proposed_topics = await self.ai.batch_evaluate_topic_quality(proposed_topics, existing_topics=existing_topics_data)
+            if proposed_topics:
+                # 将现有专题转为简单字典供 AI 参考
+                existing_topics_data = [{"name": t.name, "description": t.summary or ""} for t in active_topics]
+                # 先做一次粗略筛选，过滤掉明显不靠谱的
+                proposed_topics = await self.ai.batch_evaluate_topic_quality(proposed_topics, existing_topics=existing_topics_data)
             
             if not proposed_topics:
-                logger.info("⚠️ 经 AI 评估，所有提炼专题均过于宽泛或质量不佳，跳过")
-                return
+                logger.info("⚠️ 经 AI 评估，所有提炼专题均过于宽泛或质量不佳，将仅执行旧专题扫描")
 
             # 确保现有专题有向量
             active_topic_vecs = await self._ensure_topic_embeddings(db, active_topics)
