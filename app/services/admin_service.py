@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import signal
 import sys
 import time
 from pathlib import Path
@@ -74,8 +75,77 @@ def save_config_yaml_text(yaml_text: str) -> None:
 
 
 def schedule_restart(delay_seconds: float = 1.0) -> None:
+    def _safe_kill(pid: int, sig: int) -> None:
+        try:
+            os.kill(pid, sig)
+        except Exception:
+            return
+
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+
+    def _collect_descendant_pids(root_pid: int) -> list[int]:
+        if os.name != "posix" or not Path("/proc").exists():
+            return []
+
+        ppid_to_children: Dict[int, list[int]] = {}
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            stat_path = entry / "stat"
+            try:
+                stat = stat_path.read_text(encoding="utf-8", errors="ignore")
+                end = stat.rfind(") ")
+                if end == -1:
+                    continue
+                rest = stat[end + 2 :].split()
+                if len(rest) < 2:
+                    continue
+                ppid = int(rest[1])
+                pid = int(entry.name)
+            except Exception:
+                continue
+            ppid_to_children.setdefault(ppid, []).append(pid)
+
+        descendants: list[int] = []
+        stack = [root_pid]
+        seen = {root_pid}
+        while stack:
+            current = stack.pop()
+            for child in ppid_to_children.get(current, []):
+                if child in seen:
+                    continue
+                seen.add(child)
+                descendants.append(child)
+                stack.append(child)
+
+        return descendants
+
+    def _terminate_descendants(root_pid: int) -> None:
+        pids = _collect_descendant_pids(root_pid)
+        if not pids:
+            return
+
+        for pid in reversed(pids):
+            _safe_kill(pid, signal.SIGTERM)
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if not any(_pid_alive(pid) for pid in pids):
+                return
+            time.sleep(0.1)
+
+        for pid in reversed(pids):
+            if _pid_alive(pid):
+                _safe_kill(pid, signal.SIGKILL)
+
     async def _shutdown() -> None:
         await asyncio.sleep(delay_seconds)
+        _terminate_descendants(os.getpid())
         try:
             os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception:
