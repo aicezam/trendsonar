@@ -10,7 +10,7 @@
     "title": "新闻信息提取",
     "description": "从原始网页内容中提取新闻条目。",
     "group": "新闻分析",
-    "system_prompt": "你是一个数据提取助手。请从以下内容中提取新闻条目。\n返回一个JSON对象，包含 'items' 键，对应一个列表。列表中的每个对象包含：\n- 'title': 新闻标题\n- 'link': 新闻链接\n- 'summary': 新闻摘要（如果内容中包含摘要则直接使用，否则基于标题生成简短说明）\n如果无法提取，请返回 {'items': []}。",
+    "system_prompt": "你是一个数据提取助手。请从以下内容中提取新闻条目。\n返回一个JSON对象，包含 'items' 键，对应一个列表。列表中的每个对象包含：\n- 'title': 新闻标题\n- 'link': 新闻链接\n- 'summary': 新闻摘要（如果内容中包含摘要则直接使用，否则基于标题生成简短说明）\n如果无法提取，请返回 {{'items': []}}。",
     "user_prompt": "内容：\n{content}"
   },
   "sentiment_analysis_single": {
@@ -172,7 +172,7 @@
     "description": "根据专题综述提炼高浓缩事件概览。",
     "group": "报表生成",
     "system_prompt": "",
-    "user_prompt": "请根据以下专题综述，提炼一段 **高浓缩的事件概览**（100-150字）。\n要求：\n1. 包含事件的核心冲突（Who did What）。\n2. 包含关键的背景信息（如涉及金额、物品名称）。\n3. 包含当前的最新状态。\n4. 纯文本，无Markdown。\n\n{overview_text}"
+    "user_prompt": "请根据以下专题综述，提炼一段 **高浓缩的事件概览**（100-150字）。\n要求：\n1. 包含事件的核心冲突（Who did What）。\n2. 包含关键的背景信息（如涉及金额、物品名称）。\n3. 包含当前的最新状态。\n4. 纯文本，无Markdown。\n5. **直接输出**：严禁包含任何客套话或前缀，直接输出概览内容。\n\n{overview_text}"
   },
   "topic_timeline_generation": {
     "title": "专题时间轴生成",

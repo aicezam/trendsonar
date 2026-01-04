@@ -14,85 +14,46 @@ from typing import Dict, List, Optional
 
 def clean_html_tags(text: str) -> str:
     """
-    输入:
-    - `text`: 可能包含 HTML 标签的文本
-    
-    输出:
-    - 去除 HTML 标签后的纯文本
-    
-    作用:
-    - 用于前端展示时的文本清洗，防止 HTML 标签破坏布局
+    深度清洗文本：
+    1. 去除所有 HTML 标签
+    2. 去除 Markdown 图片/链接语法
+    3. 去除 URL 链接
+    4. 去除多余空白
+    只保留纯文本内容。
     """
     if not text:
         return ""
-    # 1. 移除完整 HTML 标签
-    clean = re.sub(r'<[^>]+>', ' ', text)
-    # 2. 移除末尾可能的残缺标签 (例如 "<img src=...")
-    # 匹配以 < 开头，后面跟字母或/，直到字符串结束
+    
+    # 0. 预处理：移除脚本和样式内容 (防止残留 js 代码)
+    clean = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.IGNORECASE | re.DOTALL)
+    
+    # 1. 移除 Markdown 图片 ![alt](url) 和 链接 [text](url)
+    # 先去图片
+    clean = re.sub(r'!\[.*?\]\(.*?\)', ' ', clean)
+    # 再去链接（保留链接文本，去掉URL部分）-> [text](url) => text
+    # 注意：这里我们选择去除链接语法保留文本，或者直接把链接部分去掉
+    # 如果要保留文本：
+    clean = re.sub(r'\[([^\]]+)\]\(.*?\)', r'\1', clean)
+    
+    # 2. 移除 HTML 标签
+    clean = re.sub(r'<[^>]+>', ' ', clean)
+    
+    # 3. 移除末尾可能的残缺标签
     clean = re.sub(r'<[a-zA-Z/][^>]*$', '', clean)
-    # 3. 移除多余空白
+    
+    # 4. 移除裸露的 URL (http/https 开头)
+    clean = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', clean)
+
+    # 5. 解码 HTML 实体 (如 &nbsp; -> space, &lt; -> <)
+    # 由于没引入 html 库，这里做简单的常见实体替换，或者引入 html 模块
+    import html
+    clean = html.unescape(clean)
+
+    # 6. 移除多余空白
     clean = re.sub(r'\s+', ' ', clean).strip()
+    
     return clean
 
-
-def clean_html_content(html: str) -> str:
-    """
-    深度清洗 HTML/Markdown 内容，去除广告、脚本、样式及无关干扰信息。
-    """
-    if not html:
-        return ""
-    
-    text = html
-
-    # 如果是 HTML，先去除脚本和样式
-    if "<html" in text or "<div" in text or "<p>" in text:
-        # 1. 移除 script 和 style 及其内容
-        text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', text, flags=re.IGNORECASE | re.DOTALL)
-        # 2. 移除注释
-        text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
-        # 3. 移除常见的无关标签 (iframe, noscript)
-        text = re.sub(r'<(iframe|noscript)[^>]*>.*?</\1>', '', text, flags=re.IGNORECASE | re.DOTALL)
-    
-    # 通用清洗（适用于 HTML 和 Markdown）
-    # 移除常见的非正文关键词段落
-    noise_patterns = [
-        r'版权声明.*',
-        r'推荐阅读.*',
-        r'相关阅读.*',
-        r'延伸阅读.*',
-        r'编辑：.*',
-        r'责任编辑：.*',
-        r'来源：.*',
-        r'广告.*',
-        r'关注我们.*',
-    ]
-    
-    for pattern in noise_patterns:
-        # 匹配单独一行的噪音，或者段落末尾的噪音
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-
-    return text.strip()
-
-
-def clean_summary_text(content: str) -> str:
-    """
-    清洗 RSS 摘要，去除 HTML 标签和图片，只保留纯文本。
-    """
-    if not content:
-        return ""
-    
-    # 1. 移除 img 标签 (特别针对 RSS 中的图片)
-    content = re.sub(r'<img[^>]*>', '', content, flags=re.IGNORECASE)
-    
-    # 2. 移除所有 HTML 标签
-    content = re.sub(r'<[^>]+>', ' ', content)
-    
-    # 3. 解码 HTML 实体 (可选，但 tools.py 里没引入 html 库，这里简单处理空白)
-    
-    # 4. 移除多余空白
-    content = re.sub(r'\s+', ' ', content).strip()
-    
-    return content
 
 
 def parse_query_time_range(query: str) -> Tuple[Optional[datetime], Optional[datetime]]:

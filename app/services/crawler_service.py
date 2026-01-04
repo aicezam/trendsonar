@@ -25,7 +25,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.logger import setup_logger
 from app.models.news import News
 from app.services.ai_service import ai_service
-from app.utils.tools import clean_html_content, clean_summary_text
+from app.utils.tools import clean_html_tags
 
 settings = get_settings()
 logger = setup_logger("CrawlerService")
@@ -116,25 +116,10 @@ class CrawlerService:
         """
         if not summary:
             return summary
-
-        # 快速检查，避免不必要的解析
-        if "ops.xhyun.news.cn" not in summary and "bucket-cb-yunqiao" not in summary:
-            return summary
-
-        try:
-            # 使用 html.parser 解析片段
-            soup = BeautifulSoup(summary, "html.parser")
-            changed = False
-            for img in soup.find_all("img"):
-                src = img.get("src", "")
-                if "ops.xhyun.news.cn" in src or "bucket-cb-yunqiao" in src:
-                    img.decompose()
-                    changed = True
             
-            return str(soup) if changed else summary
-        except Exception as e:
-            logger.warning(f"摘要清洗失败: {e}")
-            return summary
+        # 优先使用 clean_html_tags 进行彻底清洗
+        return clean_html_tags(summary)
+
 
     def _process_meta(
         self,
@@ -649,8 +634,8 @@ class CrawlerService:
 
             if result and result.markdown:
                 if hasattr(result.markdown, "raw_markdown"):
-                    return clean_html_content(result.markdown.raw_markdown)
-                return clean_html_content(str(result.markdown))
+                    return clean_html_tags(result.markdown.raw_markdown)
+                return clean_html_tags(str(result.markdown))
 
         except Exception as e:
             logger.error(f"❌ 抓取失败: {e}")
@@ -695,8 +680,8 @@ class CrawlerService:
 
             if result and result.markdown:
                 if hasattr(result.markdown, "raw_markdown"):
-                    return clean_html_content(result.markdown.raw_markdown)
-                return clean_html_content(str(result.markdown))
+                    return clean_html_tags(result.markdown.raw_markdown)
+                return clean_html_tags(str(result.markdown))
 
         except Exception as e:
             logger.error(f"❌ 抓取失败: {e}")

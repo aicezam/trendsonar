@@ -134,16 +134,11 @@ class TopicService:
             active_topics_stmt = select(Topic).where(Topic.status == "active")
             active_topics = (await db.execute(active_topics_stmt)).scalars().all()
 
-            # 4.1 新增：专题质量评估与过滤 (初步过滤)
-            if proposed_topics:
-                # 将现有专题转为简单字典供 AI 参考
-                existing_topics_data = [{"name": t.name, "description": t.summary or ""} for t in active_topics]
-                # 先做一次粗略筛选，过滤掉明显不靠谱的
-                proposed_topics = await self.ai.batch_evaluate_topic_quality(proposed_topics, existing_topics=existing_topics_data)
+            # 4.1 优化：跳过基于初始描述的初步过滤
+            # 理由：初始描述是 AI 基于标题生成的，可能存在幻觉。与其浪费 Token 评估幻觉，
+            # 不如直接通过向量搜索看是否有真实新闻支撑。如果向量搜不到，自然会被后续逻辑淘汰。
+            # existing_topics_data = [...] # 移至需要时再构建
             
-            if not proposed_topics:
-                logger.info("⚠️ 经 AI 评估，所有提炼专题均过于宽泛或质量不佳，将仅执行旧专题扫描")
-
             # 确保现有专题有向量
             active_topic_vecs = await self._ensure_topic_embeddings(db, active_topics)
 
@@ -216,6 +211,12 @@ class TopicService:
                 
                 # 3. 二次质量审核 (Quality Audit with Real Summary)
                 # 复用 batch_evaluate 但只传一个
+                # 构建 existing_topics_data 供参考 (Lazy build)
+                existing_topics_data = [
+                    {"name": t.name, "description": (t.summary or "")[:100]} 
+                    for t in active_topics
+                ]
+                
                 audit_list = [{"name": t_name, "description": final_desc}]
                 valid_topics = await self.ai.batch_evaluate_topic_quality(audit_list, existing_topics=existing_topics_data)
                 
@@ -234,8 +235,12 @@ class TopicService:
                     if sim > 0.6: 
                         logger.info(f"   🔄 与现有专题 '{existing_t.name}' 相似 (sim={sim:.2f})，正在进行 AI 二次核验...")
                         
+                        # 优化：限制传入 AI 的文本长度
                         is_duplicate, reason = await self.ai.check_topic_duplicate(
-                            t_name, final_desc, existing_t.name, existing_t.summary or ""
+                            t_name, 
+                            final_desc[:1000], 
+                            existing_t.name, 
+                            (existing_t.summary or "")[:1000]
                         )
                         
                         if is_duplicate:
@@ -249,7 +254,8 @@ class TopicService:
                 # 执行匹配和更新 (传递 final_desc 作为 summary)
                 result_topic = await self._match_and_update_topic(
                     db, t_name, final_desc, t_vec, existing_topic_obj, 
-                    news_pool, pool_vecs, used_ids
+                    news_pool, pool_vecs, used_ids,
+                    initial_summary=generated_summary
                 )
                 
                 if result_topic:
@@ -521,7 +527,8 @@ class TopicService:
         news_pool: List[News],
         pool_vecs: Dict[int, List[float]],
         used_ids: Set[int],
-        match_threshold: float = settings.TOPIC_MATCH_THRESHOLD
+        match_threshold: float = settings.TOPIC_MATCH_THRESHOLD,
+        initial_summary: Optional[str] = None
     ) -> Optional[Topic]:
         """
         核心逻辑：根据专题信息（名称、描述、向量），在 news_pool 中寻找匹配新闻，
@@ -554,6 +561,20 @@ class TopicService:
         candidates.sort(key=lambda x: x[1], reverse=True)
         # 取前 20 个给 AI 核验
         candidates = candidates[:settings.TOPIC_MATCH_MAX_CANDIDATES]
+        
+        # 优化：如果是旧专题更新，过滤掉发布时间超过 24 小时的新闻
+        # 避免将几天前的旧新闻作为“新动态”更新进去
+        if is_duplicate:
+            cutoff_time = datetime.now() - timedelta(hours=24)
+            original_count = len(candidates)
+            candidates = [c for c in candidates if c[0].publish_date and c[0].publish_date >= cutoff_time]
+            
+            if len(candidates) < original_count:
+                logger.info(f"   🧹 [旧专题] 过滤了 {original_count - len(candidates)} 条过旧新闻 (< {cutoff_time.strftime('%m-%d %H:%M')})")
+            
+            if not candidates:
+                logger.info(f"   ⏩ [旧专题] 无近期候选新闻，跳过")
+                return None
         
         # 如果是新专题，且候选不足，则跳过；如果是合并旧专题，候选不足也无妨（只是本次没更新）
         if not is_duplicate and len(candidates) <= settings.TOPIC_MIN_NEWS_COUNT:
@@ -823,50 +844,79 @@ class TopicService:
         await db.flush() # 确保 item 入库
 
         # 6. 生成/更新专题综述 (Overview) & 简要描述 (Summary)
-        # 获取该专题下所有关联的新闻（为了生成全面的综述）
-        # 限制数量，取热度最高的 50 条
-        all_items_stmt = (
-            select(TopicTimelineItem)
-            .where(TopicTimelineItem.topic_id == current_topic_id)
-            .order_by(desc(TopicTimelineItem.event_time))
-            .limit(50)
-        )
-        all_items = (await db.execute(all_items_stmt)).scalars().all()
+        # 优化策略：
+        # 1. 如果是旧专题更新，且新增新闻很少/热度低，则跳过 Overview 更新（节省大量 Token）
+        # 2. 如果是新专题，必须生成 Overview。
+        # 3. 生成 Summary 时，如果已有 initial_summary 且是新专题，则直接复用。
+
+        should_update_overview = True
         
-        # 收集用于生成综述的素材
-        overview_materials = []
-        for it in all_items:
-            overview_materials.append({
-                "title": it.news_title,
-                "content": it.content or "" # 使用 timeline 的 AI 摘要作为素材更好
-            })
-        
-        if overview_materials:
-            # 1. 生成多维度综述
-            # 注意：如果是 Existing Topic，名字可能和 t_name 不完全一样（如果是 Phase 2），但通常 Phase 2 传入的 t_name 就是 existing.name
-            target_name = existing_topic_obj.name if existing_topic_obj else t_name
+        if is_duplicate:
+            # 检查新增新闻的重要性
+            new_news_count = len(confirmed_news)
+            max_new_heat = max([float(n.heat_score or 0) for n in confirmed_news]) if confirmed_news else 0
             
-            overview_text = await self.ai.generate_topic_overview(
-                target_name, 
-                overview_materials
+            # 阈值：如果新增少于 3 条，且最大热度不超过 6.0，则认为变更不显著，不重写综述
+            # (Timeline 已经更新了，用户依然可以看到新动态，只是 Overview 文本不变)
+            if new_news_count < 3 and max_new_heat < 6.0:
+                logger.info(f"   ⏩ [Overview] 新增内容较少 (Count={new_news_count}, MaxHeat={max_new_heat:.1f})，跳过综述重写")
+                should_update_overview = False
+        
+        if should_update_overview:
+            # 获取该专题下所有关联的新闻（为了生成全面的综述）
+            # 限制数量，取热度最高的 50 条
+            all_items_stmt = (
+                select(TopicTimelineItem)
+                .where(TopicTimelineItem.topic_id == current_topic_id)
+                .order_by(desc(TopicTimelineItem.event_time))
+                .limit(50)
             )
+            all_items = (await db.execute(all_items_stmt)).scalars().all()
             
-            # 2. 更新 summary (简要描述)
-            if overview_text:
-                new_summary = None
-                # 为了节省 token，直接让 AI 基于 overview_text 生成 summary
-                summary_prompt = prompt_manager.get_user_prompt("topic_overview_summary", overview_text=overview_text[:2000])
-                new_summary = await self.ai.chat_completion(summary_prompt, route_key="TOPIC_OVERVIEW")
+            # 收集用于生成综述的素材
+            overview_materials = []
+            for it in all_items:
+                # 优化：优先使用 summary 或 content 的截断版本
+                # TopicTimelineItem.content 通常是时间轴事件的描述，本身比较精简
+                # 但如果它包含很长的引用，还是限制一下为好
+                content_val = it.content or ""
+                overview_materials.append({
+                    "title": it.news_title,
+                    "content": content_val[:500] # 使用 timeline 的 AI 摘要作为素材，限制长度
+                })
+            
+            if overview_materials:
+                # 1. 生成多维度综述
+                # 注意：如果是 Existing Topic，名字可能和 t_name 不完全一样（如果是 Phase 2），但通常 Phase 2 传入的 t_name 就是 existing.name
+                target_name = existing_topic_obj.name if existing_topic_obj else t_name
                 
-                # 更新 Topic
-                topic_to_update = existing_topic_obj if is_duplicate else topic_obj_to_return
-                topic_to_update.record = overview_text
-                if new_summary:
-                    topic_to_update.summary = new_summary.replace("```", "").strip()
+                overview_text = await self.ai.generate_topic_overview(
+                    target_name, 
+                    overview_materials
+                )
                 
-                db.add(topic_to_update)
-            else:
-                logger.warning(f"   ⚠️ 专题综述生成失败 (None)，跳过 Summary 更新")
+                # 2. 更新 summary (简要描述)
+                if overview_text:
+                    new_summary = None
+                    
+                    # 优化：如果是新专题，且外部传入了 initial_summary，直接使用，不再调用 AI
+                    if not is_duplicate and initial_summary:
+                        logger.info("   ✅ [Summary] 复用初始摘要，跳过二次生成")
+                        new_summary = initial_summary
+                    else:
+                        # 为了节省 token，直接让 AI 基于 overview_text 生成 summary
+                        summary_prompt = prompt_manager.get_user_prompt("topic_overview_summary", overview_text=overview_text[:2000])
+                        new_summary = await self.ai.chat_completion(summary_prompt, route_key="TOPIC_OVERVIEW")
+                    
+                    # 更新 Topic
+                    topic_to_update = existing_topic_obj if is_duplicate else topic_obj_to_return
+                    topic_to_update.record = overview_text
+                    if new_summary:
+                        topic_to_update.summary = new_summary.replace("```", "").strip()
+                    
+                    db.add(topic_to_update)
+                else:
+                    logger.warning(f"   ⚠️ 专题综述生成失败 (None)，跳过 Summary 更新")
 
         await db.commit()
         return topic_obj_to_return
@@ -972,7 +1022,10 @@ class TopicService:
              try:
                 content = await crawler_service.crawl_content(news.url)
                 if content:
-                    news.content = content
+                    # 抓取后立即清洗
+                    cleaned = clean_html_tags(content)
+                    if len(cleaned) > 50:
+                        news.content = cleaned
              except Exception:
                  pass
         
