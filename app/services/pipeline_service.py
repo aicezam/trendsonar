@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import ctypes
 import gc
 import json
 import os
@@ -33,6 +34,51 @@ settings = get_settings()
 
 DATA_DIR = Path("data")
 STATE_FILE = DATA_DIR / "scheduler_state.json"
+
+def _read_rss_mb() -> float | None:
+    if os.name != "posix":
+        return None
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8", errors="ignore").splitlines()
+        for line in status:
+            if line.startswith("VmRSS:"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    kb = int(parts[1])
+                    return kb / 1024.0
+    except Exception:
+        return None
+    return None
+
+def _read_cgroup_memory_mb() -> float | None:
+    if os.name != "posix":
+        return None
+    candidates = [
+        Path("/sys/fs/cgroup/memory.current"),
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                b = int(p.read_text(encoding="utf-8", errors="ignore").strip())
+                return b / 1024.0 / 1024.0
+        except Exception:
+            continue
+    return None
+
+def _malloc_trim() -> None:
+    if os.name != "posix":
+        return
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        trim = getattr(libc, "malloc_trim", None)
+        if trim is None:
+            return
+        trim.argtypes = [ctypes.c_size_t]
+        trim.restype = ctypes.c_int
+        trim(0)
+    except Exception:
+        return
 
 def _load_scheduler_state() -> Dict:
     if not STATE_FILE.exists():
@@ -428,7 +474,12 @@ async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = 
     except Exception as e:
         logger.error(f"❌ 任务执行异常: {e}")
     finally:
+        try:
+            report_service.clear_local_cache()
+        except Exception:
+            pass
         gc.collect()
+        _malloc_trim()
 
 
 async def scheduled_task() -> None:
@@ -457,6 +508,11 @@ async def scheduled_task() -> None:
 
     while True:
         try:
+            rss_mb = _read_rss_mb()
+            cgroup_mb = _read_cgroup_memory_mb()
+            if rss_mb is not None or cgroup_mb is not None:
+                logger.debug(f"📈 内存状态: rss={rss_mb or 0:.1f}MB, cgroup={cgroup_mb or 0:.1f}MB")
+
             if not await check_db_connection():
                 logger.warning("⚠️ 数据库连接异常，定时任务暂停运行，等待恢复...")
                 await asyncio.sleep(60)

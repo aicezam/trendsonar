@@ -75,6 +75,19 @@ def save_config_yaml_text(yaml_text: str) -> None:
 
 
 def schedule_restart(delay_seconds: float = 1.0) -> None:
+    def _in_docker() -> bool:
+        if os.name != "posix":
+            return False
+        if Path("/.dockerenv").exists():
+            return True
+        try:
+            cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="ignore")
+            if "docker" in cgroup or "containerd" in cgroup or "kubepods" in cgroup:
+                return True
+        except Exception:
+            pass
+        return os.environ.get("RUNNING_IN_DOCKER") == "1"
+
     def _safe_kill(pid: int, sig: int) -> None:
         try:
             os.kill(pid, sig)
@@ -147,6 +160,8 @@ def schedule_restart(delay_seconds: float = 1.0) -> None:
         await asyncio.sleep(delay_seconds)
         _terminate_descendants(os.getpid())
         try:
+            if _in_docker():
+                os._exit(0)
             os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception:
             os._exit(0)
