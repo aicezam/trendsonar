@@ -115,9 +115,17 @@ async def page_report(request: Request):
     """
 
     missing_keys = get_missing_config_keys(settings)
+    authed = is_admin_request(request)
     return templates.TemplateResponse(
         "report.html",
-        {"request": request, "settings": settings, "active_page": "report", "missing_keys": missing_keys, "db_error": DB_INIT_ERROR},
+        {
+            "request": request,
+            "settings": settings,
+            "active_page": "report",
+            "missing_keys": missing_keys,
+            "authed": authed,
+            "db_error": DB_INIT_ERROR,
+        },
     )
 
 

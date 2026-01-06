@@ -13,3 +13,4 @@ trendsonar.db
 trendsonar.db-wal
 trendsonar.db-shm
 docker/
+logs/

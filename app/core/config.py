@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     VERSION: str = "0.1.8"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
+    LOG_RETENTION_DAYS: int = 3
     PORT: int = 8193
 
     DATABASE_URL: Optional[str] = None

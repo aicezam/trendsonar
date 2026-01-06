@@ -152,8 +152,12 @@
             </div>
             <div id="panelLogs" class="admin-panel">
                 <div class="admin-log-toolbar">
+                    <select id="logSourceSelect" class="admin-input" style="width: 220px;">
+                        <option value="realtime">实时（内存）</option>
+                    </select>
+                    <div id="logsRetentionInfo" class="admin-hint" style="flex:1; margin:0;"></div>
                     <button id="refreshLogsBtn" class="admin-btn">刷新</button>
-                    <button id="clearLogsBtn" class="admin-btn danger">清空日志</button>
+                    <button id="clearLogsBtn" class="admin-btn danger">清空实时</button>
                 </div>
                 <pre id="logViewer" class="admin-log"></pre>
             </div>
@@ -218,6 +222,7 @@
     let fullLogLines = [];
     let renderedLimit = 200;
     const LOG_PAGE_SIZE = 200;
+    let logSource = "realtime";
 
     function initCodeEditor() {
         const editor = document.getElementById("configEditor");
@@ -444,7 +449,62 @@
         setStatus(statusEl, "保存成功，下次任务时生效。", "ok");
     }
 
-    async function fetchLogs() {
+    function setLogsHint(text) {
+        const el = document.getElementById("logsRetentionInfo");
+        if (el) el.textContent = text || "";
+    }
+
+    function getSelectedLogSource() {
+        const sel = document.getElementById("logSourceSelect");
+        return (sel?.value || "realtime").trim() || "realtime";
+    }
+
+    function updateLogsToolbarState() {
+        const clearBtn = document.getElementById("clearLogsBtn");
+        const source = getSelectedLogSource();
+        if (clearBtn) clearBtn.disabled = source !== "realtime";
+    }
+
+    async function refreshLogFiles(preserveSelection = true) {
+        const sel = document.getElementById("logSourceSelect");
+        if (!sel) return;
+
+        const prev = preserveSelection ? getSelectedLogSource() : "realtime";
+        const resp = await fetch("/api/admin/log_files", { method: "GET", cache: "no-store" });
+        const data = await resp.json().catch(() => ({}));
+
+        const files = Array.isArray(data.files) ? data.files : [];
+        const retentionDays = data.retention_days || 3;
+        setLogsHint("日志目录: logs｜保留天数: " + retentionDays);
+
+        sel.innerHTML = "";
+        const optRealtime = document.createElement("option");
+        optRealtime.value = "realtime";
+        optRealtime.textContent = "实时（内存）";
+        sel.appendChild(optRealtime);
+
+        files.forEach((f) => {
+            const name = (f && f.name) ? String(f.name) : "";
+            if (!name) return;
+            const opt = document.createElement("option");
+            opt.value = name;
+            opt.textContent = name;
+            sel.appendChild(opt);
+        });
+
+        const candidates = Array.from(sel.options).map(o => o.value);
+        if (candidates.includes(prev)) {
+            sel.value = prev;
+        } else if (files.length > 0) {
+            sel.value = String(files[0].name);
+        } else {
+            sel.value = "realtime";
+        }
+
+        updateLogsToolbarState();
+    }
+
+    async function fetchRealtimeLogs() {
         const logEl = document.getElementById("logViewer");
         if (!logEl) return;
         const resp = await fetch("/api/admin/logs", { method: "GET", cache: "no-store" });
@@ -464,6 +524,42 @@
         
         fullLogLines = newLines;
         renderLogs();
+    }
+
+    async function fetchLogFile(name) {
+        const logEl = document.getElementById("logViewer");
+        if (!logEl) return;
+        const url = "/api/admin/log_file?name=" + encodeURIComponent(name) + "&tail_lines=5000";
+        const resp = await fetch(url, { method: "GET", cache: "no-store" });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            logEl.textContent = data.detail || "日志加载失败（可能未登录或文件不存在）";
+            return;
+        }
+        const data = await resp.json().catch(() => ({}));
+        const raw = data.text || "";
+        const newLines = raw ? raw.split(/\r?\n/).reverse() : [];
+
+        renderedLimit = LOG_PAGE_SIZE;
+        fullLogLines = newLines;
+        renderLogs();
+
+        const retentionDays = data.retention_days || 3;
+        const total = data.total_lines || 0;
+        const returned = data.returned_lines || 0;
+        const truncated = !!data.truncated;
+        const suffix = truncated ? ("｜仅展示最后 " + returned + "/" + total + " 行") : ("｜共 " + total + " 行");
+        setLogsHint("日志目录: logs｜保留天数: " + retentionDays + "｜当前文件: " + (data.name || name) + suffix);
+    }
+
+    async function fetchLogsBySource() {
+        const source = getSelectedLogSource();
+        updateLogsToolbarState();
+        if (source === "realtime") {
+            await fetchRealtimeLogs();
+            return;
+        }
+        await fetchLogFile(source);
     }
 
     function renderLogs() {
@@ -500,11 +596,12 @@
     }
 
     async function clearLogs() {
+        if (getSelectedLogSource() !== "realtime") return;
         const resp = await fetch("/api/admin/logs", { method: "DELETE" });
         if (!resp.ok) return;
         fullLogLines = [];
         renderedLimit = LOG_PAGE_SIZE;
-        await fetchLogs();
+        await fetchRealtimeLogs();
     }
 
     function setTab(tab) {
@@ -538,11 +635,17 @@
         }
         
         if (tab === "logs") {
-            // Reset state when entering logs tab
             renderedLimit = LOG_PAGE_SIZE;
-            fullLogLines = []; 
-            fetchLogs();
-            logsTimer = setInterval(fetchLogs, 1500);
+            fullLogLines = [];
+            refreshLogFiles(false).then(async () => {
+                const source = getSelectedLogSource();
+                if (source === "realtime") {
+                    await fetchRealtimeLogs();
+                    logsTimer = setInterval(fetchRealtimeLogs, 1500);
+                } else {
+                    await fetchLogFile(source);
+                }
+            });
         } else if (tab === "prompts") {
             loadPrompts();
         } else if (tab === "sources") {
@@ -718,8 +821,27 @@
         
         document.getElementById("refreshPromptsBtn")?.addEventListener("click", loadPrompts);
         
-        document.getElementById("refreshLogsBtn")?.addEventListener("click", fetchLogs);
+        document.getElementById("refreshLogsBtn")?.addEventListener("click", async () => {
+            await refreshLogFiles(true);
+            await fetchLogsBySource();
+        });
         document.getElementById("clearLogsBtn")?.addEventListener("click", clearLogs);
+        document.getElementById("logSourceSelect")?.addEventListener("change", async () => {
+            if (logsTimer) {
+                clearInterval(logsTimer);
+                logsTimer = null;
+            }
+            renderedLimit = LOG_PAGE_SIZE;
+            fullLogLines = [];
+            const source = getSelectedLogSource();
+            if (source === "realtime") {
+                await fetchRealtimeLogs();
+                logsTimer = setInterval(fetchRealtimeLogs, 1500);
+            } else {
+                await fetchLogFile(source);
+            }
+            updateLogsToolbarState();
+        });
         
         document.getElementById("reloadSourcesBtn")?.addEventListener("click", loadSources);
         document.getElementById("saveSourcesBtn")?.addEventListener("click", saveSources);

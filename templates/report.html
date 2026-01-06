@@ -275,6 +275,9 @@
 {% block scripts %}
 <script>
     const NEWS_CATEGORIES = {{ settings.NEWS_CATEGORIES | tojson }};
+    const IS_ADMIN = {{ "true" if authed else "false" }};
+
+    let currentReportId = null;
 
     // 初始化默认时间范围为7天
     const today = new Date();
@@ -628,6 +631,9 @@
         try {
             const res = await fetch(`/api/report/load/${id}`);
             const data = await res.json();
+
+            currentReportId = id;
+            stopAiPolling();
             
             document.getElementById('keyword').value = keyword || '';
             
@@ -648,11 +654,65 @@
         }
     }
 
+    let currentStreamController = null;
+
+    async function streamAiAnalysis(reportId, keyword) {
+        if (currentStreamController) {
+            currentStreamController.abort();
+        }
+        currentStreamController = new AbortController();
+        const signal = currentStreamController.signal;
+
+        const aiContent = document.getElementById('aiContent');
+        if(!aiContent) return;
+        
+        aiContent.innerHTML = '<div style="color:var(--text-secondary); display:flex; align-items:center; gap:8px;"><div class="spinner" style="width:16px;height:16px;border-width:2px;"></div> 🤖 正在进行 AI 综述分析...</div>';
+        
+        try {
+            let url = '/api/report/stream_ai?';
+            if (reportId) url += `report_id=${reportId}`;
+            else if (keyword) url += `q=${encodeURIComponent(keyword)}`;
+            else return;
+
+            const response = await fetch(url, { signal });
+            if (!response.ok) throw new Error(response.statusText);
+            
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let fullText = "";
+            let hasData = false;
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value, { stream: true });
+                fullText += chunk;
+                if (fullText.trim()) {
+                    hasData = true;
+                    aiContent.innerHTML = marked.parse(fullText);
+                }
+            }
+            
+            if (!hasData) {
+                 aiContent.innerHTML = '<div style="color:var(--text-secondary);">暂无 AI 分析内容</div>';
+            }
+        } catch (e) {
+            if (e.name === 'AbortError') return;
+            console.error("Stream error", e);
+            aiContent.innerHTML = `<div style="color:red;font-size:0.9rem;margin-top:8px;">[生成中断: ${e.message}]</div>`;
+        } finally {
+            currentStreamController = null;
+        }
+    }
+
     // --- Core Generation ---
     // Global Polling State
     let pollingInterval = null;
     let pollingKeyword = null;
     let pollingStartTime = null;
+    let pollingBaselineId = null;
+    let aiPollingInterval = null;
+    let lastAiTextLen = 0;
 
     function showBackgroundNotification() {
         document.getElementById('bgNotification').style.display = 'block';
@@ -670,29 +730,37 @@
             pollingInterval = null;
         }
     }
+
+    function stopAiPolling() {
+        if (aiPollingInterval) {
+            clearInterval(aiPollingInterval);
+            aiPollingInterval = null;
+        }
+        lastAiTextLen = 0;
+    }
     
-    function startPolling(keyword) {
+    function startPolling(keyword, baselineId) {
         stopPolling();
         pollingKeyword = keyword;
         pollingStartTime = new Date();
+        pollingBaselineId = baselineId ?? null;
         
         pollingInterval = setInterval(async () => {
             try {
-                // Check recent reports
-                const res = await fetch(`/api/report/recent?limit=1&keyword=${encodeURIComponent(keyword || '')}`);
+                const url = `/api/report/history?keyword=${encodeURIComponent(keyword || '')}&limit=1`;
+                const res = await fetch(url);
                 const data = await res.json();
-                if (data && data.length > 0) {
+                if (Array.isArray(data) && data.length > 0) {
                     const latest = data[0];
-                    const reportTime = new Date(latest.created_at);
-                    
-                    // If report is newer than start time (with 10s buffer for clock skew)
-                    if (reportTime > new Date(pollingStartTime.getTime() - 10000)) {
+                    const latestId = latest?.id ?? null;
+                    if (!latestId) return;
+                    if (pollingBaselineId === null || latestId !== pollingBaselineId) {
                         stopPolling();
                         document.getElementById('pollingStatus').textContent = "✅ 生成完成！正在加载...";
                         setTimeout(() => {
-                             loadHistoryReport(latest.id, keyword);
-                             hideBackgroundNotification();
-                             loadRecentReports(); 
+                            loadHistoryReport(latest.id, keyword);
+                            hideBackgroundNotification();
+                            loadRecentReports();
                         }, 1000);
                     }
                 }
@@ -742,6 +810,23 @@
         
         if (isBackground) {
              pollingStartTime = new Date();
+             if (keyword) {
+                 switchView('keyword');
+                 ['aiSection', 'metricsSection', 'tableSection'].forEach(id => {
+                     const el = document.getElementById(id);
+                     if (el) el.style.display = 'none';
+                 });
+             }
+             let baselineId = null;
+             if (keyword) {
+                 try {
+                     const baselineResp = await fetch(`/api/report/history?keyword=${encodeURIComponent(keyword)}&limit=1`, { cache: 'no-store' });
+                     const baseline = await baselineResp.json();
+                     if (Array.isArray(baseline) && baseline.length > 0) {
+                         baselineId = baseline[0]?.id ?? null;
+                     }
+                 } catch (e) {}
+             }
              const params = new URLSearchParams({
                  q: keyword,
                  start_date: start || '',
@@ -758,7 +843,7 @@
                  if (!res.ok) throw new Error("提交失败");
                  
                  showBackgroundNotification();
-                 startPolling(keyword);
+                 startPolling(keyword, baselineId);
              } catch(e) {
                  alert("任务提交失败: " + e.message);
              }
@@ -780,6 +865,8 @@
             });
             const res = await fetch(`/api/report/analysis?${params.toString()}`);
             const data = await res.json();
+            
+            if (data.id) currentReportId = data.id;
             
             if (keyword) {
                 switchView('keyword');
@@ -849,36 +936,70 @@
     }
 
     function renderReport(data, mode) {
-        window.currentReportParams = data.params;
+        window.currentReportParams = data.params || {};
         ['aiSection', 'metricsSection', 'tableSection'].forEach(id => {
-            document.getElementById(id).style.display = (id === 'metricsSection') ? 'grid' : 'block';
+            const el = document.getElementById(id);
+            if(el) el.style.display = (id === 'metricsSection') ? 'grid' : 'block';
         });
 
-        const s = data.summary;
+        const s = data.summary || {
+            total: 0,
+            avg_heat: 0,
+            max_heat: 0,
+            sentiment_idx: 50,
+            risk_count: 0,
+            time_range: '-'
+        };
         const avgHeat = Number(s.avg_heat ?? 0);
         const sentimentIdx = Number(s.sentiment_idx ?? 0);
-        document.getElementById('valTotal').innerText = s.total;
-        document.getElementById('valAvgHeat').innerText = avgHeat.toFixed(2);
-        document.getElementById('valMaxHeat').innerText = s.max_heat;
-        document.getElementById('valSentiment').innerText = sentimentIdx.toFixed(2);
-        document.getElementById('valSentiment').style.color = sentimentIdx < 50 ? '#ef4444' : '#10b981';
-        document.getElementById('valRisk').innerText = s.risk_count;
-        document.getElementById('valTimeRange').innerText = s.time_range;
+        
+        const setTxt = (id, val) => { const el = document.getElementById(id); if(el) el.innerText = val; };
+        setTxt('valTotal', s.total);
+        setTxt('valAvgHeat', avgHeat.toFixed(2));
+        setTxt('valMaxHeat', s.max_heat);
+        setTxt('valSentiment', sentimentIdx.toFixed(2));
+        const elSent = document.getElementById('valSentiment');
+        if(elSent) elSent.style.color = sentimentIdx < 50 ? '#ef4444' : '#10b981';
+        setTxt('valRisk', s.risk_count);
+        setTxt('valTimeRange', s.time_range);
 
-        let aiText = data.ai_analysis || "暂无分析";
-        aiText = aiText.replace(/\n{3,}/g, '\n\n');
-        document.getElementById('aiContent').innerHTML = marked.parse(aiText);
+        const aiStatus = data.ai_status;
+            let aiText = (data.ai_analysis || "").trim();
+            
+            console.log(`[Render] Report ${data.id}: aiStatus=${aiStatus}, aiText.len=${aiText.length}`);
 
-        renderTrendChart(data.charts.trend);
-        renderWordCloud(data.charts.word_cloud);
-        renderSourceChart(data.charts.source);
-        renderSentimentChart(data.charts.sentiment_dist);
-        document.getElementById('negKeywords').innerText = (data.charts.neg_keywords || []).join(', ');
+            const aiContent = document.getElementById('aiContent');
+            if (aiContent) {
+                // If we have text and it's either marked done or looks substantial (legacy), render it
+                // BUT if it's 'running', we must stream even if we have some text
+                if (aiStatus === 'running') {
+                     // Render initial text then stream
+                     if(aiText) {
+                         aiText = aiText.replace(/\n{3,}/g, '\n\n');
+                         aiContent.innerHTML = marked.parse(aiText);
+                     }
+                     streamAiAnalysis(data.id, data.params?.q || data.params?.keyword);
+                }
+                else if (aiText && (aiStatus === 'done' || aiText.length > 20)) {
+                    aiText = aiText.replace(/\n{3,}/g, '\n\n');
+                    aiContent.innerHTML = marked.parse(aiText);
+                } else {
+                    // Legacy or unknown state with short text -> try streaming
+                    streamAiAnalysis(data.id, data.params?.q || data.params?.keyword);
+                }
+            }
+
+        const charts = data.charts || {};
+        renderTrendChart(charts.trend);
+        renderWordCloud(charts.word_cloud);
+        renderSourceChart(charts.source);
+        renderSentimentChart(charts.sentiment_dist);
+        setTxt('negKeywords', (charts.neg_keywords || []).join(', '));
 
         if (mode === 'keyword') {
-            renderCorrelationChart(data.charts.correlation);
-            renderFreqTrendChart(data.charts.freq_trend);
-            renderSentimentTrendChart(data.charts.sentiment_trend);
+            renderCorrelationChart(charts.correlation);
+            renderFreqTrendChart(charts.freq_trend);
+            renderSentimentTrendChart(charts.sentiment_trend);
         }
 
         renderNewsList(data.top_news);
@@ -916,7 +1037,11 @@
         }
 
         if (mode === 'keyword') {
-            titleEl.innerHTML = `关键词分析: <span style="color:#fbbf24">${keyword}</span> <button class="btn-reanalyze" onclick="reAnalyze()" style="margin-left:12px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-soft); color: var(--text-primary);">🔄 重新分析</button>`;
+            let actionsHtml = `<button class="btn-reanalyze" onclick="reAnalyze()" style="margin-left:12px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-soft); color: var(--text-primary);">🔄 重新分析</button>`;
+            if (IS_ADMIN === true || IS_ADMIN === "true") {
+                actionsHtml += ` <button class="btn-reanalyze" onclick="deleteCurrentReport()" style="margin-left:8px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-soft); color: var(--text-primary);">🗑️ 删除</button>`;
+            }
+            titleEl.innerHTML = `关键词分析: <span style="color:#fbbf24">${keyword}</span> ${actionsHtml}`;
             backBtn.style.display = 'flex';
         } else {
             const typeMap = { daily: '日报', weekly: '周报', monthly: '月报' };
@@ -937,9 +1062,9 @@
                 const label = typeMap[period] || '报表';
                 const range = parseTimeRange(timeRange);
                 if (!range) return label;
-                if (period === 'daily') return `${label}（${toYYMMDD(range.end)}）`;
-                if (period === 'weekly') return `${label}（${toYYMMDD(range.start)} 至 ${toYYMMDD(range.end)}）`;
-                if (period === 'monthly') return `${label}（${toYYMM(range.end)}）`;
+                if (period === 'daily') return `${label} ${toYYMMDD(range.end)}`;
+                if (period === 'weekly') return `${label} ${toYYMMDD(range.start)}~${toYYMMDD(range.end)}`;
+                if (period === 'monthly') return `${label} ${toYYMM(range.end)}`;
                 return label;
             };
 
@@ -956,6 +1081,62 @@
             restoreFilters(window.currentReportParams);
         }
         openSettingsModal();
+    }
+
+    async function deleteCurrentReport() {
+        if (!(IS_ADMIN === true || IS_ADMIN === "true")) {
+            alert("仅登录后才可删除报表");
+            return;
+        }
+        const keyword = document.getElementById('keyword').value.trim();
+        if (!currentReportId) {
+            alert("当前报表尚未缓存，无法删除");
+            return;
+        }
+        if (!confirm("确定要删除当前报表吗？此操作不可恢复。")) {
+            return;
+        }
+        try {
+            console.log(`Deleting report ${currentReportId}...`);
+            const resp = await fetch(`/api/report/cache/${currentReportId}`, { method: 'DELETE' });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.detail || `删除失败 (${resp.status})`);
+            }
+
+            console.log(`Report ${currentReportId} deleted.`);
+            currentReportId = null;
+            
+            // Reload lists first to reflect changes
+            await loadHistoryList(keyword);
+            await loadRecentReports();
+
+            if (keyword) {
+                // Try to load the next available report for this keyword
+                const res = await fetch(`/api/report/history?keyword=${encodeURIComponent(keyword)}&limit=1`);
+                const history = await res.json();
+                if (Array.isArray(history) && history.length > 0) {
+                    const next = history[0];
+                    console.log(`Loading next report ${next.id}`);
+                    currentReportId = next.id;
+                    await loadHistoryReport(next.id, keyword);
+                    return;
+                } else {
+                    console.log("No more reports for this keyword. Clearing view.");
+                    // No more reports for this keyword, maybe switch to dashboard or clear view
+                    // For now, switch to dashboard
+                    switchView('dashboard');
+                    await loadDefaultReport();
+                    return;
+                }
+            }
+
+            switchView('dashboard');
+            await loadDefaultReport();
+        } catch (e) {
+            console.error("Delete failed:", e);
+            alert("删除失败: " + e.message);
+        }
     }
 
     function restoreFilters(p) {
@@ -996,8 +1177,15 @@
 
     function renderTrendChart(trendData) {
         if (chartTrend) chartTrend.dispose();
-        chartTrend = echarts.init(document.getElementById('chartTrend'));
+        const el = document.getElementById('chartTrend');
+        if(!el) return;
+        chartTrend = echarts.init(el);
         
+        if (!trendData || (!trendData.category_series && !trendData.counts)) {
+            chartTrend.clear();
+            return;
+        }
+
         const series = [];
         const legendData = [];
         const isMobile = isMobileScreen();
@@ -1007,17 +1195,22 @@
                 series.push(s);
                 legendData.push(s.name);
             });
-        } else {
+        } else if (trendData.counts) {
              series.push({ name: '文章数', type: 'bar', data: trendData.counts, itemStyle: { color: '#3b82f6', borderRadius: [4,4,0,0] } });
              legendData.push('文章数');
+        } else {
+             chartTrend.clear();
+             return;
         }
 
-        series.push({ 
-            name: '平均热度', type: 'line', yAxisIndex: 1, 
-            data: trendData.avg_heats, itemStyle: { color: '#ef4444' }, 
-            smooth: true, lineStyle: { width: 3 }, showSymbol: false
-        });
-        legendData.push('平均热度');
+        if (trendData.avg_heats) {
+            series.push({ 
+                name: '平均热度', type: 'line', yAxisIndex: 1, 
+                data: trendData.avg_heats, itemStyle: { color: '#ef4444' }, 
+                smooth: true, lineStyle: { width: 3 }, showSymbol: false
+            });
+            legendData.push('平均热度');
+        }
 
         chartTrend.setOption({
             tooltip: { 
@@ -1050,7 +1243,7 @@
             },
             xAxis: { 
                 type: 'category', 
-                data: trendData.dates, 
+                data: trendData.dates || [], 
                 axisLine: { lineStyle: { color: '#e2e8f0' } }, 
                 axisLabel: { 
                     color: '#64748b',
@@ -1228,17 +1421,42 @@
             `;
         }
         
+        // Filter out inaccessible internal OSS image links to prevent ERR_NAME_NOT_RESOLVED
+        let cleanSummary = summary;
+        try {
+            // Simple regex replacement for known bad domains if full DOM parsing is too heavy
+            // But DOM parsing is safer for HTML content
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = summary;
+            const images = tempDiv.querySelectorAll('img');
+            let changed = false;
+            images.forEach(img => {
+                if (img.src && (
+                    img.src.includes('ops.xhyun.news.cn') || 
+                    img.src.includes('bucket-cb-yunqiao')
+                )) {
+                    img.remove();
+                    changed = true;
+                }
+            });
+            if (changed) {
+                cleanSummary = tempDiv.innerHTML;
+            }
+        } catch (e) {
+            console.warn('Summary image filter failed', e);
+        }
+
         const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = summary;
+        tempDiv.innerHTML = cleanSummary;
         const textLength = tempDiv.innerText.length;
         const threshold = 300;
         
         if (textLength <= threshold) {
-            return summary + ` <button class="btn-regen" onclick="genSummary(${id})">🔄 重新生成</button>`;
+            return cleanSummary + ` <button class="btn-regen" onclick="genSummary(${id})">🔄 重新生成</button>`;
         } else {
             return `
                 <div id="summary-content-${id}" class="summary-content collapsed">
-                    ${summary}
+                    ${cleanSummary}
                 </div>
                 <button id="btn-expand-${id}" class="btn-link" onclick="toggleSummary(${id}, true)">查看全部</button>
                 <button id="btn-collapse-${id}" class="btn-link" style="display:none;" onclick="toggleSummary(${id}, false)">收起</button>

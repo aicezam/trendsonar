@@ -255,6 +255,56 @@ class AIService:
 
         return "AI 服务暂时不可用（请先在管理页完善 AI 配置）"
 
+    async def stream_completion(self, prompt: str, system_prompt: str = "", route_key: Optional[str] = None) -> AsyncIterator[str]:
+        prefer_backup = False
+        if route_key:
+            prefer_backup = self._get_prefer_backup(route_key)
+
+        routes = self._iter_llm_routes(prefer_backup)
+        if not routes:
+            yield "AI 服务暂时不可用（请先在管理页完善 AI 配置）"
+            return
+            # raise AIConfigurationError("AI 服务暂时不可用（请先在管理页完善 AI 配置）")
+        last_error: Optional[Exception] = None
+
+        for idx, route in enumerate(routes):
+            try:
+                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                    extra_body = {}
+                    if "modelscope" in str(client.base_url):
+                        extra_body["enable_thinking"] = False
+
+                    stream = await client.chat.completions.create(
+                        model=route["model"],
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                        stream=True,
+                        temperature=0.6,
+                        timeout=120,
+                        extra_body=extra_body if extra_body else None,
+                    )
+
+                    async for chunk in stream:
+                        if not chunk.choices:
+                            continue
+                        content = chunk.choices[0].delta.content
+                        if content:
+                            yield content
+                    return
+            except Exception as e:
+                last_error = e
+                logger.error(f"流式补全路由失败: {e}")
+                if idx < len(routes) - 1:
+                    next_route = routes[idx + 1]
+                    logger.warning(
+                        f"⚠️ 流式路由 {route['model']} ({route['type']}) 失败，切换到 -> {next_route['model']} ({next_route['type']})"
+                    )
+
+        if last_error:
+            logger.error(f"所有流式路由均失败: {last_error}")
+
     async def batch_evaluate_topic_quality(self, topics: List[Dict[str, str]], existing_topics: List[Dict[str, str]] = None) -> List[Dict[str, str]]:
         """
         输入:

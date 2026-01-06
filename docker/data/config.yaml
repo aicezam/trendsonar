@@ -3,6 +3,8 @@
 APP_NAME: TrendSonar
 # LOG_LEVEL: 日志等级: DEBUG, INFO, WARNING, ERROR
 LOG_LEVEL: INFO
+# LOG_RETENTION_DAYS: 日志保留天数（仅保留最近 N 天）
+LOG_RETENTION_DAYS: 3
 # PORT: 服务端口
 PORT: 8193
 
@@ -64,13 +66,13 @@ AI_ROUTE:
   SUMMARY: "main"      # 新闻摘要生成
   SENTIMENT: "main"    # 情感倾向分析
   KEYWORDS: "main"     # 关键词与实体提取
-  CLUSTERING: "main"   # 新闻聚类去重 (判断两条新闻是否同一事件)
+  CLUSTERING: "backup"   # 新闻聚类去重 (判断两条新闻是否同一事件)
 
   # --- 专题追踪 ---
-  TOPIC_NAME: "main"     # 专题命名
+  TOPIC_NAME: "backup"     # 专题命名
   TOPIC_EVAL: "backup"     # 专题质量评估 (宽泛过滤/查重/延伸判断)
-  TOPIC_MATCH: "main"    # 专题匹配核验 (判断新闻是否属于专题)
-  TOPIC_TIMELINE: "main" # 时间轴事件生成 (高信息密度描述)
+  TOPIC_MATCH: "backup"    # 专题匹配核验 (判断新闻是否属于专题)
+  TOPIC_TIMELINE: "backup" # 时间轴事件生成 (高信息密度描述)
   TOPIC_OVERVIEW: "backup" # 专题综述生成 (深度分析)
   TOPIC_INITIAL_SUMMARY: "main" # 专题初始摘要 (基于事实的快速摘要，用于审核)
   # --- 报表生成 ---
@@ -94,9 +96,9 @@ ANALYSIS_BATCH_SIZE: 20
 
 # ================= Token 优化配置 =================
 # 情感分析/分类时，截取的最大文本长度（标题 + 正文前 N 字）
-ANALYSIS_INPUT_MAX_LENGTH: 1000
+ANALYSIS_INPUT_MAX_LENGTH: 500
 # 生成摘要时，输入的正文截取长度（如不限制则设为 0）
-SUMMARY_INPUT_MAX_LENGTH: 5000
+SUMMARY_INPUT_MAX_LENGTH: 3000
 # 生成摘要时，输入给 AI 的原始摘要截取长度（如果存在原始摘要）
 SUMMARY_ORIGIN_MAX_LENGTH: 300
 # AI 生成的摘要目标字数
@@ -126,7 +128,7 @@ IGNORED_DOMAINS: []
 # 聚合时间窗口（天）：从最近 N 天的新闻中提炼 (默认 3)
 TOPIC_LOOKBACK_DAYS: 7
 # 聚合种子数：从最近 N 天热度最高的 X 条未归类新闻中提炼专题 (默认 300)
-TOPIC_AGGREGATION_TOP_N: 300
+TOPIC_AGGREGATION_TOP_N: 100
 # 每次生成的新专题数量范围 (min-max)，格式 "3-10"
 TOPIC_GENERATION_COUNT: "1-5"
 # 向量召回池大小：在最近 N 条新闻中进行向量搜索 (默认 2000)
@@ -134,15 +136,15 @@ TOPIC_RECALL_POOL_SIZE: 3000
 # 向量初筛阈值（0.0-1.0）：用于向量预筛候选新闻 (默认 0.6)
 TOPIC_MATCH_THRESHOLD: 0.4
 # 向量召回候选数：每个专题最多对前 N 条高相似度新闻进行 AI 核验 (默认 20)
-TOPIC_MATCH_MAX_CANDIDATES: 30
+TOPIC_MATCH_MAX_CANDIDATES: 20
 # 专题质量门槛：只有当核验通过的新闻数量 > N 时才创建专题 (默认 3)
 TOPIC_MIN_NEWS_COUNT: 3
 # 专题更新时间窗口（天）：仅检查最近 N 天内更新过的活跃专题 (默认 3)
 TOPIC_UPDATE_LOOKBACK_DAYS: 7
 # 专题定时任务间隔（小时）
-TOPIC_SCHEDULE_INTERVAL_HOURS: 4
+TOPIC_SCHEDULE_INTERVAL_HOURS: 12
 # 参与专题生成的最低新闻热度（默认 6.0）
-TOPIC_NEWS_MIN_HEAT: 1
+TOPIC_NEWS_MIN_HEAT: 2
 # 专题质量审核等级 (1-5)：1=宽松，5=严格，3=默认标准
 # - Level 1 (宽松)
 # - 标准 ：只要是真实的、具体的事件即可。

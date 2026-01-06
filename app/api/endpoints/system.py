@@ -10,6 +10,8 @@
 
 import asyncio
 import json
+import re
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +33,8 @@ from app.services.pipeline_service import background_analyze_all, reanalyze_all_
 from app.utils.tools import parse_query_time_range
 
 router = APIRouter(prefix="/api", tags=["system"])
+
+_LOG_FILE_RE = re.compile(r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\.log$")
 
 
 @router.post("/admin/reanalyze_all_categories")
@@ -88,6 +92,10 @@ def _get_news_sources_path() -> Path:
     return candidates[0]
 
 
+def _get_logs_dir() -> Path:
+    return BASE_DIR / "logs"
+
+
 @router.get("/app_info")
 async def api_get_app_info():
     return {"app_name": settings.APP_NAME, "version": settings.VERSION}
@@ -125,6 +133,69 @@ async def api_clear_admin_logs(request: Request):
         raise HTTPException(status_code=401, detail="未登录")
     clear_cached_logs()
     return {"ok": True}
+
+
+@router.get("/admin/log_files")
+async def api_list_log_files(request: Request):
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+
+    logs_dir = _get_logs_dir()
+    if not logs_dir.exists():
+        return {"files": [], "retention_days": int(getattr(settings, "LOG_RETENTION_DAYS", 3) or 3)}
+
+    items = []
+    for p in logs_dir.iterdir():
+        if not p.is_file():
+            continue
+        if not _LOG_FILE_RE.match(p.name):
+            continue
+        try:
+            st = p.stat()
+        except Exception:
+            continue
+        items.append(
+            {
+                "name": p.name,
+                "size": int(st.st_size),
+                "mtime": float(st.st_mtime),
+            }
+        )
+    items.sort(key=lambda x: x["name"], reverse=True)
+    return {"files": items, "retention_days": int(getattr(settings, "LOG_RETENTION_DAYS", 3) or 3)}
+
+
+@router.get("/admin/log_file")
+async def api_get_log_file(name: str, request: Request, tail_lines: int = 5000):
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+
+    if not _LOG_FILE_RE.match(name or ""):
+        raise HTTPException(status_code=400, detail="日志文件名不合法")
+    tail_lines = max(1, min(int(tail_lines or 5000), 20000))
+
+    path = _get_logs_dir() / name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="日志文件不存在")
+
+    lines = deque(maxlen=tail_lines)
+    total = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                total += 1
+                lines.append(line.rstrip("\n"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取日志失败: {e}")
+
+    return {
+        "name": name,
+        "text": "\n".join(lines),
+        "total_lines": total,
+        "returned_lines": len(lines),
+        "truncated": total > len(lines),
+        "retention_days": int(getattr(settings, "LOG_RETENTION_DAYS", 3) or 3),
+    }
 
 
 @router.post("/trigger_crawl", dependencies=[Depends(verify_admin_access)])

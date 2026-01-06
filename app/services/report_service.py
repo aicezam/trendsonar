@@ -9,7 +9,7 @@ import asyncio
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from time import monotonic
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, AsyncIterator
 
 import numpy as np
 from sqlalchemy import and_, case, cast, delete, desc, func, literal, or_, select, true
@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from app.core.database import AsyncSessionLocal, check_db_connection
 from app.core.config import get_settings
+from app.core.exceptions import AIConfigurationError
 from app.core.logger import logger
 from app.core.prompts import prompt_manager
 from app.models.news import News
@@ -436,21 +437,31 @@ class ReportService:
 
             if period == "daily":
                 start_date_str = today.strftime("%Y-%m-%d")
+                # Add 6 days lookback for trend chart in daily report
+                data = await self._generate_analysis_data(
+                    keyword="", 
+                    start_date=start_date_str, 
+                    end_date=end_date_str, 
+                    generate_ai=True,
+                    trend_lookback_days=6
+                )
             elif period == "monthly":
                 start_date_str = today.replace(day=1).strftime("%Y-%m-%d")
+                data = await self._generate_analysis_data(
+                    keyword="", start_date=start_date_str, end_date=end_date_str, generate_ai=True
+                )
             else:
                 start_date_str = (today - timedelta(days=6)).strftime("%Y-%m-%d")
-
-            data = await self._generate_analysis_data(
-                keyword="", start_date=start_date_str, end_date=end_date_str, generate_ai=True
-            )
+                data = await self._generate_analysis_data(
+                    keyword="", start_date=start_date_str, end_date=end_date_str, generate_ai=True
+                )
 
             await self.save_report_cache("global", period, data)
             logger.info(f"✅ 全局报表缓存 ({period}) 已更新")
         except Exception as e:
             logger.error(f"❌ 生成报表缓存失败: {e}")
 
-    async def save_report_cache(self, r_type: str, keyword: str, data: Dict[str, Any]) -> None:
+    async def save_report_cache(self, r_type: str, keyword: str, data: Dict[str, Any]) -> Optional[int]:
         """
         输入:
         - `r_type`: 报表类型（global/keyword）
@@ -464,7 +475,7 @@ class ReportService:
         - 写入报表缓存，并对数量与同日重复缓存进行控制
         """
         if not await check_db_connection(verbose=False):
-            return
+            return None
 
         async with AsyncSessionLocal() as db:
             if r_type == "global":
@@ -493,8 +504,11 @@ class ReportService:
             cache = ReportCache(report_type=r_type, keyword=keyword, data=data, created_at=datetime.now())
             db.add(cache)
             await db.commit()
+            await db.refresh(cache)
+            return int(cache.id)
+        return None
 
-    async def get_recent_reports(self, limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_recent_reports(self, limit: int = 10, keyword: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         输入:
         - `limit`: 返回数量上限
@@ -509,26 +523,43 @@ class ReportService:
             return []
 
         async with AsyncSessionLocal() as db:
-            stmt = (
-                select(ReportCache)
-                .where(ReportCache.report_type == "keyword")
-                .order_by(desc(ReportCache.created_at))
-                .limit(limit * 5)
-            )
+            stmt = select(ReportCache).where(ReportCache.report_type == "keyword")
+            if keyword:
+                stmt = stmt.where(ReportCache.keyword == keyword)
+            stmt = stmt.order_by(desc(ReportCache.created_at)).limit(limit * 5)
             result = await db.execute(stmt)
             reports = result.scalars().all()
+
+            if keyword:
+                return [
+                    {
+                        "keyword": r.keyword,
+                        "date": r.created_at.strftime("%Y-%m-%d %H:%M"),
+                        "created_at": r.created_at.isoformat(),
+                        "id": r.id,
+                    }
+                    for r in reports[:limit]
+                    if r.keyword
+                ]
 
             seen = set()
             recent = []
             for r in reports:
                 if r.keyword and r.keyword not in seen:
-                    recent.append({"keyword": r.keyword, "date": r.created_at.strftime("%Y-%m-%d %H:%M"), "id": r.id})
+                    recent.append(
+                        {
+                            "keyword": r.keyword,
+                            "date": r.created_at.strftime("%Y-%m-%d %H:%M"),
+                            "created_at": r.created_at.isoformat(),
+                            "id": r.id,
+                        }
+                    )
                     seen.add(r.keyword)
                     if len(recent) >= limit:
                         break
             return recent
 
-    async def get_report_history(self, keyword: str) -> List[Dict[str, Any]]:
+    async def get_report_history(self, keyword: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         输入:
         - `keyword`: 关键词
@@ -548,11 +579,21 @@ class ReportService:
                 .where(ReportCache.report_type == "keyword", ReportCache.keyword == keyword)
                 .order_by(desc(ReportCache.created_at))
             )
+            if limit:
+                stmt = stmt.limit(limit)
             result = await db.execute(stmt)
             reports = result.scalars().all()
-            return [{"id": r.id, "date": r.created_at.strftime("%Y-%m-%d %H:%M")} for r in reports]
+            return [
+                {
+                    "id": r.id, 
+                    "date": r.created_at.strftime("%Y-%m-%d %H:%M"), 
+                    "created_at": r.created_at.isoformat(),
+                    "keyword": r.keyword
+                }
+                for r in reports
+            ]
 
-    async def get_global_history(self) -> List[Dict[str, Any]]:
+    async def get_global_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         输入:
         - 无
@@ -571,14 +612,425 @@ class ReportService:
                 select(ReportCache)
                 .where(ReportCache.report_type == "global")
                 .order_by(desc(ReportCache.created_at))
-                .limit(100)
             )
+            stmt = stmt.limit(limit or 100)
             result = await db.execute(stmt)
             reports = result.scalars().all()
             return [
-                {"id": r.id, "date": r.created_at.strftime("%Y-%m-%d %H:%M"), "type": r.keyword or "weekly"}
+                {
+                    "id": r.id,
+                    "date": r.created_at.strftime("%Y-%m-%d %H:%M"),
+                    "created_at": r.created_at.isoformat(),
+                    "type": r.keyword or "weekly",
+                }
                 for r in reports
             ]
+
+    async def delete_report_cache(self, report_id: int) -> bool:
+        if not await check_db_connection(verbose=False):
+            return False
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(ReportCache).where(ReportCache.id == report_id))
+            cached = result.scalar_one_or_none()
+            if not cached:
+                return False
+            await db.delete(cached)
+            await db.commit()
+            return True
+
+    async def find_latest_report_id(self, keyword: str = "") -> Optional[int]:
+        if not await check_db_connection(verbose=False):
+            return None
+        async with AsyncSessionLocal() as db:
+            if keyword:
+                stmt = select(ReportCache.id).where(ReportCache.report_type == "keyword", ReportCache.keyword == keyword)
+            else:
+                stmt = select(ReportCache.id).where(ReportCache.report_type == "global").order_by(desc(ReportCache.created_at))
+                # Just take the latest global report
+            
+            stmt = stmt.order_by(desc(ReportCache.created_at)).limit(1)
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def stream_ai_analysis(self, report_id: int) -> AsyncIterator[str]:
+        logger.info(f"🔄 stream_ai_analysis 进入: report_id={report_id}")
+        if not await check_db_connection(verbose=False):
+            logger.error(f"❌ DB 连接失败: report_id={report_id}")
+            yield "数据库连接失败"
+            return
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(ReportCache).where(ReportCache.id == report_id))
+            cached = result.scalar_one_or_none()
+            if not cached:
+                logger.warning(f"⚠️ 报表未找到: report_id={report_id}")
+                yield "报表未找到"
+                return
+
+            data = dict(cached.data or {})
+            
+            # If already done or has content (legacy support), yield result directly
+            ai_status = data.get("ai_status")
+            ai_analysis = data.get("ai_analysis")
+            logger.info(f"ℹ️ 报表状态: id={report_id} status={ai_status} len={len(ai_analysis or '')}")
+            
+            if (ai_status == "done" or (ai_analysis and len(ai_analysis) > 100)) and ai_analysis:
+                # Update status if missing
+                if ai_status != "done":
+                    data["ai_status"] = "done"
+                    cached.data = data
+                    await db.commit()
+                yield ai_analysis
+                return
+
+            # Prepare context
+            params = dict(data.get("params") or {})
+            keyword = (params.get("keyword") or cached.keyword or "") if cached.report_type == "keyword" else ""
+            start_date = params.get("start_date")
+            end_date = params.get("end_date")
+            category = params.get("category")
+            region = params.get("region")
+            source = params.get("source")
+
+            scope_parts = []
+            if keyword:
+                scope_parts.append(f"关键词={keyword}")
+            if category and category != "all":
+                scope_parts.append(f"领域={category}")
+            if region and region != "all":
+                scope_parts.append(f"地区={region}")
+            if source and source != "all":
+                scope_parts.append(f"来源={source}")
+            scope_str = "；".join(scope_parts) if scope_parts else "全量样本"
+
+            ai_start = start_date or (datetime.now().date() - timedelta(days=0)).strftime("%Y-%m-%d")
+            ai_end = end_date or datetime.now().date().strftime("%Y-%m-%d")
+            time_range_label = f"{ai_start} 至 {ai_end}" if ai_start != ai_end else ai_end
+
+            ai_filters = self._build_news_filters(
+                keyword=keyword,
+                start_date=ai_start,
+                end_date=ai_end,
+                category=category,
+                region=region,
+                source=source,
+            )
+
+            ai_stmt = (
+                select(
+                    News.title,
+                    News.content,
+                    News.summary,
+                    News.heat_score,
+                    News.source,
+                    News.url,
+                    News.publish_date,
+                )
+                .select_from(News)
+                .order_by(desc(News.heat_score), desc(News.publish_date))
+                .limit(100)
+            )
+            if ai_filters:
+                ai_stmt = ai_stmt.where(and_(*ai_filters))
+            ai_result = await db.execute(ai_stmt)
+            ai_rows = ai_result.all()
+
+            if not ai_rows:
+                yield "未找到相关数据，无法进行分析。"
+                data["ai_status"] = "done"
+                data["ai_analysis"] = "未找到相关数据，无法进行分析。"
+                cached.data = data
+                await db.commit()
+                return
+
+            def compact_text(text: Any, max_len: int = 180) -> str:
+                t = (text or "").replace("\r", " ").replace("\n", " ").strip()
+                if len(t) > max_len:
+                    return t[:max_len] + "…"
+                return t
+
+            news_lines = []
+            for idx, (title, content, summary, heat, src, url, pub_dt) in enumerate(ai_rows, start=1):
+                body = content if content else summary
+                body_str = compact_text(body, 220)
+                title_str = compact_text(title, 80)
+                src_str = compact_text(src, 30)
+                time_str = pub_dt.isoformat() if pub_dt else ""
+                news_lines.append(
+                    f"{idx}. [热度:{(heat or 0):.1f}] [{src_str}] {title_str}\n   时间: {time_str}\n   正文: {body_str}\n   链接: {url}"
+                )
+
+            # Build prompt
+            if keyword:
+                prompt = prompt_manager.get_user_prompt(
+                    "report_keyword_analysis",
+                    keyword=keyword,
+                    time_range_label=time_range_label,
+                    scope_str=scope_str,
+                    news_lines="\n\n".join(news_lines)
+                )
+            else:
+                prompt = prompt_manager.get_user_prompt(
+                    "report_global_analysis",
+                    time_range_label=time_range_label,
+                    scope_str=scope_str,
+                    news_lines="\n\n".join(news_lines)
+                )
+
+            # Mark as running
+            data["ai_status"] = "running"
+            cached.data = data
+            await db.commit()
+
+            # Stream
+            full_text = ""
+            try:
+                async for chunk in ai_service.stream_completion(prompt, route_key="REPORT"):
+                    full_text += chunk
+                    yield chunk
+                
+                # Update DB with full result
+                stmt = select(ReportCache).where(ReportCache.id == report_id)
+                result = await db.execute(stmt)
+                cached = result.scalar_one_or_none()
+                if cached:
+                    data = dict(cached.data or {})
+                    data["ai_analysis"] = full_text
+                    data["ai_status"] = "done"
+                    cached.data = data
+                    await db.commit()
+
+            except Exception as e:
+                logger.error(f"AI Stream failed: {e}")
+                yield f"\n[AI 生成失败: {e}]"
+                stmt = select(ReportCache).where(ReportCache.id == report_id)
+                result = await db.execute(stmt)
+                cached = result.scalar_one_or_none()
+                if cached:
+                    data = dict(cached.data or {})
+                    data["ai_status"] = "error"
+                    cached.data = data
+                    await db.commit()
+
+    async def generate_report_and_stream_ai(
+        self,
+        keyword: str = "",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        category: Optional[str] = None,
+        region: Optional[str] = None,
+        source: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> None:
+        logger.info(f"📄 后台生成报表开始: keyword={keyword or '-'}")
+        data = await self._generate_analysis_data(
+            keyword=keyword,
+            start_date=start_date,
+            end_date=end_date,
+            category=category,
+            region=region,
+            source=source,
+            limit=limit,
+            generate_ai=False,
+        )
+
+        news_count = data.get("summary", {}).get("total", 0)
+        if news_count == 0:
+            data["ai_analysis"] = "未找到相关新闻，无法进行 AI 综述。"
+            data["ai_status"] = "done"
+            logger.info(f"📄 无新闻，跳过 AI 综述: keyword={keyword or '-'}")
+        else:
+            data["ai_analysis"] = ""
+            data["ai_status"] = "pending"
+
+        if keyword:
+            report_id = await self.save_report_cache("keyword", keyword, data)
+        else:
+            report_id = await self.save_report_cache("global", "weekly", data)
+
+        if not report_id:
+            logger.warning("⚠️ 报表缓存写入失败，后台任务结束")
+            return
+
+        logger.info(f"📄 报表缓存已写入: id={report_id} keyword={keyword or '-'}")
+        
+        # Only start background analysis if we have news AND it's not a keyword report (which streams on-demand)
+        # OR if we want to support background generation for all.
+        # User feedback: "Frontend sees generating, but needs refresh".
+        # This means frontend streaming is not working or not connecting to the background stream.
+        # To fix this, we disable background generation for keyword reports (interactive),
+        # so the frontend triggers it via stream_ai_analysis endpoint.
+        # But wait, if we disable it here, the status is 'pending'.
+        # The frontend sees 'pending' and calls streamAiAnalysis.
+        # stream_ai_analysis endpoint needs to handle 'pending' by STARTING generation.
+        
+        if news_count > 0 and not keyword:
+            # For global reports (usually scheduled or slow), run in background?
+            # Or just disable background for all interactive generation?
+            # Let's disable for all interactive for now to ensure streaming works.
+            # But "generate_report_and_stream_ai" implies it MIGHT be background.
+            # If we comment it out, the frontend MUST be open to generate.
+            # Let's try commenting it out as requested to fix the "stuck" issue.
+            # await self._stream_ai_analysis_to_cache(report_id)
+            pass
+        
+        # Actually, if I comment it out, existing logic in stream_ai_analysis (endpoint) needs to pick it up.
+        # Let's check stream_ai_analysis implementation again.
+        
+        logger.info(f"📄 后台生成报表结束: id={report_id} keyword={keyword or '-'}")
+
+    async def _stream_ai_analysis_to_cache(self, report_id: int) -> None:
+        if not await check_db_connection(verbose=False):
+            return
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(ReportCache).where(ReportCache.id == report_id))
+            cached = result.scalar_one_or_none()
+            if not cached:
+                return
+
+            data = dict(cached.data or {})
+            params = dict(data.get("params") or {})
+            keyword = (params.get("keyword") or cached.keyword or "") if cached.report_type == "keyword" else ""
+            start_date = params.get("start_date")
+            end_date = params.get("end_date")
+            category = params.get("category")
+            region = params.get("region")
+            source = params.get("source")
+
+            logger.info(f"🤖 AI 综述生成开始: report_id={report_id} keyword={keyword or '-'}")
+
+            scope_parts = []
+            if keyword:
+                scope_parts.append(f"关键词={keyword}")
+            if category and category != "all":
+                scope_parts.append(f"领域={category}")
+            if region and region != "all":
+                scope_parts.append(f"地区={region}")
+            if source and source != "all":
+                scope_parts.append(f"来源={source}")
+            scope_str = "；".join(scope_parts) if scope_parts else "全量样本"
+
+            ai_start = start_date or (datetime.now().date() - timedelta(days=0)).strftime("%Y-%m-%d")
+            ai_end = end_date or datetime.now().date().strftime("%Y-%m-%d")
+            time_range_label = f"{ai_start} 至 {ai_end}" if ai_start != ai_end else ai_end
+
+            ai_filters = self._build_news_filters(
+                keyword=keyword,
+                start_date=ai_start,
+                end_date=ai_end,
+                category=category,
+                region=region,
+                source=source,
+            )
+
+            ai_stmt = (
+                select(
+                    News.title,
+                    News.content,
+                    News.summary,
+                    News.heat_score,
+                    News.source,
+                    News.url,
+                    News.publish_date,
+                )
+                .select_from(News)
+                .order_by(desc(News.heat_score), desc(News.publish_date))
+                .limit(100)
+            )
+            if ai_filters:
+                ai_stmt = ai_stmt.where(and_(*ai_filters))
+            ai_result = await db.execute(ai_stmt)
+            ai_rows = ai_result.all()
+
+            def compact_text(text: Any, max_len: int = 180) -> str:
+                t = (text or "").replace("\r", " ").replace("\n", " ").strip()
+                if len(t) > max_len:
+                    return t[:max_len] + "…"
+                return t
+
+            news_lines = []
+            for idx, (title, content, summary, heat, src, url, pub_dt) in enumerate(ai_rows, start=1):
+                body = content if content else summary
+                body_str = compact_text(body, 220)
+                title_str = compact_text(title, 80)
+                src_str = compact_text(src, 30)
+                time_str = pub_dt.isoformat() if pub_dt else ""
+                news_lines.append(
+                    f"{idx}. [热度:{(heat or 0):.1f}] [{src_str}] {title_str}\n   时间: {time_str}\n   正文: {body_str}\n   链接: {url}"
+                )
+
+            if keyword:
+                prompt = prompt_manager.get_user_prompt(
+                    "report_keyword_analysis",
+                    keyword=keyword,
+                    time_range_label=time_range_label,
+                    scope_str=scope_str,
+                    news_lines="\n\n".join(news_lines) if news_lines else "无可用新闻样本",
+                )
+            else:
+                prompt = prompt_manager.get_user_prompt(
+                    "report_global_analysis",
+                    time_range_label=time_range_label,
+                    scope_str=scope_str,
+                    news_lines="\n\n".join(news_lines) if news_lines else "无可用新闻样本",
+                )
+
+            data["ai_status"] = "running"
+            data["ai_analysis"] = ""
+            cached.data = data
+            await db.commit()
+
+            full_text = ""
+            last_flush = monotonic()
+            last_len = 0
+            try:
+                logger.info(f"DEBUG: Entering stream loop for report {report_id}")
+                async for chunk in ai_service.stream_completion(prompt, route_key="REPORT"):
+                    logger.info(f"DEBUG: Got chunk len={len(chunk)} content={chunk[:20]!r}")
+                    full_text += chunk
+                    now = monotonic()
+                    if (now - last_flush) >= 1.5 and (len(full_text) - last_len) >= 120:
+                        data["ai_analysis"] = full_text
+                        cached.data = dict(data)
+                        await db.commit()
+                        last_flush = now
+                        last_len = len(full_text)
+
+                if not full_text.strip():
+                    logger.warning(f"⚠️ AI 流式返回为空，尝试降级为非流式生成: report_id={report_id}")
+                    fallback = await ai_service.chat_completion(prompt, route_key="REPORT")
+                    full_text = (fallback or "").strip()
+
+                # Create a new dict to ensure SQLAlchemy detects the change
+                final_data = dict(data)
+                final_data["ai_analysis"] = full_text.strip()
+                final_data["ai_status"] = "done" if final_data["ai_analysis"] else "error"
+                cached.data = final_data
+                await db.commit()
+            except AIConfigurationError as e:
+                logger.warning(f"⚠️ AI 配置不可用: {e}")
+                data["ai_analysis"] = str(e)
+                data["ai_status"] = "error"
+                cached.data = data
+                await db.commit()
+            except Exception as e:
+                logger.error(f"AI分析失败: {e}")
+                data["ai_analysis"] = (full_text.strip() or "AI 分析失败").strip()
+                data["ai_status"] = "error"
+                cached.data = data
+                await db.commit()
+            finally:
+                try:
+                    await db.refresh(cached)
+                    final_data = dict(cached.data or {})
+                    final_status = str(final_data.get("ai_status") or "")
+                    final_text = str(final_data.get("ai_analysis") or "")
+                    logger.info(
+                        f"🤖 AI 综述生成结束: report_id={report_id} status={final_status or '-'} chars={len(final_text)}"
+                    )
+                except Exception:
+                    pass
 
     async def load_report(self, report_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -598,9 +1050,10 @@ class ReportService:
             result = await db.execute(select(ReportCache).where(ReportCache.id == report_id))
             cached = result.scalar_one_or_none()
             if cached:
-                data = cached.data
+                data = dict(cached.data)
+                data["id"] = cached.id
                 if cached.report_type == "global":
-                    return {**data, "period": cached.keyword or "weekly"}
+                    data["period"] = cached.keyword or "weekly"
                 return data
             return None
 
@@ -642,7 +1095,7 @@ class ReportService:
                 async with AsyncSessionLocal() as db:
                     t0 = monotonic()
                     stmt = (
-                        select(ReportCache.keyword, ReportCache.data)
+                        select(ReportCache.id, ReportCache.keyword, ReportCache.data)
                         .where(ReportCache.report_type == "global", ReportCache.keyword == "daily")
                         .order_by(desc(ReportCache.created_at))
                         .limit(1)
@@ -652,7 +1105,7 @@ class ReportService:
 
                     if not row:
                         stmt = (
-                            select(ReportCache.keyword, ReportCache.data)
+                            select(ReportCache.id, ReportCache.keyword, ReportCache.data)
                             .where(ReportCache.report_type == "global")
                             .order_by(desc(ReportCache.created_at))
                             .limit(1)
@@ -661,7 +1114,9 @@ class ReportService:
                         row = result.first()
 
                     if row:
-                        kw, data = row
+                        rid, kw, data = row
+                        data = dict(data)
+                        data["id"] = rid
                         elapsed_ms = int((monotonic() - t0) * 1000)
                         logger.info(f"📖 读取全局报表数据库缓存 ({kw or '未知'}) {elapsed_ms}ms")
                         self._global_cache = (monotonic(), str(kw or ""), data)
@@ -670,7 +1125,9 @@ class ReportService:
         data = await self._generate_analysis_data(keyword, start_date, end_date, category, region, source, limit, generate_ai)
 
         if keyword:
-            await self.save_report_cache("keyword", keyword, data)
+            report_id = await self.save_report_cache("keyword", keyword, data)
+            if report_id:
+                data["id"] = report_id
 
         return data
 
@@ -684,6 +1141,7 @@ class ReportService:
         source: Optional[str] = None,
         limit: Optional[int] = None,
         generate_ai: bool = False,
+        trend_lookback_days: int = 0, # New parameter
     ) -> Dict[str, Any]:
         """
         输入:
@@ -802,6 +1260,7 @@ class ReportService:
                     },
                     "top_news": [],
                     "ai_analysis": "未找到相关数据，无法进行分析。",
+                    "ai_status": "done",
                 }
 
             heats = [n.heat_score for n in news_list]
@@ -862,6 +1321,93 @@ class ReportService:
                         for j in range(i + 1, len(unique_kws)):
                             pair = tuple(sorted((unique_kws[i], unique_kws[j])))
                             co_occurrence[pair] += 1
+
+            # 如果有 trend_lookback_days，我们需要单独查询趋势图数据
+            # 这里的 news_list 仅用于统计摘要、Top新闻和 AI 分析（限制在 start_date ~ end_date）
+            # 我们需要额外的逻辑来填充 trend_map
+            
+            if trend_lookback_days > 0 and start_date:
+                try:
+                    trend_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=trend_lookback_days)).strftime("%Y-%m-%d")
+                    # 查询趋势数据（仅需要日期、热度、分类、文章数）
+                    # 为了效率，我们只聚合查询，不拉取所有字段
+                    trend_stmt = (
+                        select(
+                            News.publish_date,
+                            News.heat_score,
+                            News.category
+                        )
+                        .where(News.publish_date >= datetime.strptime(trend_start, "%Y-%m-%d"))
+                        .where(News.publish_date <= datetime.strptime(end_date or start_date, "%Y-%m-%d")) # end_date might be same as start_date
+                    )
+                     # Apply other filters if needed (category, region, source, keyword)
+                    trend_filters = self._build_news_filters(
+                        keyword=keyword,
+                        start_date=trend_start, # Override start_date
+                        end_date=end_date,
+                        category=category,
+                        region=region,
+                        source=source
+                    )
+                    # Note: _build_news_filters already handles date range, so we need to be careful not to double filter or conflict.
+                    # Actually _build_news_filters uses the passed args.
+                    
+                    # Let's reconstruct filters for trend
+                    t_filters = []
+                    if keyword:
+                        t_filters.append(or_(News.title.contains(keyword), News.content.contains(keyword)))
+                    if category and category != "all":
+                         cats = category.split(",")
+                         if len(cats) == 1:
+                             t_filters.append(News.category == cats[0])
+                         else:
+                             t_filters.append(News.category.in_(cats))
+                    if region and region != "all":
+                        regs = region.split(",")
+                        if len(regs) == 1:
+                             t_filters.append(News.region == regs[0])
+                        else:
+                             t_filters.append(News.region.in_(regs))
+                    if source and source != "all":
+                         srcs = source.split(",")
+                         if len(srcs) == 1:
+                             t_filters.append(News.source == srcs[0])
+                         else:
+                             t_filters.append(News.source.in_(srcs))
+                    
+                    t_filters.append(News.publish_date >= datetime.strptime(trend_start, "%Y-%m-%d"))
+                    if end_date:
+                         t_filters.append(News.publish_date < (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)))
+                    else:
+                         # Default to now if end_date not provided? But usually end_date is provided in _generate
+                         pass
+
+                    trend_stmt = select(News.publish_date, News.heat_score, News.category).where(and_(*t_filters))
+                    
+                    trend_res = await db.execute(trend_stmt)
+                    trend_rows = trend_res.all()
+                    
+                    # Merge into trend_map
+                    # Note: trend_map currently only has data from news_list (which is restricted range).
+                    # We should probably clear trend_map and rebuild it from trend_rows?
+                    # BUT news_list has richer info (sentiment etc) for other charts.
+                    # trend_map is used for: chartTrend (dates, counts, avg_heats, category_series)
+                    
+                    # So let's populate a SEPARATE trend map for the trend chart
+                    full_trend_map = defaultdict(lambda: {"count": 0, "heat_sum": 0.0, "categories": Counter()})
+                    for r in trend_rows:
+                        # r: (publish_date, heat_score, category)
+                        d_str = r[0].strftime("%Y-%m-%d")
+                        full_trend_map[d_str]["count"] += 1
+                        full_trend_map[d_str]["heat_sum"] += r[1] or 0.0
+                        full_trend_map[d_str]["categories"][r[2] or "其他"] += 1
+                        
+                    # Now override the trend_map used for chartTrend
+                    trend_map = full_trend_map
+                    
+                except Exception as e:
+                    logger.error(f"Error fetching trend history: {e}")
+                    # Fallback to original trend_map (from news_list)
 
             sorted_dates = sorted(trend_map.keys())
             category_names = set()
