@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     """
 
     APP_NAME: str = "TrendSonar"
-    VERSION: str = "0.1.8"
+    VERSION: str = "0.2.0"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
     LOG_RETENTION_DAYS: int = 3

@@ -83,9 +83,21 @@ class TopicService:
 
         async with AsyncSessionLocal() as db:
             # 1. 获取已归类的新闻ID集合
-            used_stmt = select(TopicTimelineItem.news_id).where(TopicTimelineItem.news_id.isnot(None))
-            used_ids_res = await db.execute(used_stmt)
-            used_ids = set(used_ids_res.scalars().all())
+            # 同时获取 news_id 和 sources 中的 ID
+            used_stmt = select(TopicTimelineItem.news_id, TopicTimelineItem.sources)
+            used_res = await db.execute(used_stmt)
+            
+            used_ids = set()
+            for nid, srcs in used_res:
+                if nid:
+                    used_ids.add(nid)
+                if srcs and isinstance(srcs, list):
+                    for src in srcs:
+                        if isinstance(src, dict) and "id" in src:
+                            try:
+                                used_ids.add(int(src["id"]))
+                            except (ValueError, TypeError):
+                                pass
             
             # 2. 获取候选新闻池（N天内，未归类）
             days = settings.TOPIC_LOOKBACK_DAYS
@@ -413,15 +425,37 @@ class TopicService:
         
         if include_used:
             # 如果允许包含已归类新闻，则只排除 *当前专题* 已经有的新闻（避免重复处理）
-            current_ids_stmt = select(TopicTimelineItem.news_id).where(TopicTimelineItem.topic_id == target_topic.id).where(TopicTimelineItem.news_id.isnot(None))
-            current_ids = set((await db.execute(current_ids_stmt)).scalars().all())
-            exclude_ids = current_ids
+            current_stmt = select(TopicTimelineItem.news_id, TopicTimelineItem.sources).where(TopicTimelineItem.topic_id == target_topic.id)
+            current_res = await db.execute(current_stmt)
+            
+            exclude_ids = set()
+            for nid, srcs in current_res:
+                if nid:
+                    exclude_ids.add(nid)
+                if srcs and isinstance(srcs, list):
+                    for src in srcs:
+                        if isinstance(src, dict) and "id" in src:
+                            try:
+                                exclude_ids.add(int(src["id"]))
+                            except (ValueError, TypeError):
+                                pass
             logger.info(f"🔍 [Scan] 模式: 包含已归类新闻 (只排除当前专题已有的 {len(exclude_ids)} 条)")
         else:
             # 默认模式：排除所有已归类新闻
-            used_stmt = select(TopicTimelineItem.news_id).where(TopicTimelineItem.news_id.isnot(None))
-            used_ids_res = await db.execute(used_stmt)
-            exclude_ids = set(used_ids_res.scalars().all())
+            used_stmt = select(TopicTimelineItem.news_id, TopicTimelineItem.sources)
+            used_res = await db.execute(used_stmt)
+            
+            exclude_ids = set()
+            for nid, srcs in used_res:
+                if nid:
+                    exclude_ids.add(nid)
+                if srcs and isinstance(srcs, list):
+                    for src in srcs:
+                        if isinstance(src, dict) and "id" in src:
+                            try:
+                                exclude_ids.add(int(src["id"]))
+                            except (ValueError, TypeError):
+                                pass
             logger.info(f"🔍 [Scan] 模式: 排除所有已归类新闻 (共 {len(exclude_ids)} 条)")
 
         days = settings.TOPIC_LOOKBACK_DAYS
