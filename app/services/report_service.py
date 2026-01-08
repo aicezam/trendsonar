@@ -160,9 +160,11 @@ class ReportService:
             return data
         except Exception:
             async with AsyncSessionLocal() as db:
-                stmt = select(News.keywords)
+                stmt = select(News.keywords).select_from(News)
                 if filters:
                     stmt = stmt.where(and_(*filters))
+                # 增加 limit 防止全量拉取导致 OOM，取热度最高的 5000 条
+                stmt = stmt.order_by(desc(News.heat_score)).limit(5000)
                 result = await db.execute(stmt)
                 keywords_values = result.scalars().all()
 
@@ -297,6 +299,8 @@ class ReportService:
                 stmt = select(News.sentiment_label, News.keywords).select_from(News)
                 if filters:
                     stmt = stmt.where(and_(*filters))
+                # 增加 limit 防止全量拉取导致 OOM，取热度最高的 5000 条
+                stmt = stmt.order_by(desc(News.heat_score)).limit(5000)
                 result = await db.execute(stmt)
                 rows = result.all()
 
