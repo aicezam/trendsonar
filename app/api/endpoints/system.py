@@ -11,6 +11,7 @@
 import asyncio
 import json
 import re
+import gc
 from collections import deque
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import settings, verify_admin_access
@@ -244,7 +246,8 @@ async def chat_api(
     if q_vec is not None:
         start_date, end_date = parse_query_time_range(query)
 
-        stmt = select(News).where(News.embedding.is_not(None))
+        # 优化：RAG 只需要 embedding 和摘要，不需要加载正文
+        stmt = select(News).options(defer(News.content)).where(News.embedding.is_not(None))
         if start_date:
             stmt = stmt.where(News.publish_date >= start_date)
         if end_date:
@@ -281,6 +284,10 @@ async def chat_api(
             context_text += (
                 f"{i+1}. [{n.title}] (来源:{n.source}, 时间:{n.publish_date}, 热度:{n.heat_score})\n摘要: {n.summary}\n\n"
             )
+
+        # 显式清理 RAG 中间变量，释放内存
+        del candidates, all_scored, top_news
+        gc.collect()
 
     if not context_text:
         context_text = "未找到相关新闻。"

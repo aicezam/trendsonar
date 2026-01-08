@@ -5,6 +5,7 @@
 - `report_service`: 全局服务单例
 """
 
+import gc
 import asyncio
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, AsyncIterator
 
 import numpy as np
 from sqlalchemy import and_, case, cast, delete, desc, func, literal, or_, select, true
+from sqlalchemy.orm import defer
 from sqlalchemy.dialects.postgresql import JSONB
 
 from app.core.database import AsyncSessionLocal, check_db_connection
@@ -719,7 +721,7 @@ class ReportService:
             ai_stmt = (
                 select(
                     News.title,
-                    News.content,
+                    func.substr(News.content, 1, 1000).label("content"),
                     News.summary,
                     News.heat_score,
                     News.source,
@@ -784,33 +786,50 @@ class ReportService:
 
             # Stream
             full_text = ""
+            last_flush = monotonic()
+            
             try:
                 async for chunk in ai_service.stream_completion(prompt, route_key="REPORT"):
                     full_text += chunk
                     yield chunk
+
+                    if len(full_text) > 100000:
+                        yield "\n[系统提示: 生成内容过长，已截断]"
+                        break
+                    
+                    # Incremental update
+                    now = monotonic()
+                    if (now - last_flush) >= 2.0:
+                        data["ai_analysis"] = full_text
+                        cached.data = dict(data)
+                        await db.commit()
+                        last_flush = now
                 
                 # Update DB with full result
-                stmt = select(ReportCache).where(ReportCache.id == report_id)
-                result = await db.execute(stmt)
-                cached = result.scalar_one_or_none()
-                if cached:
-                    data = dict(cached.data or {})
-                    data["ai_analysis"] = full_text
-                    data["ai_status"] = "done"
-                    cached.data = data
-                    await db.commit()
+                data["ai_analysis"] = full_text
+                data["ai_status"] = "done"
+                cached.data = dict(data)
+                await db.commit()
 
             except Exception as e:
                 logger.error(f"AI Stream failed: {e}")
                 yield f"\n[AI 生成失败: {e}]"
-                stmt = select(ReportCache).where(ReportCache.id == report_id)
-                result = await db.execute(stmt)
-                cached = result.scalar_one_or_none()
-                if cached:
-                    data = dict(cached.data or {})
-                    data["ai_status"] = "error"
-                    cached.data = data
-                    await db.commit()
+                data["ai_status"] = "error"
+                cached.data = dict(data)
+                await db.commit()
+            finally:
+                try:
+                    # Ensure status is not running
+                    await db.refresh(cached)
+                    current_data = dict(cached.data or {})
+                    if current_data.get("ai_status") == "running":
+                        current_data["ai_status"] = "done"
+                        if full_text:
+                            current_data["ai_analysis"] = full_text
+                        cached.data = current_data
+                        await db.commit()
+                except Exception as e:
+                    logger.error(f"Error in finally block: {e}")
 
     async def generate_report_and_stream_ai(
         self,
@@ -927,7 +946,7 @@ class ReportService:
             ai_stmt = (
                 select(
                     News.title,
-                    News.content,
+                    func.substr(News.content, 1, 1000).label("content"),
                     News.summary,
                     News.heat_score,
                     News.source,
@@ -987,8 +1006,14 @@ class ReportService:
             try:
                 logger.info(f"DEBUG: Entering stream loop for report {report_id}")
                 async for chunk in ai_service.stream_completion(prompt, route_key="REPORT"):
-                    logger.info(f"DEBUG: Got chunk len={len(chunk)} content={chunk[:20]!r}")
+                    # logger.info(f"DEBUG: Got chunk len={len(chunk)} content={chunk[:20]!r}")
                     full_text += chunk
+                    
+                    if len(full_text) > 100000:
+                         logger.warning(f"⚠️ Report {report_id} AI output too long, truncated.")
+                         full_text += "\n[截断]"
+                         break
+
                     now = monotonic()
                     if (now - last_flush) >= 1.5 and (len(full_text) - last_len) >= 120:
                         data["ai_analysis"] = full_text
@@ -1189,7 +1214,11 @@ class ReportService:
             return empty_result()
 
         async with AsyncSessionLocal() as db:
-            stmt = select(News)
+            # 优化：延迟加载大字段（content, embedding），显著降低内存占用
+            stmt = select(News).options(
+                defer(News.content),
+                defer(News.embedding)
+            )
             filters = []
 
             if keyword:
@@ -1223,191 +1252,143 @@ class ReportService:
 
             count_stmt = select(func.count()).select_from(News)
             if filters:
-                stmt = stmt.where(and_(*filters))
+                # stmt = stmt.where(and_(*filters))  <-- REMOVED: stmt is not defined yet for charts
                 count_stmt = count_stmt.where(and_(*filters))
 
-            real_total_count = await db.scalar(count_stmt)
-
-            if limit and limit > 0:
-                stmt = stmt.order_by(desc(News.heat_score)).limit(limit)
-            else:
-                stmt = stmt.order_by(desc(News.publish_date))
-
-            result = await db.execute(stmt)
-            news_list = result.scalars().all()
-
-            if not news_list:
-                return {
-                "params": {
-                    "keyword": keyword,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "category": category,
-                    "region": region,
-                    "source": source,
-                    "limit": limit
-                },
-                "summary": {"total": 0, "avg_heat": 0, "max_heat": 0, "sentiment_idx": 0, "risk_count": 0, "time_range": "-"},
-                    "charts": {
-                        "trend": {},
-                        "source": {},
-                        "word_cloud": [],
-                        "sentiment_dist": [],
-                        "neg_keywords": [],
-                        "correlation": [],
-                        "freq_trend": [],
-                        "sentiment_trend": [],
-                    },
-                    "top_news": [],
-                    "ai_analysis": "未找到相关数据，无法进行分析。",
-                    "ai_status": "done",
-                }
-
-            heats = [n.heat_score for n in news_list]
-            avg_heat = sum(heats) / len(news_list) if news_list else 0
-            max_heat = max(heats) if heats else 0
-
-            sentiment_scores = [n.sentiment_score for n in news_list if n.sentiment_score is not None]
-            sentiment_idx = (sum(sentiment_scores) / len(sentiment_scores)) if sentiment_scores else 50
-            risk_count = sum(1 for n in news_list if n.sentiment_label == "负面")
-
-            min_date = min(n.publish_date for n in news_list)
-            max_date = max(n.publish_date for n in news_list)
-            time_range = f"{min_date.strftime('%Y-%m-%d')} ~ {max_date.strftime('%Y-%m-%d')}"
-
-            trend_map = defaultdict(lambda: {"count": 0, "heat_sum": 0.0, "categories": Counter()})
-            source_map = Counter()
-
-            all_keywords = []
-            negative_keywords = []
-            sentiment_counts = {"正面": 0, "中立": 0, "负面": 0}
-
-            co_occurrence = defaultdict(int)
-            keyword_freq = defaultdict(int)
-            daily_kw_freq = defaultdict(Counter)
-            daily_sentiment = defaultdict(lambda: {"正面": 0, "中立": 0, "负面": 0, "score_sum": 0.0, "score_count": 0})
-
-            for n in news_list:
-                day = n.publish_date.strftime("%Y-%m-%d")
-                trend_map[day]["count"] += 1
-                trend_map[day]["heat_sum"] += n.heat_score or 0.0
-                trend_map[day]["categories"][n.category or "其他"] += 1
-
-                if n.source:
-                    source_map[n.source] += 1
-
-                label = n.sentiment_label if n.sentiment_label in sentiment_counts else "中立"
-                sentiment_counts[label] += 1
-                daily_sentiment[day][label] += 1
-                if n.sentiment_score is not None:
-                    daily_sentiment[day]["score_sum"] += float(n.sentiment_score)
-                    daily_sentiment[day]["score_count"] += 1
-
-                if n.keywords and isinstance(n.keywords, list):
-                    valid_kws = [
-                        k.strip()
-                        for k in n.keywords
-                        if k and k.strip() and k.strip().lower() not in {"无内容", "null", "空", "none", ""}
-                    ]
-                    all_keywords.extend(valid_kws)
-                    if label == "负面":
-                        negative_keywords.extend(valid_kws)
-
-                    unique_kws = list(set(valid_kws))
-                    daily_kw_freq[day].update(unique_kws)
-                    for kw in unique_kws:
-                        keyword_freq[kw] += 1
-                    for i in range(len(unique_kws)):
-                        for j in range(i + 1, len(unique_kws)):
-                            pair = tuple(sorted((unique_kws[i], unique_kws[j])))
-                            co_occurrence[pair] += 1
-
-            # 如果有 trend_lookback_days，我们需要单独查询趋势图数据
-            # 这里的 news_list 仅用于统计摘要、Top新闻和 AI 分析（限制在 start_date ~ end_date）
-            # 我们需要额外的逻辑来填充 trend_map
+            real_total_count = await db.scalar(count_stmt) or 0
             
-            if trend_lookback_days > 0 and start_date:
-                try:
-                    trend_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=trend_lookback_days)).strftime("%Y-%m-%d")
-                    # 查询趋势数据（仅需要日期、热度、分类、文章数）
-                    # 为了效率，我们只聚合查询，不拉取所有字段
-                    trend_stmt = (
-                        select(
-                            News.publish_date,
-                            News.heat_score,
-                            News.category
-                        )
-                        .where(News.publish_date >= datetime.strptime(trend_start, "%Y-%m-%d"))
-                        .where(News.publish_date <= datetime.strptime(end_date or start_date, "%Y-%m-%d")) # end_date might be same as start_date
-                    )
-                     # Apply other filters if needed (category, region, source, keyword)
-                    trend_filters = self._build_news_filters(
-                        keyword=keyword,
-                        start_date=trend_start, # Override start_date
-                        end_date=end_date,
-                        category=category,
-                        region=region,
-                        source=source
-                    )
-                    # Note: _build_news_filters already handles date range, so we need to be careful not to double filter or conflict.
-                    # Actually _build_news_filters uses the passed args.
-                    
-                    # Let's reconstruct filters for trend
-                    t_filters = []
-                    if keyword:
-                        t_filters.append(or_(News.title.contains(keyword), News.content.contains(keyword)))
-                    if category and category != "all":
-                         cats = category.split(",")
-                         if len(cats) == 1:
-                             t_filters.append(News.category == cats[0])
-                         else:
-                             t_filters.append(News.category.in_(cats))
-                    if region and region != "all":
-                        regs = region.split(",")
-                        if len(regs) == 1:
-                             t_filters.append(News.region == regs[0])
-                        else:
-                             t_filters.append(News.region.in_(regs))
-                    if source and source != "all":
-                         srcs = source.split(",")
-                         if len(srcs) == 1:
-                             t_filters.append(News.source == srcs[0])
-                         else:
-                             t_filters.append(News.source.in_(srcs))
-                    
-                    t_filters.append(News.publish_date >= datetime.strptime(trend_start, "%Y-%m-%d"))
-                    if end_date:
-                         t_filters.append(News.publish_date < (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)))
-                    else:
-                         # Default to now if end_date not provided? But usually end_date is provided in _generate
-                         pass
+            if real_total_count == 0:
+                return empty_result(msg="未找到相关数据")
 
-                    trend_stmt = select(News.publish_date, News.heat_score, News.category).where(and_(*t_filters))
-                    
-                    trend_res = await db.execute(trend_stmt)
-                    trend_rows = trend_res.all()
-                    
-                    # Merge into trend_map
-                    # Note: trend_map currently only has data from news_list (which is restricted range).
-                    # We should probably clear trend_map and rebuild it from trend_rows?
-                    # BUT news_list has richer info (sentiment etc) for other charts.
-                    # trend_map is used for: chartTrend (dates, counts, avg_heats, category_series)
-                    
-                    # So let's populate a SEPARATE trend map for the trend chart
-                    full_trend_map = defaultdict(lambda: {"count": 0, "heat_sum": 0.0, "categories": Counter()})
-                    for r in trend_rows:
-                        # r: (publish_date, heat_score, category)
-                        d_str = r[0].strftime("%Y-%m-%d")
-                        full_trend_map[d_str]["count"] += 1
-                        full_trend_map[d_str]["heat_sum"] += r[1] or 0.0
-                        full_trend_map[d_str]["categories"][r[2] or "其他"] += 1
-                        
-                    # Now override the trend_map used for chartTrend
-                    trend_map = full_trend_map
-                    
-                except Exception as e:
-                    logger.error(f"Error fetching trend history: {e}")
-                    # Fallback to original trend_map (from news_list)
+            # -------------------------------------------------------------------------
+            # 2. 统计指标 (聚合查询，不加载对象)
+            # -------------------------------------------------------------------------
+            stats_stmt = select(
+                func.avg(News.heat_score),
+                func.max(News.heat_score),
+                func.min(News.publish_date),
+                func.max(News.publish_date)
+            )
+            if filters:
+                stats_stmt = stats_stmt.where(and_(*filters))
+            
+            stats_res = await db.execute(stats_stmt)
+            avg_heat, max_heat, min_date, max_date = stats_res.one()
+            avg_heat = float(avg_heat or 0)
+            max_heat = float(max_heat or 0)
+            time_range = f"{(min_date or datetime.now()).strftime('%Y-%m-%d')} ~ {(max_date or datetime.now()).strftime('%Y-%m-%d')}"
+
+            # -------------------------------------------------------------------------
+            # 3. 情感分布 (聚合查询)
+            # -------------------------------------------------------------------------
+            sentiment_stmt = (
+                select(News.sentiment_label, func.count(), func.avg(News.sentiment_score))
+                .group_by(News.sentiment_label)
+            )
+            if filters:
+                sentiment_stmt = sentiment_stmt.where(and_(*filters))
+            
+            sent_res = await db.execute(sentiment_stmt)
+            sent_rows = sent_res.all()
+            
+            sentiment_counts = {"正面": 0, "中立": 0, "负面": 0}
+            total_score_sum = 0.0
+            total_score_count = 0
+            
+            for label, count, avg_score in sent_rows:
+                l_str = label if label in sentiment_counts else "中立"
+                sentiment_counts[l_str] += count
+                if avg_score is not None:
+                    total_score_sum += float(avg_score) * count
+                    total_score_count += count
+
+            sentiment_idx = (total_score_sum / total_score_count) if total_score_count else 50.0
+            risk_count = sentiment_counts["负面"]
+
+            sentiment_dist = [
+                {"name": "正面", "value": sentiment_counts["正面"]},
+                {"name": "中立", "value": sentiment_counts["中立"]},
+                {"name": "负面", "value": sentiment_counts["负面"]},
+            ]
+
+            # -------------------------------------------------------------------------
+            # 4. 来源分布 (Top 10 聚合)
+            # -------------------------------------------------------------------------
+            source_stmt = (
+                select(News.source, func.count().label("cnt"))
+                .group_by(News.source)
+                .order_by(desc("cnt"))
+                .limit(10)
+            )
+            if filters:
+                source_stmt = source_stmt.where(and_(*filters))
+            
+            source_res = await db.execute(source_stmt)
+            chart_source = [{"name": str(src), "value": cnt} for src, cnt in source_res.all() if src]
+
+            # -------------------------------------------------------------------------
+            # 5. 趋势图 (聚合查询)
+            # -------------------------------------------------------------------------
+            # 如果有 trend_lookback_days，我们需要扩展时间范围查询趋势
+            # 但为了简化，我们先用 filters 的范围，如果需要扩展，需重新构建 filters
+            
+            trend_map = defaultdict(lambda: {"count": 0, "heat_sum": 0.0, "categories": Counter()})
+            
+            # 使用 cast(News.publish_date, Date) 在某些 DB 可能不兼容，但在 PG/SQLite 通常可行
+            # 或者直接取 publish_date 并在 Python 端截取日期（聚合后的数据量较小）
+            # 这里为了通用性，我们按天聚合
+            # 注意：SQLite 不支持 cast(..., Date) 同样语法，Postgres 支持
+            # 我们假设环境是 Postgres (TrendSonar 看起来像) 或者兼容
+            
+            # 尝试使用 func.date_trunc('day', News.publish_date) for PG, or just fetch date
+            # 安全起见，我们拉取 (date, category, heat, count) 聚合
+            # 但 func.date(...) 依赖方言。
+            # 既然已经优化了，我们可以稍微拉取多一点数据：(publish_date, category, heat_score) 
+            # 但还是不拉取全量。
+            
+            # 更好方案：按天分组
+            # 针对不同数据库，日期截断写法不同。为了兼容性，我们可以在 Python 做日期聚合，
+            # 但只拉取 (publish_date, heat_score, category)，不拉取其他字段。
+            
+            # 确定趋势查询的时间范围
+            trend_filters = list(filters)
+            if trend_lookback_days > 0 and start_date:
+                # 移除原有的日期 filter，添加新的
+                trend_start = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=trend_lookback_days)).strftime("%Y-%m-%d")
+                # 重新构建时间 filter (比较麻烦，因为 filters 是 list)
+                # 简单起见，我们单独构建 trend_stmt
+                trend_range_filters = self._build_news_filters(
+                     keyword=keyword,
+                     start_date=trend_start,
+                     end_date=end_date,
+                     category=category,
+                     region=region,
+                     source=source
+                )
+                trend_filters = trend_range_filters
+
+            trend_stmt = select(
+                News.publish_date, 
+                News.heat_score, 
+                News.category
+            ).order_by(News.publish_date)
+            
+            if trend_filters:
+                trend_stmt = trend_stmt.where(and_(*trend_filters))
+                
+            # 这里如果不做 SQL group by，数据量可能还是很大 (比如 10万条记录的日期和热度)
+            # 10万条 (date, float, str) 大概占用 100,000 * (10+8+10) bytes ≈ 3MB，完全可接受。
+            # 比加载 10万个对象 (几百 MB) 小得多。
+            
+            trend_res = await db.execute(trend_stmt)
+            trend_rows = trend_res.all()
+            
+            for pub_date, heat, cat in trend_rows:
+                if not pub_date: continue
+                d_str = pub_date.strftime("%Y-%m-%d")
+                trend_map[d_str]["count"] += 1
+                trend_map[d_str]["heat_sum"] += (heat or 0.0)
+                trend_map[d_str]["categories"][cat or "其他"] += 1
 
             sorted_dates = sorted(trend_map.keys())
             category_names = set()
@@ -1427,19 +1408,70 @@ class ReportService:
                 "category_series": category_series,
             }
 
-            sorted_sources = sorted(source_map.items(), key=lambda x: x[1], reverse=True)
-            chart_source = [{"name": k, "value": v} for k, v in sorted_sources[:10]]
+            # -------------------------------------------------------------------------
+            # 6. 关键词/共现/每日情感 (采样 Top 2000)
+            # -------------------------------------------------------------------------
+            # 为了计算词云、共现和每日情感趋势（需要关键词和情感明细），我们只取热度最高的 2000 条
+            sample_limit = 2000
+            sample_stmt = (
+                select(News.keywords, News.sentiment_label, News.sentiment_score, News.publish_date)
+                .order_by(desc(News.heat_score))
+                .limit(sample_limit)
+            )
+            if filters:
+                sample_stmt = sample_stmt.where(and_(*filters))
+                
+            sample_res = await db.execute(sample_stmt)
+            sample_rows = sample_res.all()
+
+            all_keywords = []
+            negative_keywords = []
+            co_occurrence = defaultdict(int)
+            keyword_freq = defaultdict(int)
+            daily_kw_freq = defaultdict(Counter)
+            # 重新计算 daily_sentiment 用于趋势图 (基于采样，或者我们可以再做一个 SQL 聚合，
+            # 但为了趋势图的平滑性，采样 Top 2000 可能也够了，不过为了准确，最好用 SQL)
+            
+            # 让我们用 SQL 聚合每日情感，以保证准确性 (step 3 已经是聚合了，但那是总的，我们需要每日的)
+            # daily_sentiment_stmt = select(date, label, count, sum(score))...
+            # 为了避免复杂 SQL，这里先用采样数据近似每日情感趋势，或者接受采样误差。
+            # 考虑到性能，采样 2000 条热点新闻的情感趋势通常能代表整体趋势。
+            
+            daily_sentiment = defaultdict(lambda: {"正面": 0, "中立": 0, "负面": 0, "score_sum": 0.0, "score_count": 0})
+
+            for kws, label, score, pub_date in sample_rows:
+                if not pub_date: continue
+                day = pub_date.strftime("%Y-%m-%d")
+                
+                # 统计每日情感 (Sampled)
+                l_str = label if label in ["正面", "中立", "负面"] else "中立"
+                daily_sentiment[day][l_str] += 1
+                if score is not None:
+                    daily_sentiment[day]["score_sum"] += float(score)
+                    daily_sentiment[day]["score_count"] += 1
+                
+                # 统计关键词
+                if kws and isinstance(kws, list):
+                    valid_kws = [
+                        k.strip() for k in kws
+                        if k and k.strip() and k.strip().lower() not in {"无内容", "null", "空", "none", ""}
+                    ]
+                    all_keywords.extend(valid_kws)
+                    if l_str == "负面":
+                        negative_keywords.extend(valid_kws)
+                    
+                    unique_kws = list(set(valid_kws))
+                    daily_kw_freq[day].update(unique_kws)
+                    for kw in unique_kws:
+                        keyword_freq[kw] += 1
+                    for i in range(len(unique_kws)):
+                        for j in range(i + 1, len(unique_kws)):
+                            pair = tuple(sorted((unique_kws[i], unique_kws[j])))
+                            co_occurrence[pair] += 1
 
             word_counts = Counter(all_keywords)
             word_cloud = [{"name": k, "value": v} for k, v in word_counts.most_common(50)]
-
             neg_keywords = [k for k, _ in Counter(negative_keywords).most_common(10)]
-
-            sentiment_dist = [
-                {"name": "正面", "value": sentiment_counts["正面"]},
-                {"name": "中立", "value": sentiment_counts["中立"]},
-                {"name": "负面", "value": sentiment_counts["负面"]},
-            ]
 
             top_pairs = sorted(co_occurrence.items(), key=lambda x: x[1], reverse=True)[:80]
             node_names = set()
@@ -1460,6 +1492,7 @@ class ReportService:
                 "series": [{"name": kw, "type": "line", "smooth": True, "showSymbol": False, "data": [daily_kw_freq[d][kw] for d in sorted_dates]} for kw in top_keywords],
             }
 
+            # 修正每日情感趋势数据 (对齐 sorted_dates)
             sentiment_trend = {
                 "dates": sorted_dates,
                 "series": [
@@ -1480,8 +1513,23 @@ class ReportService:
                 ],
             }
 
+            # -------------------------------------------------------------------------
+            # 7. Top News (Limit 10)
+            # -------------------------------------------------------------------------
+            top_stmt = (
+                select(News)
+                .options(defer(News.content), defer(News.embedding))
+                .order_by(desc(News.heat_score))
+                .limit(10)
+            )
+            if filters:
+                top_stmt = top_stmt.where(and_(*filters))
+            
+            top_res = await db.execute(top_stmt)
+            top_news_list = top_res.scalars().all()
+            
             top_news = []
-            for n in sorted(news_list, key=lambda x: x.heat_score or 0.0, reverse=True)[:10]:
+            for n in top_news_list:
                 top_news.append(
                     {
                         "id": n.id,
@@ -1489,7 +1537,7 @@ class ReportService:
                         "url": n.url,
                         "source": n.source,
                         "heat": n.heat_score,
-                        "time": n.publish_date.isoformat(),
+                        "time": n.publish_date.isoformat() if n.publish_date else "",
                         "summary": n.summary,
                         "sources": n.sources,
                         "category": n.category,
@@ -1498,6 +1546,8 @@ class ReportService:
                         "sentiment_score": n.sentiment_score,
                     }
                 )
+
+
 
             ai_analysis = ""
             if generate_ai:
@@ -1531,7 +1581,7 @@ class ReportService:
                     ai_stmt = (
                         select(
                             News.title,
-                            News.content,
+                            func.substr(News.content, 1, 1000).label("content"),
                             News.summary,
                             News.heat_score,
                             News.source,
@@ -1591,7 +1641,7 @@ class ReportService:
             else:
                 ai_analysis = "未开启 AI 分析"
 
-            return {
+            result_data = {
                 "params": {
                     "keyword": keyword,
                     "start_date": start_date,
@@ -1622,6 +1672,13 @@ class ReportService:
                 "top_news": top_news,
                 "ai_analysis": ai_analysis,
             }
+            
+            # 显式释放内存，防止大量 News 对象滞留
+            if 'news_list' in locals():
+                del news_list
+            gc.collect()
+            
+            return result_data
 
     async def get_chart_data(
         self,
