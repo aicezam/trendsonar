@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from fastapi import HTTPException
@@ -140,12 +141,14 @@ async def get_db():
     - 为 FastAPI 路由提供数据库会话，并保证请求结束后自动释放
     """
     
-    # 每次请求前先快速检查连接，避免抛出 500 异常
-    if not await check_db_connection(verbose=False):
-        raise HTTPException(status_code=503, detail="系统配置错误或数据库连接失败，请检查配置。")
+    # 移除冗余的连接检查，避免每次请求都进行 SELECT 1 导致性能损耗或锁竞争
+    # if not await check_db_connection(verbose=False):
+    #     raise HTTPException(status_code=503, detail="系统配置错误或数据库连接失败，请检查配置。")
 
     try:
         async with AsyncSessionLocal() as session:
             yield session
     except Exception as e:
+        import traceback
+        logger.error(f"❌ 数据库会话异常: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=503, detail=f"数据库连接异常: {str(e)}")
