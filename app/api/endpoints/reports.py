@@ -6,7 +6,7 @@
 - `get_report_history`: 获取报表历史
 """
 
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends
 from fastapi.responses import StreamingResponse
@@ -88,6 +88,8 @@ async def get_report_analysis(
     source: Optional[str] = None,
     limit: Optional[int] = None,
     generate_ai: Optional[bool] = False,
+    ids: Optional[str] = None,
+    nocache: Optional[bool] = False,
 ):
     """
     输入:
@@ -103,7 +105,26 @@ async def get_report_analysis(
     作用:
     - 按条件生成报表数据，供前端图表渲染与下载
     """
-    return await report_service.get_analysis_data(q, start_date, end_date, category, region, source, limit, generate_ai)
+    news_ids: Optional[List[int]] = None
+    if ids:
+        try:
+            news_ids = [int(x) for x in ids.split(",") if x.strip()]
+        except Exception:
+            news_ids = None
+
+    return await report_service.get_analysis_data(
+        keyword=q,
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+        limit=limit,
+        generate_ai=generate_ai,
+        use_cache=False if news_ids else True,
+        news_ids=news_ids,
+        save_cache=False if nocache else True,
+    )
 
 
 @router.post("/generate")

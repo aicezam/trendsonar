@@ -7,6 +7,7 @@
 
 import gc
 import asyncio
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from time import monotonic
@@ -75,10 +76,18 @@ class ReportService:
         category: Optional[str] = None,
         region: Optional[str] = None,
         source: Optional[str] = None,
+        news_ids: Optional[List[int]] = None,
     ) -> List[Any]:
         filters: List[Any] = []
+        if news_ids:
+            filters.append(News.id.in_(news_ids))
         if keyword:
-            filters.append(News.title.ilike(f"%{keyword}%"))
+            parts = re.split(r"[\s,，、/|;；]+|及|与", keyword)
+            terms = [p.strip() for p in parts if p and p.strip()]
+            if len(terms) > 1:
+                filters.append(or_(*[News.title.ilike(f"%{t}%") for t in terms]))
+            else:
+                filters.append(News.title.ilike(f"%{keyword}%"))
         if category and category != "all":
             if "," in category:
                 filters.append(News.category.in_(category.split(",")))
@@ -1098,6 +1107,8 @@ class ReportService:
         limit: Optional[int] = None,
         generate_ai: bool = False,
         use_cache: bool = True,
+        news_ids: Optional[List[int]] = None,
+        save_cache: bool = True,
     ) -> Dict[str, Any]:
         """
         输入:
@@ -1115,7 +1126,7 @@ class ReportService:
         - 对外提供统一报表数据入口，并在条件允许时命中缓存提升性能
         """
 
-        if use_cache and not keyword and not start_date and not end_date and not category and not region and not source:
+        if use_cache and not keyword and not start_date and not end_date and not category and not region and not source and not news_ids:
             now_ts = monotonic()
             if self._global_cache and (now_ts - self._global_cache[0]) <= 15:
                 return self._global_cache[2]
@@ -1151,9 +1162,19 @@ class ReportService:
                         self._global_cache = (monotonic(), str(kw or ""), data)
                         return data
 
-        data = await self._generate_analysis_data(keyword, start_date, end_date, category, region, source, limit, generate_ai)
+        data = await self._generate_analysis_data(
+            keyword,
+            start_date,
+            end_date,
+            category,
+            region,
+            source,
+            limit,
+            generate_ai,
+            news_ids=news_ids,
+        )
 
-        if keyword:
+        if keyword and save_cache:
             report_id = await self.save_report_cache("keyword", keyword, data)
             if report_id:
                 data["id"] = report_id
@@ -1171,6 +1192,7 @@ class ReportService:
         limit: Optional[int] = None,
         generate_ai: bool = False,
         trend_lookback_days: int = 0, # New parameter
+        news_ids: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """
         输入:
@@ -1206,6 +1228,7 @@ class ReportService:
                         "word_cloud": [],
                         "sentiment_dist": [],
                         "neg_keywords": [],
+                        "pos_keywords": [],
                         "correlation": [],
                         "freq_trend": [],
                         "sentiment_trend": [],
@@ -1214,6 +1237,8 @@ class ReportService:
                     "ai_analysis": f"{msg}，无法进行分析。",
                 }
 
+        if news_ids is not None and not news_ids:
+            return empty_result(msg="未找到相关数据")
         if not await check_db_connection(verbose=False):
             return empty_result()
 
@@ -1225,8 +1250,15 @@ class ReportService:
             )
             filters = []
 
+            if news_ids:
+                filters.append(News.id.in_(news_ids))
             if keyword:
-                filters.append(News.title.ilike(f"%{keyword}%"))
+                parts = re.split(r"[\s,，、/|;；]+|及|与", keyword)
+                terms = [p.strip() for p in parts if p and p.strip()]
+                if len(terms) > 1:
+                    filters.append(or_(*[News.title.ilike(f"%{t}%") for t in terms]))
+                else:
+                    filters.append(News.title.ilike(f"%{keyword}%"))
             if category and category != "all":
                 if "," in category:
                     filters.append(News.category.in_(category.split(",")))
@@ -1367,7 +1399,8 @@ class ReportService:
                      end_date=end_date,
                      category=category,
                      region=region,
-                     source=source
+                     source=source,
+                     news_ids=news_ids,
                 )
                 trend_filters = trend_range_filters
 
@@ -1430,6 +1463,7 @@ class ReportService:
 
             all_keywords = []
             negative_keywords = []
+            positive_keywords = []
             co_occurrence = defaultdict(int)
             keyword_freq = defaultdict(int)
             daily_kw_freq = defaultdict(Counter)
@@ -1463,6 +1497,8 @@ class ReportService:
                     all_keywords.extend(valid_kws)
                     if l_str == "负面":
                         negative_keywords.extend(valid_kws)
+                    if l_str == "正面":
+                        positive_keywords.extend(valid_kws)
                     
                     unique_kws = list(set(valid_kws))
                     daily_kw_freq[day].update(unique_kws)
@@ -1476,6 +1512,7 @@ class ReportService:
             word_counts = Counter(all_keywords)
             word_cloud = [{"name": k, "value": v} for k, v in word_counts.most_common(50)]
             neg_keywords = [k for k, _ in Counter(negative_keywords).most_common(10)]
+            pos_keywords = [k for k, _ in Counter(positive_keywords).most_common(10)]
 
             top_pairs = sorted(co_occurrence.items(), key=lambda x: x[1], reverse=True)[:80]
             node_names = set()
@@ -1669,6 +1706,7 @@ class ReportService:
                     "word_cloud": word_cloud,
                     "sentiment_dist": sentiment_dist,
                     "neg_keywords": neg_keywords,
+                    "pos_keywords": pos_keywords,
                     "correlation": correlation,
                     "freq_trend": freq_trend,
                     "sentiment_trend": sentiment_trend,

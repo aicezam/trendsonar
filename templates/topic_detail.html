@@ -2,6 +2,7 @@
 {% block title %}专题详情 - {{ settings.APP_NAME }}{% endblock %}
 {% block body_class %}page-topic-detail{% endblock %}
 {% block head %}
+    <script src="/static/echarts.min.js"></script>
 {% endblock %}
 
 {% block content %}
@@ -40,6 +41,66 @@
         </div>
     </div>
 
+    <div id="analysisCard" class="card hidden">
+        <div class="card-title">专题多维分析</div>
+        <div class="analysis-section">
+            <div class="chart-row full-width">
+                <div class="chart-card auto-height">
+                    <div class="chart-header">
+                        <span class="chart-title">热词云</span>
+                    </div>
+                    <div id="topicWordCloud" class="word-cloud-container"></div>
+                </div>
+            </div>
+            <div class="chart-row two-cols">
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">媒体来源分布</span>
+                    </div>
+                    <div id="topicChartSource" class="chart-container"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">情感倾向</span>
+                    </div>
+                    <div id="topicChartSentiment" class="chart-container"></div>
+                    <div class="analysis-kws-row">
+                        <div class="analysis-kws">
+                            <div class="analysis-kws-title">主要负面词</div>
+                            <div id="topicNegKeywords" class="analysis-kws-list"></div>
+                        </div>
+                        <div class="analysis-kws">
+                            <div class="analysis-kws-title">主要正面词</div>
+                            <div id="topicPosKeywords" class="analysis-kws-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="chart-row full-width">
+                <div class="chart-card large-chart">
+                    <div class="chart-header">
+                        <span class="chart-title">关键词共现关系图谱</span>
+                    </div>
+                    <div id="topicChartCorrelation" class="chart-container"></div>
+                </div>
+            </div>
+            <div class="chart-row two-cols">
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">关键词频次演变趋势</span>
+                    </div>
+                    <div id="topicChartFreqTrend" class="chart-container"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">相关新闻情感走势</span>
+                    </div>
+                    <div id="topicChartSentimentTrend" class="chart-container"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="newsCard" class="card hidden">
         <div class="card-title">来源新闻</div>
         <div id="newsList" class="news-list"></div>
@@ -52,6 +113,12 @@
 <script>
     const TOPIC_ID = {{ topic_id }};
     let currentSort = "asc"; // 默认正序
+    let topicAnalysisSignature = "";
+    let chartSource = null;
+    let chartSentiment = null;
+    let chartCorrelation = null;
+    let chartFreqTrend = null;
+    let chartSentimentTrend = null;
 
     function fmtTime(iso) {
         if (!iso) return "-";
@@ -117,6 +184,7 @@
         const header = document.getElementById("header");
         const grid = document.getElementById("grid");
         const newsCard = document.getElementById("newsCard");
+        const analysisCard = document.getElementById("analysisCard");
         const sortBtn = document.getElementById("sortBtn");
 
         // 如果是首次加载（loading可见），才显示loading；后续刷新不显示全屏loading
@@ -260,13 +328,243 @@
 
             header.classList.remove("hidden");
             grid.classList.remove("hidden");
+            analysisCard.classList.remove("hidden");
             loading.style.display = "none"; // 确保加载完成后隐藏loading
+            await loadTopicAnalysis(topic, news);
         } catch (e) {
             error.classList.remove("hidden");
             error.textContent = "加载失败，请稍后重试。";
             loading.style.display = "none";
         }
     }
+
+    function isMobileScreen() {
+        return window.innerWidth <= 768;
+    }
+
+    function renderWordCloud(words) {
+        const container = document.getElementById("topicWordCloud");
+        container.innerHTML = "";
+        const colors = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"];
+        if (!words || words.length === 0) {
+            container.innerHTML = '<div class="analysis-empty">暂无数据</div>';
+            return;
+        }
+        let maxVal = 0;
+        let minVal = Infinity;
+        words.forEach(w => {
+            if (w.value > maxVal) maxVal = w.value;
+            if (w.value < minVal) minVal = w.value;
+        });
+        const isMobile = isMobileScreen();
+        const minSize = isMobile ? 0.75 : 0.85;
+        const maxSize = isMobile ? 1.6 : 2.2;
+        const maxWords = isMobile ? 80 : 140;
+        const displayWords = words.sort((a, b) => b.value - a.value).slice(0, maxWords);
+        displayWords.forEach(w => {
+            const span = document.createElement("span");
+            span.className = "cloud-tag";
+            span.textContent = w.name;
+            let size = minSize;
+            if (maxVal > minVal) {
+                size = minSize + ((w.value - minVal) / (maxVal - minVal)) * (maxSize - minSize);
+            }
+            span.style.fontSize = size + "rem";
+            span.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+            container.appendChild(span);
+        });
+    }
+
+    function renderSourceChart(sourceData) {
+        if (chartSource) chartSource.dispose();
+        const container = document.getElementById("topicChartSource");
+        chartSource = echarts.init(container);
+        const isMobile = isMobileScreen();
+        chartSource.setOption({
+            tooltip: { trigger: "item" },
+            legend: {
+                type: "scroll",
+                orient: isMobile ? "horizontal" : "vertical",
+                left: isMobile ? "center" : "left",
+                bottom: isMobile ? 0 : "auto",
+                top: isMobile ? "auto" : "middle"
+            },
+            series: [{
+                name: "来源",
+                type: "pie",
+                radius: isMobile ? ["35%", "60%"] : ["40%", "70%"],
+                center: isMobile ? ["50%", "45%"] : ["60%", "50%"],
+                data: sourceData || [],
+                itemStyle: { borderRadius: 5, borderColor: "#fff", borderWidth: 2 },
+                label: { show: !isMobile }
+            }]
+        });
+    }
+
+    function renderSentimentChart(sentimentData) {
+        if (chartSentiment) chartSentiment.dispose();
+        const container = document.getElementById("topicChartSentiment");
+        chartSentiment = echarts.init(container);
+        const isMobile = isMobileScreen();
+        chartSentiment.setOption({
+            tooltip: { trigger: "item" },
+            legend: { bottom: "0%" },
+            series: [{
+                name: "情感",
+                type: "pie",
+                radius: isMobile ? ["35%", "60%"] : ["40%", "70%"],
+                center: ["50%", "45%"],
+                avoidLabelOverlap: false,
+                label: { show: false, position: "center" },
+                emphasis: { label: { show: true, fontSize: isMobile ? "14" : "18", fontWeight: "bold" } },
+                data: sentimentData || []
+            }]
+        });
+    }
+
+    function renderCorrelationChart(data) {
+        if (chartCorrelation) chartCorrelation.dispose();
+        const container = document.getElementById("topicChartCorrelation");
+        chartCorrelation = echarts.init(container);
+        const isMobile = isMobileScreen();
+        if (!data || !data.nodes || data.nodes.length === 0) {
+            chartCorrelation.clear();
+            container.innerHTML = '<div class="analysis-empty">暂无数据</div>';
+            return;
+        }
+        chartCorrelation.setOption({
+            tooltip: {},
+            series: [{
+                type: "graph",
+                layout: "force",
+                data: data.nodes,
+                links: data.links,
+                roam: true,
+                label: { show: !isMobile, position: "right" },
+                force: { repulsion: isMobile ? 100 : 200, edgeLength: isMobile ? 50 : 80 },
+                lineStyle: { color: "source", curveness: 0.3 }
+            }]
+        });
+    }
+
+    function renderFreqTrendChart(data) {
+        if (chartFreqTrend) chartFreqTrend.dispose();
+        const container = document.getElementById("topicChartFreqTrend");
+        chartFreqTrend = echarts.init(container);
+        const isMobile = isMobileScreen();
+        if (!data || !data.series) {
+            chartFreqTrend.clear();
+            container.innerHTML = '<div class="analysis-empty">暂无数据</div>';
+            return;
+        }
+        chartFreqTrend.setOption({
+            tooltip: { trigger: "axis" },
+            legend: { top: 0 },
+            grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+            xAxis: { type: "category", data: data.dates || [], axisLabel: { rotate: isMobile ? 45 : 0 } },
+            yAxis: { type: "value" },
+            series: data.series || []
+        });
+    }
+
+    function renderSentimentTrendChart(data) {
+        if (chartSentimentTrend) chartSentimentTrend.dispose();
+        const container = document.getElementById("topicChartSentimentTrend");
+        chartSentimentTrend = echarts.init(container);
+        const isMobile = isMobileScreen();
+        if (!data || !data.series) {
+            chartSentimentTrend.clear();
+            container.innerHTML = '<div class="analysis-empty">暂无数据</div>';
+            return;
+        }
+        chartSentimentTrend.setOption({
+            tooltip: { trigger: "axis" },
+            legend: { top: 0 },
+            grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+            xAxis: { type: "category", data: data.dates || [], axisLabel: { rotate: isMobile ? 45 : 0 } },
+            yAxis: [
+                { type: "value", name: isMobile ? "" : "数量" },
+                { type: "value", name: isMobile ? "" : "分值" }
+            ],
+            series: data.series || []
+        });
+    }
+
+    function renderKeywords(elId, keywords) {
+        const el = document.getElementById(elId);
+        el.innerHTML = "";
+        if (!keywords || keywords.length === 0) {
+            el.innerHTML = '<span class="analysis-empty">暂无数据</span>';
+            return;
+        }
+        keywords.forEach(k => {
+            const tag = document.createElement("span");
+            tag.className = "analysis-tag";
+            tag.textContent = k;
+            el.appendChild(tag);
+        });
+    }
+
+    async function loadTopicAnalysis(topic, newsList) {
+        const name = (topic.name || "").trim();
+        const start = topic.start_time ? topic.start_time.substring(0, 10) : "";
+        const end = topic.updated_time ? topic.updated_time.substring(0, 10) : "";
+        const ids = (newsList || []).map(n => n.id).filter(Boolean);
+        const signature = `${topic.id || ""}|${ids.join(",")}|${start}|${end}`;
+        if (!name || topicAnalysisSignature === signature) {
+            return;
+        }
+        if (!ids.length) {
+            renderWordCloud([]);
+            renderSourceChart([]);
+            renderSentimentChart([]);
+            renderCorrelationChart({});
+            renderFreqTrendChart({});
+            renderSentimentTrendChart({});
+            renderKeywords("topicNegKeywords", []);
+            renderKeywords("topicPosKeywords", []);
+            return;
+        }
+        topicAnalysisSignature = signature;
+        try {
+            const params = new URLSearchParams({
+                ids: ids.join(","),
+                start_date: start,
+                end_date: end,
+                limit: "2000",
+                nocache: "1"
+            });
+            const res = await fetch(`/api/report/analysis?${params.toString()}`, { method: "GET", cache: "no-store" });
+            if (!res.ok) throw new Error("请求失败");
+            const data = await res.json();
+            const charts = data.charts || {};
+            renderWordCloud(charts.word_cloud || []);
+            renderSourceChart(charts.source || []);
+            renderSentimentChart(charts.sentiment_dist || []);
+            renderCorrelationChart(charts.correlation || {});
+            renderFreqTrendChart(charts.freq_trend || {});
+            renderSentimentTrendChart(charts.sentiment_trend || {});
+            renderKeywords("topicNegKeywords", charts.neg_keywords || []);
+            renderKeywords("topicPosKeywords", charts.pos_keywords || []);
+        } catch (e) {
+            renderWordCloud([]);
+            renderSourceChart([]);
+            renderSentimentChart([]);
+            renderCorrelationChart({});
+            renderFreqTrendChart({});
+            renderSentimentTrendChart({});
+            renderKeywords("topicNegKeywords", []);
+            renderKeywords("topicPosKeywords", []);
+        }
+    }
+
+    window.addEventListener("resize", () => {
+        if (chartSource) chartSource.resize();
+        if (chartSentiment) chartSentiment.resize();
+        if (chartCorrelation) chartCorrelation.resize();
+        if (chartFreqTrend) chartFreqTrend.resize();
+        if (chartSentimentTrend) chartSentimentTrend.resize();
+    });
 
     loadDetail();
 </script>
