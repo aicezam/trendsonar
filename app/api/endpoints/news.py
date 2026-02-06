@@ -12,7 +12,7 @@ from datetime import datetime, time, timedelta
 from typing import Optional
 
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import desc, or_, select
@@ -267,6 +267,127 @@ async def get_news(
             }
         )
     return {"data": data, "page": page}
+
+
+@router.get("/news/top")
+async def get_top_news(
+    limit: int = Query(10, ge=1, le=200),
+    date: str = "24h",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    sort_by: str = "heat",
+    category: Optional[str] = None,
+    region: Optional[str] = None,
+    source: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    输入:
+    - `limit`: 返回条数上限
+    - `date`: 快捷时间范围（24h/3d/7d/week/month/year/all 或 YYYY-MM-DD）
+    - `start_date`/`end_date`: 自定义起止日期（YYYY-MM-DD）
+    - `sort_by`: 排序方式（heat/date）
+    - `category`/`region`/`source`: 筛选条件
+    - `db`: 数据库会话（依赖注入）
+
+    输出:
+    - TopN 新闻列表
+
+    作用:
+    - 获取指定时间范围内热度最高的新闻 TopN
+    """
+
+    stmt = select(News)
+
+    now = datetime.now()
+    if start_date or end_date:
+        try:
+            if start_date:
+                s_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+                start = datetime.combine(s_date, time.min)
+                stmt = stmt.where(News.publish_date >= start)
+            if end_date:
+                e_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+                end = datetime.combine(e_date, time.max)
+                stmt = stmt.where(News.publish_date <= end)
+        except ValueError:
+            pass
+    else:
+        try:
+            if date == "24h":
+                start = now - timedelta(hours=24)
+                stmt = stmt.where(News.publish_date >= start)
+            elif date == "3d":
+                start = now - timedelta(days=3)
+                stmt = stmt.where(News.publish_date >= start)
+            elif date == "7d":
+                start = now - timedelta(days=7)
+                stmt = stmt.where(News.publish_date >= start)
+            elif date == "week":
+                start = now - timedelta(days=now.weekday())
+                start = datetime.combine(start.date(), time.min)
+                stmt = stmt.where(News.publish_date >= start)
+            elif date == "month":
+                start = now.replace(day=1)
+                start = datetime.combine(start.date(), time.min)
+                stmt = stmt.where(News.publish_date >= start)
+            elif date == "year":
+                start = now.replace(month=1, day=1)
+                start = datetime.combine(start.date(), time.min)
+                stmt = stmt.where(News.publish_date >= start)
+            elif date == "all":
+                pass
+            elif date:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+                start = datetime.combine(target_date, time.min)
+                end = datetime.combine(target_date, time.max)
+                stmt = stmt.where(News.publish_date >= start, News.publish_date <= end)
+        except ValueError:
+            pass
+
+    if category and category != "all":
+        if "," in category:
+            stmt = stmt.where(News.category.in_(category.split(",")))
+        else:
+            stmt = stmt.where(News.category == category)
+
+    normalized_region = normalize_regions_to_countries(region) if region and region != "all" else ""
+    if normalized_region and normalized_region not in {"其他", "全球"}:
+        selected_regions = normalized_region.split(",")
+        conditions = [News.region.ilike(f"%{r}%") for r in selected_regions]
+        stmt = stmt.where(or_(*conditions))
+
+    if source and source != "all":
+        if "," in source:
+            stmt = stmt.where(News.source.in_(source.split(",")))
+        else:
+            stmt = stmt.where(News.source == source)
+
+    if sort_by == "date":
+        stmt = stmt.order_by(desc(News.publish_date))
+    else:
+        stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date))
+
+    result = await db.execute(stmt.limit(limit))
+    data = []
+    for n in result.scalars().all():
+        data.append(
+            {
+                "id": n.id,
+                "title": n.title,
+                "url": n.url,
+                "source": n.source,
+                "heat": n.heat_score,
+                "time": n.publish_date.isoformat(),
+                "summary": n.summary,
+                "sources": n.sources,
+                "category": n.category,
+                "region": normalize_regions_to_countries(n.region),
+                "sentiment_label": n.sentiment_label,
+                "sentiment_score": n.sentiment_score,
+            }
+        )
+    return {"data": data, "limit": limit}
 
 
 @router.post("/generate_summary/{news_id}")
