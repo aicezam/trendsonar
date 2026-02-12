@@ -367,6 +367,7 @@ async def auto_analyze_sentiment_top_n() -> None:
 
         sem = asyncio.Semaphore(5)
         total_items = len(items_to_process)
+        batch_size = 50
 
         async def analyze_task(news_item, index):
             async with sem:
@@ -387,21 +388,26 @@ async def auto_analyze_sentiment_top_n() -> None:
                     logger.error(f"   ({index}/{total_items}) ⚠️ 分析失败 ({news_item.title}): {e}")
                     return None
 
-        tasks = [analyze_task(n, i + 1) for i, n in enumerate(items_to_process)]
-        results = await asyncio.gather(*tasks)
-
         count = 0
-        for news, res in zip(items_to_process, results):
-            if res:
-                news.sentiment_score = res["score"]
-                news.sentiment_label = res["label"]
-                news.category = res.get("category", "其他")
-                news.keywords = res.get("keywords", [])
-                news.entities = res.get("entities", [])
-                db.add(news)
-                count += 1
+        for i in range(0, total_items, batch_size):
+            batch = items_to_process[i : i + batch_size]
+            current_end = min(i + batch_size, total_items)
+            logger.info(f"   🚀 正在分析: {i + 1}-{current_end}/{total_items} (本批: {len(batch)})...")
 
-        await db.commit()
+            tasks = [analyze_task(n, i + idx + 1) for idx, n in enumerate(batch)]
+            results = await asyncio.gather(*tasks)
+
+            for news, res in zip(batch, results):
+                if res:
+                    news.sentiment_score = res["score"]
+                    news.sentiment_label = res["label"]
+                    news.category = res.get("category", "其他")
+                    news.keywords = res.get("keywords", [])
+                    news.entities = res.get("entities", [])
+                    db.add(news)
+                    count += 1
+
+            await db.commit()
         logger.info(f"✅ 深度分析完成，共更新 {count} 条")
 
 
