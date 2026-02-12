@@ -613,6 +613,13 @@ class AIService:
                     data["region"] = normalize_regions_to_countries(data.get("region"))
                     if not data.get("region") or data.get("region") in ["其他", "未知"]:
                         data["region"] = "全球"
+                    
+                    # 补全可能缺失的字段，防止 KeyError
+                    if "keywords" not in data:
+                        data["keywords"] = []
+                    if "entities" not in data:
+                        data["entities"] = []
+                        
                     return data
             except AIConfigurationError:
                 raise

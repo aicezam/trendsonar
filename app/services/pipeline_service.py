@@ -260,8 +260,8 @@ async def auto_generate_summaries_top_n() -> None:
                                     news.sentiment_label = res["label"]
                                     news.category = res.get("category", "其他")
                                     news.region = res.get("region", "其他")
-                                    news.keywords = res["keywords"]
-                                    news.entities = res["entities"]
+                                    news.keywords = res.get("keywords", [])
+                                    news.entities = res.get("entities", [])
                             except Exception as e:
                                 logger.error(f"   {progress_str} ⚠️ 同步分析失败: {e}")
 
@@ -396,8 +396,8 @@ async def auto_analyze_sentiment_top_n() -> None:
                 news.sentiment_score = res["score"]
                 news.sentiment_label = res["label"]
                 news.category = res.get("category", "其他")
-                news.keywords = res["keywords"]
-                news.entities = res["entities"]
+                news.keywords = res.get("keywords", [])
+                news.entities = res.get("entities", [])
                 db.add(news)
                 count += 1
 
