@@ -7,12 +7,15 @@
 """
 
 from typing import Optional, List
+import hashlib
+import json
 
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import verify_admin_access
 from app.services.report_service import report_service
+from app.services.task_manager import task_manager
 
 router = APIRouter(prefix="/api/report", tags=["report"])
 
@@ -129,7 +132,6 @@ async def get_report_analysis(
 
 @router.post("/generate")
 async def generate_report_background(
-    background_tasks: BackgroundTasks,
     q: Optional[str] = "",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -148,17 +150,35 @@ async def generate_report_background(
     作用:
     - 异步触发报表生成任务
     """
-    background_tasks.add_task(
-        report_service.generate_report_and_stream_ai,
-        keyword=q,
-        start_date=start_date,
-        end_date=end_date,
-        category=category,
-        region=region,
-        source=source,
-        limit=limit,
+    params = {
+        "q": q or "",
+        "start_date": start_date or "",
+        "end_date": end_date or "",
+        "category": category or "",
+        "region": region or "",
+        "source": source or "",
+        "limit": limit or 0,
+    }
+    task_hash = hashlib.sha1(json.dumps(params, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    task_name = f"report:{task_hash}"
+
+    async def run_report_task() -> None:
+        await report_service.generate_report_and_stream_ai(
+            keyword=q,
+            start_date=start_date,
+            end_date=end_date,
+            category=category,
+            region=region,
+            source=source,
+            limit=limit,
+        )
+
+    status = await task_manager.start_background(
+        task_name,
+        run_report_task,
+        progress="报表生成中",
     )
-    return {"status": "queued", "message": "报表正在后台生成中，请稍候在历史记录中查看"}
+    return {"status": "running" if status.get("running") else status.get("status"), "task": status}
 
 
 @router.delete("/cache/{report_id}", dependencies=[Depends(verify_admin_access)])

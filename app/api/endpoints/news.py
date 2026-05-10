@@ -8,23 +8,67 @@
 
 import io
 import os
-from datetime import datetime, time, timedelta
-from typing import Optional
+import time as perf_time
+from datetime import datetime, timedelta
+from typing import Any, Optional
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from PIL import Image, ImageDraw, ImageFont
-from sqlalchemy import desc, or_, select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.core.database import get_db
+from app.core.logger import logger
 from app.models.news import News
 from app.services.ai_service import ai_service
 from app.services.crawler_service import crawler_service
+from app.utils.news_query import build_news_query_filters, serialize_news_item
 from app.utils.tools import normalize_regions_to_countries
 
 router = APIRouter(prefix="/api", tags=["news"])
+_FILTER_CACHE_TTL_SECONDS = 300
+_FILTER_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _get_filter_cache(key: str) -> Optional[list[str]]:
+    """
+    输入:
+    - `key`: 缓存键名
+
+    输出:
+    - 命中的字符串列表或 None
+
+    作用:
+    - 为新闻筛选项接口提供短 TTL 内存缓存，减少重复 distinct 查询
+    """
+
+    item = _FILTER_CACHE.get(key)
+    if not item:
+        return None
+    if perf_time.monotonic() - item["created_at"] > _FILTER_CACHE_TTL_SECONDS:
+        _FILTER_CACHE.pop(key, None)
+        return None
+    return item["value"]
+
+
+def _set_filter_cache(key: str, value: list[str]) -> list[str]:
+    """
+    输入:
+    - `key`: 缓存键名
+    - `value`: 需要缓存的字符串列表
+
+    输出:
+    - 原始字符串列表
+
+    作用:
+    - 写入新闻筛选项短 TTL 内存缓存
+    """
+
+    _FILTER_CACHE[key] = {"created_at": perf_time.monotonic(), "value": value}
+    return value
 
 
 @router.get("/sources")
@@ -40,9 +84,13 @@ async def get_sources(db: AsyncSession = Depends(get_db)):
     - 为前端筛选器提供可用新闻来源集合
     """
 
+    cached = _get_filter_cache("sources")
+    if cached is not None:
+        return cached
+
     result = await db.execute(select(News.source).distinct())
     sources = result.scalars().all()
-    return sorted([s for s in sources if s])
+    return _set_filter_cache("sources", sorted([s for s in sources if s]))
 
 
 @router.get("/categories")
@@ -58,9 +106,13 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
     - 为前端筛选器提供可用新闻分类集合
     """
 
+    cached = _get_filter_cache("categories")
+    if cached is not None:
+        return cached
+
     result = await db.execute(select(News.category).distinct())
     categories = result.scalars().all()
-    return sorted([c for c in categories if c])
+    return _set_filter_cache("categories", sorted([c for c in categories if c]))
 
 
 @router.get("/regions")
@@ -75,6 +127,10 @@ async def get_regions(db: AsyncSession = Depends(get_db)):
     作用:
     - 为前端筛选器提供可用新闻地区集合
     """
+
+    cached = _get_filter_cache("regions")
+    if cached is not None:
+        return cached
 
     result = await db.execute(select(News.region).distinct())
     raw_regions = result.scalars().all()
@@ -92,7 +148,7 @@ async def get_regions(db: AsyncSession = Depends(get_db)):
                         unique_regions.add(c)
 
     valid_regions = [r for r in unique_regions if r and r.lower() not in ["", "null", "其他", "全球"]]
-    return sorted(valid_regions)
+    return _set_filter_cache("regions", sorted(valid_regions))
 
 
 @router.get("/news")
@@ -126,80 +182,35 @@ async def get_news(
     """
 
     page_size = 20
+    max_page = 500 if date == "all" else 1000
+    page = max(1, min(page, max_page))
     offset = (page - 1) * page_size
 
-    stmt = select(News)
-
-    now = datetime.now()
-    if start_date or end_date:
-        try:
-            if start_date:
-                s_date = datetime.strptime(start_date, "%Y-%m-%d").date()
-                start = datetime.combine(s_date, time.min)
-                stmt = stmt.where(News.publish_date >= start)
-            if end_date:
-                e_date = datetime.strptime(end_date, "%Y-%m-%d").date()
-                end = datetime.combine(e_date, time.max)
-                stmt = stmt.where(News.publish_date <= end)
-        except ValueError:
-            pass
-    else:
-        try:
-            if date == "24h":
-                start = now - timedelta(hours=24)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "3d":
-                start = now - timedelta(days=3)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "7d":
-                start = now - timedelta(days=7)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "week":
-                start = now - timedelta(days=now.weekday())
-                start = datetime.combine(start.date(), time.min)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "month":
-                start = now.replace(day=1)
-                start = datetime.combine(start.date(), time.min)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "year":
-                start = now.replace(month=1, day=1)
-                start = datetime.combine(start.date(), time.min)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "all":
-                pass
-            elif date:
-                target_date = datetime.strptime(date, "%Y-%m-%d").date()
-                start = datetime.combine(target_date, time.min)
-                end = datetime.combine(target_date, time.max)
-                stmt = stmt.where(News.publish_date >= start, News.publish_date <= end)
-        except ValueError:
-            pass
-
-    if category and category != "all":
-        if "," in category:
-            stmt = stmt.where(News.category.in_(category.split(",")))
-        else:
-            stmt = stmt.where(News.category == category)
-
-    normalized_region = normalize_regions_to_countries(region) if region and region != "all" else ""
-    if normalized_region and normalized_region not in {"其他", "全球"}:
-        selected_regions = normalized_region.split(",")
-        conditions = [News.region.ilike(f"%{r}%") for r in selected_regions]
-        stmt = stmt.where(or_(*conditions))
-
-    if source and source != "all":
-        if "," in source:
-            stmt = stmt.where(News.source.in_(source.split(",")))
-        else:
-            stmt = stmt.where(News.source == source)
+    stmt = build_news_query_filters(
+        select(News),
+        date=date,
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+    )
 
     if q:
-        result = await db.execute(stmt)
+        search_start = perf_time.perf_counter()
+        search_candidate_limit = 2000
+        candidate_stmt = (
+            stmt.options(defer(News.content))
+            .order_by(desc(News.publish_date), desc(News.heat_score))
+            .limit(search_candidate_limit)
+        )
+        result = await db.execute(candidate_stmt)
         candidates = result.scalars().all()
 
         q_emb_list = await ai_service.get_embeddings([q])
         q_vec = np.array(q_emb_list[0]) if q_emb_list and q_emb_list[0] else None
+        norm_q = float(np.linalg.norm(q_vec)) if q_vec is not None else 0.0
+        q_dim = len(q_vec) if q_vec is not None else 0
 
         scored_news = []
         for n in candidates:
@@ -207,9 +218,8 @@ async def get_news(
             if n.title and q.lower() in n.title.lower():
                 score += 0.5
 
-            if q_vec is not None and n.embedding:
+            if q_vec is not None and n.embedding and len(n.embedding) == q_dim:
                 n_vec = np.array(n.embedding)
-                norm_q = np.linalg.norm(q_vec)
                 norm_n = np.linalg.norm(n_vec)
                 if norm_q > 0 and norm_n > 0:
                     sim = np.dot(q_vec, n_vec) / (norm_q * norm_n)
@@ -221,51 +231,21 @@ async def get_news(
         scored_news.sort(key=lambda x: x[0], reverse=True)
         sliced = scored_news[offset : offset + page_size]
 
-        data = []
-        for score, n in sliced:
-            data.append(
-                {
-                    "id": n.id,
-                    "title": n.title,
-                    "url": n.url,
-                    "source": n.source,
-                    "heat": n.heat_score,
-                    "time": n.publish_date.isoformat(),
-                    "summary": n.summary,
-                    "sources": n.sources,
-                    "category": n.category,
-                    "region": normalize_regions_to_countries(n.region),
-                    "sentiment_label": n.sentiment_label,
-                    "sentiment_score": n.sentiment_score,
-                }
-            )
+        data = [serialize_news_item(n) for _, n in sliced]
+        elapsed_ms = (perf_time.perf_counter() - search_start) * 1000
+        logger.info(f"/api/news 搜索完成: q={q}, candidates={len(candidates)}, matched={len(scored_news)}, elapsed={elapsed_ms:.1f}ms")
 
         return {"data": data, "page": page}
 
     if sort_by == "heat":
-        stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date))
+        stmt = stmt.options(defer(News.content), defer(News.embedding)).order_by(
+            desc(News.heat_score), desc(News.publish_date)
+        )
     else:
-        stmt = stmt.order_by(desc(News.publish_date))
+        stmt = stmt.options(defer(News.content), defer(News.embedding)).order_by(desc(News.publish_date))
 
     result = await db.execute(stmt.offset(offset).limit(page_size))
-    data = []
-    for n in result.scalars().all():
-        data.append(
-            {
-                "id": n.id,
-                "title": n.title,
-                "url": n.url,
-                "source": n.source,
-                "heat": n.heat_score,
-                "time": n.publish_date.isoformat(),
-                "summary": n.summary,
-                "sources": n.sources,
-                "category": n.category,
-                "region": normalize_regions_to_countries(n.region),
-                "sentiment_label": n.sentiment_label,
-                "sentiment_score": n.sentiment_score,
-            }
-        )
+    data = [serialize_news_item(n) for n in result.scalars().all()]
     return {"data": data, "page": page}
 
 
@@ -297,71 +277,15 @@ async def get_top_news(
     - 获取指定时间范围内热度最高的新闻 TopN
     """
 
-    stmt = select(News)
-
-    now = datetime.now()
-    if start_date or end_date:
-        try:
-            if start_date:
-                s_date = datetime.strptime(start_date, "%Y-%m-%d").date()
-                start = datetime.combine(s_date, time.min)
-                stmt = stmt.where(News.publish_date >= start)
-            if end_date:
-                e_date = datetime.strptime(end_date, "%Y-%m-%d").date()
-                end = datetime.combine(e_date, time.max)
-                stmt = stmt.where(News.publish_date <= end)
-        except ValueError:
-            pass
-    else:
-        try:
-            if date == "24h":
-                start = now - timedelta(hours=24)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "3d":
-                start = now - timedelta(days=3)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "7d":
-                start = now - timedelta(days=7)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "week":
-                start = now - timedelta(days=now.weekday())
-                start = datetime.combine(start.date(), time.min)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "month":
-                start = now.replace(day=1)
-                start = datetime.combine(start.date(), time.min)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "year":
-                start = now.replace(month=1, day=1)
-                start = datetime.combine(start.date(), time.min)
-                stmt = stmt.where(News.publish_date >= start)
-            elif date == "all":
-                pass
-            elif date:
-                target_date = datetime.strptime(date, "%Y-%m-%d").date()
-                start = datetime.combine(target_date, time.min)
-                end = datetime.combine(target_date, time.max)
-                stmt = stmt.where(News.publish_date >= start, News.publish_date <= end)
-        except ValueError:
-            pass
-
-    if category and category != "all":
-        if "," in category:
-            stmt = stmt.where(News.category.in_(category.split(",")))
-        else:
-            stmt = stmt.where(News.category == category)
-
-    normalized_region = normalize_regions_to_countries(region) if region and region != "all" else ""
-    if normalized_region and normalized_region not in {"其他", "全球"}:
-        selected_regions = normalized_region.split(",")
-        conditions = [News.region.ilike(f"%{r}%") for r in selected_regions]
-        stmt = stmt.where(or_(*conditions))
-
-    if source and source != "all":
-        if "," in source:
-            stmt = stmt.where(News.source.in_(source.split(",")))
-        else:
-            stmt = stmt.where(News.source == source)
+    stmt = build_news_query_filters(
+        select(News).options(defer(News.content), defer(News.embedding)),
+        date=date,
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+    )
 
     if sort_by == "date":
         stmt = stmt.order_by(desc(News.publish_date))
@@ -369,24 +293,7 @@ async def get_top_news(
         stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date))
 
     result = await db.execute(stmt.limit(limit))
-    data = []
-    for n in result.scalars().all():
-        data.append(
-            {
-                "id": n.id,
-                "title": n.title,
-                "url": n.url,
-                "source": n.source,
-                "heat": n.heat_score,
-                "time": n.publish_date.isoformat(),
-                "summary": n.summary,
-                "sources": n.sources,
-                "category": n.category,
-                "region": normalize_regions_to_countries(n.region),
-                "sentiment_label": n.sentiment_label,
-                "sentiment_score": n.sentiment_score,
-            }
-        )
+    data = [serialize_news_item(n) for n in result.scalars().all()]
     return {"data": data, "limit": limit}
 
 

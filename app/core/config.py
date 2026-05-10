@@ -60,11 +60,14 @@ class Settings(BaseSettings):
     MAIN_AI_BASE_URL: Optional[str] = None
     MAIN_AI_MODEL: Optional[str] = None
     MAIN_AI_CONCURRENCY: int = 10
-
     BACKUP_AI_API_KEY: Optional[str] = None
     BACKUP_AI_BASE_URL: Optional[str] = None
     BACKUP_AI_MODEL: Optional[str] = None
     BACKUP_AI_CONCURRENCY: int = 10
+
+    CRAWLER_CONCURRENCY: int = 5
+    EMBEDDING_CONCURRENCY: int = 5
+    LLM_CONCURRENCY: int = 5
 
     CLUSTERING_THRESHOLD: float = 0.78
     CLUSTERING_TIME_WINDOW_HOURS: int = 24

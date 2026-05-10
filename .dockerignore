@@ -14,3 +14,9 @@ trendsonar.db-wal
 trendsonar.db-shm
 docker/
 logs/
+.env
+config_local.py
+optimization-suggestions.md
+prompts.json
+source_health.json
+scheduler_state.json

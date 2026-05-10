@@ -2,101 +2,121 @@
     {
         "name": "财联社-热门",
         "weight": 1.0,
-        "address": "https://newsnow.busiyi.world/api/s?id=cls-hot"
+        "address": "https://newsnow.busiyi.world/api/s?id=cls-hot",
+        "enabled": true
     },
     {
         "name": "36氪人气榜",
         "weight": 1.5,
-        "address": "https://newsnow.busiyi.world/api/s?id=36kr-renqi"
+        "address": "https://newsnow.busiyi.world/api/s?id=36kr-renqi",
+        "enabled": false
     },
     {
         "name": "36氪综和资讯",
         "weight": 1.0,
-        "address": "https://36kr.com/feed"
+        "address": "https://36kr.com/feed",
+        "enabled": true
     },
     {
         "name": "Readhub-每日早报",
         "weight": 1.5,
-        "address": "https://rsshub.rssforever.com/readhub/daily"
+        "address": "https://rsshub.rssforever.com/readhub/daily",
+        "enabled": true
     },
     {
         "name": "联合早报-国际即时",
-        "weight": 1,
-        "address": "https://plink.anyfeeder.com/zaobao/realtime/world"
+        "weight": 1.0,
+        "address": "https://plink.anyfeeder.com/zaobao/realtime/world",
+        "enabled": true
     },
     {
         "name": "联合早报-中国",
-        "weight": 1,
-        "address": "https://plink.anyfeeder.com/zaobao/realtime/china"
+        "weight": 1.0,
+        "address": "https://plink.anyfeeder.com/zaobao/realtime/china",
+        "enabled": true
     },
     {
         "name": "每日环球视野",
-        "weight": 1,
-        "address": "https://plink.anyfeeder.com/idaily/today"
+        "weight": 1.0,
+        "address": "https://plink.anyfeeder.com/idaily/today",
+        "enabled": true
     },
     {
         "name": "纽约时报-中文",
-        "weight": 1,
-        "address": "https://plink.anyfeeder.com/nytimes/cn"
+        "weight": 1.0,
+        "address": "https://plink.anyfeeder.com/nytimes/cn",
+        "enabled": true
     },
     {
         "name": "华尔街日报-中文",
-        "weight": 1,
-        "address": "https://plink.anyfeeder.com/wsj/cn"
+        "weight": 1.0,
+        "address": "https://plink.anyfeeder.com/wsj/cn",
+        "enabled": true
     },
     {
         "name": "人民网-头条",
         "weight": 3.0,
-        "address": "https://plink.anyfeeder.com/people"
+        "address": "https://plink.anyfeeder.com/people",
+        "enabled": true
     },
     {
         "name": "新华网-新华社新闻",
         "weight": 2.0,
-        "address": "https://plink.anyfeeder.com/newscn/whxw"
+        "address": "https://plink.anyfeeder.com/newscn/whxw",
+        "enabled": true
     },
     {
         "name": "百度热搜",
         "weight": 2.0,
-        "address": "https://newsnow.busiyi.world/api/s?id=baidu"
+        "address": "https://newsnow.busiyi.world/api/s?id=baidu",
+        "enabled": true
     },
     {
         "name": "微博",
         "weight": 0.5,
-        "address": "https://newsnow.busiyi.world/api/s?id=weibo"
+        "address": "https://newsnow.busiyi.world/api/s?id=weibo",
+        "enabled": true
     },
     {
         "name": "MIT科技评论-本周热榜",
         "weight": 1.5,
-        "address": "https://plink.anyfeeder.com/mittrchina/hot"
+        "address": "https://plink.anyfeeder.com/mittrchina/hot",
+        "enabled": true
     },
     {
         "name": "知乎日报",
         "weight": 1.5,
-        "address": "https://plink.anyfeeder.com/zhihu/daily"
+        "address": "https://plink.anyfeeder.com/zhihu/daily",
+        "enabled": true
     },
     {
         "name": "知乎热榜",
         "weight": 1.5,
-        "address": "https://newsnow.busiyi.world/api/s?id=zhihu"
+        "address": "https://newsnow.busiyi.world/api/s?id=zhihu",
+        "enabled": true
     },
     {
         "name": "今日头条",
-        "weight": 1,
-        "address": "https://newsnow.busiyi.world/api/s?id=toutiao"
+        "weight": 1.0,
+        "address": "https://newsnow.busiyi.world/api/s?id=toutiao",
+        "enabled": true
     },
     {
         "name": "哔哩哔哩热搜",
-        "weight": 1,
-        "address": "https://newsnow.busiyi.world/api/s?id=bilibili-hot-search"
+        "weight": 1.0,
+        "address": "https://newsnow.busiyi.world/api/s?id=bilibili-hot-search",
+        "enabled": true
     },
     {
         "name": "凤凰网",
-        "weight": 1,
-        "address": "https://newsnow.busiyi.world/api/s?id=ifeng"
+        "weight": 1.0,
+        "address": "https://newsnow.busiyi.world/api/s?id=ifeng",
+        "enabled": true
     },
     {
         "name": "腾讯新闻",
-        "weight": 1,
-        "address": "https://orz.ai/api/v1/dailynews/?platform=tenxunwang"
+        "weight": 1.0,
+        "address": "https://orz.ai/api/v1/dailynews/?platform=tenxunwang",
+        "enabled": true
     }
 ]

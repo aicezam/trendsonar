@@ -25,6 +25,8 @@ from app.core.database import AsyncSessionLocal
 from app.core.logger import setup_logger
 from app.models.news import News
 from app.services.ai_service import ai_service
+from app.services.concurrency_service import concurrency_service
+from app.services.source_health_service import source_health_service
 from app.utils.tools import clean_html_tags
 
 settings = get_settings()
@@ -272,6 +274,13 @@ class CrawlerService:
                                 if p:
                                     items.append(p)
                             if items:
+                                source_health_service.record_fetch_result(
+                                    str(url or name or ""),
+                                    name=str(name or ""),
+                                    count=len(items),
+                                    ok=True,
+                                    error=None,
+                                )
                                 return items
                     except Exception as e:
                         logger.warning(f"RSS/XML解析失败 {name}: {e}")
@@ -286,10 +295,24 @@ class CrawlerService:
                         if p:
                             items.append(p)
 
+                source_health_service.record_fetch_result(
+                    str(url or name or ""),
+                    name=str(name or ""),
+                    count=len(items),
+                    ok=bool(items),
+                    error=None if items else "未提取到新闻条目",
+                )
                 return items
 
         except Exception as e:
             logger.error(f"抓取异常 {name}: {e}")
+            source_health_service.record_fetch_result(
+                str(url or name or ""),
+                name=str(name or ""),
+                count=0,
+                ok=False,
+                error=str(e),
+            )
             return []
 
     async def fetch_all_sources(self) -> List[Dict[str, Any]]:
@@ -326,7 +349,8 @@ class CrawlerService:
                 return await self.fetch_and_parse(session, src, prefix=f"({idx}/{total_sources})")
 
             for i, src in enumerate(sources, 1):
-                tasks.append(fetch_wrapper(i, src))
+                if src.get("enabled", True):
+                    tasks.append(fetch_wrapper(i, src))
 
             results = await asyncio.gather(*tasks)
             for res in results:
@@ -609,37 +633,40 @@ class CrawlerService:
         if not crawler:
             return await self.crawl_content(target_url)
 
-        logger.debug(f"抓取新闻 (复用实例): {target_url}")
+        async def do_crawl() -> Optional[str]:
+            logger.debug(f"抓取新闻 (复用实例): {target_url}")
 
-        if "weibo.com" in target_url or "weibo.cn" in target_url:
+            if "weibo.com" in target_url or "weibo.cn" in target_url:
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        return await self.crawl_weibo_simple(session, target_url)
+                except Exception as e:
+                    logger.error(f"❌ 微博抓取失败: {e}")
+                    return None
+
             try:
-                async with aiohttp.ClientSession() as session:
-                    return await self.crawl_weibo_simple(session, target_url)
+                from crawl4ai import CacheMode, CrawlerRunConfig
+
+                log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
+                is_verbose = log_level == logging.DEBUG
+
+                run_conf = CrawlerRunConfig(
+                    cache_mode=CacheMode.BYPASS,
+                    verbose=is_verbose
+                )
+
+                result = await crawler.arun(url=target_url, config=run_conf)
+
+                if result and result.markdown:
+                    if hasattr(result.markdown, "raw_markdown"):
+                        return clean_html_tags(result.markdown.raw_markdown)
+                    return clean_html_tags(str(result.markdown))
+
             except Exception as e:
-                logger.error(f"❌ 微博抓取失败: {e}")
-                return None
+                logger.error(f"❌ 抓取失败: {e}")
+            return None
 
-        try:
-            from crawl4ai import CacheMode, CrawlerRunConfig
-
-            log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
-            is_verbose = log_level == logging.DEBUG
-
-            run_conf = CrawlerRunConfig(
-                cache_mode=CacheMode.BYPASS,
-                verbose=is_verbose
-            )
-
-            result = await crawler.arun(url=target_url, config=run_conf)
-
-            if result and result.markdown:
-                if hasattr(result.markdown, "raw_markdown"):
-                    return clean_html_tags(result.markdown.raw_markdown)
-                return clean_html_tags(str(result.markdown))
-
-        except Exception as e:
-            logger.error(f"❌ 抓取失败: {e}")
-        return None
+        return await concurrency_service.run_crawler(do_crawl)
 
     async def crawl_content(self, target_url: str) -> Optional[str]:
         """
@@ -652,40 +679,42 @@ class CrawlerService:
         作用:
         - 抓取新闻正文，用于摘要生成与深度分析
         """
+        async def do_crawl() -> Optional[str]:
+            logger.debug(f"抓取新闻: {target_url}")
 
-        logger.debug(f"抓取新闻: {target_url}")
+            if "weibo.com" in target_url or "weibo.cn" in target_url:
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        return await self.crawl_weibo_simple(session, target_url)
+                except Exception as e:
+                    logger.error(f"❌ 微博抓取失败: {e}")
+                    return None
 
-        if "weibo.com" in target_url or "weibo.cn" in target_url:
             try:
-                async with aiohttp.ClientSession() as session:
-                    return await self.crawl_weibo_simple(session, target_url)
+                from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+
+                log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
+                is_verbose = log_level == logging.DEBUG
+                
+                browser_conf = BrowserConfig(headless=True, verbose=is_verbose)
+                run_conf = CrawlerRunConfig(
+                    cache_mode=CacheMode.BYPASS,
+                    verbose=is_verbose
+                )
+
+                async with AsyncWebCrawler(config=browser_conf) as crawler:
+                    result = await crawler.arun(url=target_url, config=run_conf)
+
+                if result and result.markdown:
+                    if hasattr(result.markdown, "raw_markdown"):
+                        return clean_html_tags(result.markdown.raw_markdown)
+                    return clean_html_tags(str(result.markdown))
+
             except Exception as e:
-                logger.error(f"❌ 微博抓取失败: {e}")
-                return None
+                logger.error(f"❌ 抓取失败: {e}")
+            return None
 
-        try:
-            from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
-
-            log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
-            is_verbose = log_level == logging.DEBUG
-            
-            browser_conf = BrowserConfig(headless=True, verbose=is_verbose)
-            run_conf = CrawlerRunConfig(
-                cache_mode=CacheMode.BYPASS,
-                verbose=is_verbose
-            )
-
-            async with AsyncWebCrawler(config=browser_conf) as crawler:
-                result = await crawler.arun(url=target_url, config=run_conf)
-
-            if result and result.markdown:
-                if hasattr(result.markdown, "raw_markdown"):
-                    return clean_html_tags(result.markdown.raw_markdown)
-                return clean_html_tags(str(result.markdown))
-
-        except Exception as e:
-            logger.error(f"❌ 抓取失败: {e}")
-        return None
+        return await concurrency_service.run_crawler(do_crawl)
 
 
 crawler_service = CrawlerService()

@@ -14,9 +14,9 @@ import time
 from typing import Optional
 
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.core.logger import logger
@@ -91,6 +91,10 @@ async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_news_publish_date_heat_score ON news (publish_date, heat_score)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_news_category_publish_date ON news (category, publish_date)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_news_source_publish_date ON news (source, publish_date)"))
+        logger.info("✅ 数据库表结构和关键索引初始化完成")
 
 
 async def check_db_connection(verbose: bool = True) -> bool:

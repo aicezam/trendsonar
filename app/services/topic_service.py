@@ -210,7 +210,7 @@ class TopicService:
                 
                 # 2. 生成真实摘要 (Initial Summary Generation)
                 logger.info(f"   📝 正在为专题 '{t_name}' 生成基于事实的初始摘要 (Sample: {len(pre_candidates)})...")
-                overview_materials = [{"title": n.title, "content": n.content or ""} for n, _ in pre_candidates]
+                overview_materials = [{"title": n.title, "content": n.summary or ""} for n, _ in pre_candidates]
                 
                 # 使用新的轻量级摘要生成 (默认 main 模型)
                 generated_summary = await self.ai.generate_topic_initial_summary(t_name, overview_materials)

@@ -6,7 +6,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Column, DateTime, Float, Integer, String, Text, Boolean
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from app.core.database import Base
@@ -33,6 +33,11 @@ class News(Base):
     """
 
     __tablename__ = "news"
+    __table_args__ = (
+        Index("ix_news_publish_date_heat_score", "publish_date", "heat_score"),
+        Index("ix_news_category_publish_date", "category", "publish_date"),
+        Index("ix_news_source_publish_date", "source", "publish_date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     url = Column(String, unique=True, index=True, nullable=False)

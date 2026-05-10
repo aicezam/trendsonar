@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 from sqlalchemy import delete, desc, or_, select
+from sqlalchemy.orm import defer
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, check_db_connection
@@ -27,6 +28,7 @@ from app.services.admin_service import schedule_restart
 from app.services.cluster_service import cluster_service
 from app.services.crawler_service import crawler_service
 from app.services.report_service import report_service
+from app.services.task_manager import task_manager
 from app.services.topic_service import topic_service
 from app.utils.tools import normalize_regions_to_countries
 
@@ -146,7 +148,12 @@ async def auto_batch_analyze_new_news() -> None:
     logger.info("🤖 开始批量初步分析新新闻...")
     async with AsyncSessionLocal() as db:
         time_window = datetime.now() - timedelta(hours=settings.CLUSTERING_TIME_WINDOW_HOURS)
-        stmt = select(News).where(News.publish_date >= time_window, News.category == "其他").order_by(News.id.desc())
+        stmt = (
+            select(News)
+            .options(defer(News.content), defer(News.embedding))
+            .where(News.publish_date >= time_window, News.category == "其他")
+            .order_by(News.id.desc())
+        )
 
         result = await db.execute(stmt)
         news_list = result.scalars().all()
@@ -203,7 +210,11 @@ async def auto_generate_summaries_top_n() -> None:
         today_start = datetime.combine(datetime.now().date(), time.min)
 
         stmt = (
-            select(News).where(News.publish_date >= today_start).order_by(desc(News.heat_score)).limit(top_n)
+            select(News)
+            .options(defer(News.embedding))
+            .where(News.publish_date >= today_start)
+            .order_by(desc(News.heat_score))
+            .limit(top_n)
         )
         result = await db.execute(stmt)
         top_news = result.scalars().all()
@@ -288,6 +299,7 @@ async def auto_generate_summaries_categories_top_n() -> None:
         for cat in categories:
             stmt = (
                 select(News)
+                .options(defer(News.embedding))
                 .where(News.publish_date >= today_start)
                 .where(News.category == cat)
                 .order_by(desc(News.heat_score))
@@ -349,7 +361,11 @@ async def auto_analyze_sentiment_top_n() -> None:
         today_start = datetime.combine(datetime.now().date(), time.min)
 
         stmt = (
-            select(News).where(News.publish_date >= today_start).order_by(desc(News.heat_score)).limit(top_n)
+            select(News)
+            .options(defer(News.embedding))
+            .where(News.publish_date >= today_start)
+            .order_by(desc(News.heat_score))
+            .limit(top_n)
         )
         result = await db.execute(stmt)
         top_news = result.scalars().all()
@@ -532,23 +548,28 @@ async def scheduled_task() -> None:
 
             interval_seconds = settings.SCHEDULE_INTERVAL_MINUTES * 60
             if (now - last_periodic_run).total_seconds() >= interval_seconds:
-                # 判断是否需要运行专题任务
                 topic_interval_seconds = settings.TOPIC_SCHEDULE_INTERVAL_HOURS * 3600
                 should_run_topics = (now - last_topic_run).total_seconds() >= topic_interval_seconds
-                
-                await run_pipeline_task(generate_daily=True, run_topic_task=should_run_topics)
-                
+                result = await task_manager.start(
+                    "pipeline",
+                    lambda: run_pipeline_task(generate_daily=True, run_topic_task=should_run_topics),
+                    progress="定时全流程执行中",
+                )
+                if result.get("status") != "success":
+                    logger.warning(f"⚠️ 定时全流程未完成: {result}")
+                    await asyncio.sleep(30)
+                    continue
+
                 last_periodic_run = datetime.now()
                 if should_run_topics:
                     last_topic_run = datetime.now()
-                
-                # 保存状态并触发重启
+
                 _save_scheduler_state(
-                    last_periodic_run, 
-                    last_topic_run, 
-                    last_daily_final, 
-                    last_weekly_final, 
-                    last_monthly_final
+                    last_periodic_run,
+                    last_topic_run,
+                    last_daily_final,
+                    last_weekly_final,
+                    last_monthly_final,
                 )
                 logger.info("🔄 全流程任务完成，5秒后重启服务以释放内存...")
                 schedule_restart(delay_seconds=5)
@@ -683,7 +704,7 @@ async def reanalyze_all_categories() -> Dict:
             batch_ids = all_ids[i : i + batch_size]
 
             async with AsyncSessionLocal() as db:
-                result = await db.execute(select(News).where(News.id.in_(batch_ids)))
+                result = await db.execute(select(News).options(defer(News.embedding)).where(News.id.in_(batch_ids)))
                 current_batch_news = result.scalars().all()
 
                 batch_tasks = [analyze_task(n) for n in current_batch_news]
@@ -727,12 +748,12 @@ async def background_analyze_all() -> None:
     while True:
         processed_in_batch = 0
         async with AsyncSessionLocal() as db:
-            stmt = select(News).where(News.keywords.is_(None)).limit(batch_size)
+            stmt = select(News).options(defer(News.embedding)).where(News.keywords.is_(None)).limit(batch_size)
             result = await db.execute(stmt)
             items = result.scalars().all()
 
             if not items:
-                stmt = select(News).limit(batch_size * 5)
+                stmt = select(News).options(defer(News.embedding)).limit(batch_size * 5)
                 result = await db.execute(stmt)
                 all_candidates = result.scalars().all()
                 items = [

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.core.config import BASE_DIR, get_settings
 from app.core.database import AsyncSessionLocal
@@ -143,7 +144,10 @@ class ClusteringService:
             logger.info(f"   ⏱️ 聚类时间窗口: {settings.CLUSTERING_TIME_WINDOW_HOURS}h (Cutoff: {time_window.strftime('%Y-%m-%d %H:%M:%S')})")
             
             result = await db.execute(
-                select(News).where(News.publish_date >= time_window).order_by(News.heat_score.desc())
+                select(News)
+                .options(defer(News.content))
+                .where(News.publish_date >= time_window)
+                .order_by(News.heat_score.desc())
             )
             items = result.scalars().all()
             if not items:

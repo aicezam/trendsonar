@@ -10,3 +10,7 @@ logs/
 trendsonar.db
 trendsonar.db-shm
 trendsonar.db-wal
+optimization-suggestions.md
+prompts.json
+source_health.json
+scheduler_state.json

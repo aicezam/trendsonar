@@ -136,19 +136,25 @@
         <div class="admin-panels">
             <div id="panelConfig" class="admin-panel active">
                 <div class="admin-log-toolbar">
-                    <div class="admin-hint" style="flex:1; margin:0;">编辑并保存 `config.yaml` 后将自动重启以初始化。</div>
+                    <div class="admin-hint" style="flex:1; margin:0;">以表单方式维护系统配置，保存后服务将自动重启以应用新配置。</div>
                     <button id="reloadConfigBtn" class="admin-btn">重新加载</button>
+                    <button id="toggleAdvancedConfigBtn" class="admin-btn">高级配置</button>
                     <button id="saveConfigBtn" class="admin-btn primary">保存并重启</button>
                 </div>
-                <textarea id="configEditor" class="admin-textarea" spellcheck="false" placeholder="加载中..."></textarea>
+                <div id="configForm" class="config-form-grid"></div>
+                <div id="advancedConfigWrap" class="advanced-config-wrap" style="display:none;">
+                    <div class="admin-hint">高级配置区会与表单同步，使用 JSON 格式编辑暂未表单化的配置项。</div>
+                    <textarea id="configEditor" class="admin-textarea" spellcheck="false" placeholder="加载中..."></textarea>
+                </div>
             </div>
             <div id="panelSources" class="admin-panel">
                 <div class="admin-log-toolbar">
-                    <div class="admin-hint" style="flex:1; margin:0;">编辑 `news_sources.json`，保存后下次抓取任务生效。</div>
+                    <div class="admin-hint" style="flex:1; margin:0;">管理新闻源配置，可维护启用状态、测试抓取结果并查看最近加载情况。</div>
+                    <button id="addSourceBtn" class="admin-btn">新增新闻源</button>
                     <button id="reloadSourcesBtn" class="admin-btn">刷新</button>
-                    <button id="saveSourcesBtn" class="admin-btn primary">保存</button>
                 </div>
-                <textarea id="sourcesEditor" class="admin-textarea" spellcheck="false" placeholder="加载中..."></textarea>
+                <div id="sourcesPath" class="admin-hint"></div>
+                <div id="sourcesGrid" class="sources-grid prompts-grid"></div>
             </div>
             <div id="panelLogs" class="admin-panel">
                 <div class="admin-log-toolbar">
@@ -205,6 +211,52 @@
             </div>
         </div>
     </div>
+    <div id="sourceFormModal" class="modal-overlay" style="display: none;">
+        <div class="modal source-form-modal">
+            <div class="modal-header">
+                <h3 id="sourceFormModalTitle">新增新闻源</h3>
+                <button class="modal-close" onclick="closeSourceFormModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editSourceIndex" value="">
+                <div class="form-group">
+                    <label>名称</label>
+                    <input type="text" id="sourceFormName" class="admin-input" style="width:100%;">
+                </div>
+                <div class="form-group">
+                    <label>权重</label>
+                    <input type="number" id="sourceFormWeight" class="admin-input" step="0.1" style="width:100%;">
+                </div>
+                <div class="form-group">
+                    <label>地址</label>
+                    <input type="text" id="sourceFormAddress" class="admin-input" style="width:100%;">
+                </div>
+                <label class="source-switch-pill on" style="width:max-content;">
+                    <input type="checkbox" id="sourceFormEnabled" checked>
+                    <span>启用新闻源</span>
+                </label>
+            </div>
+            <div class="modal-footer">
+                <button class="admin-btn" onclick="closeSourceFormModal()">取消</button>
+                <button class="admin-btn primary" onclick="saveSourceForm()">保存</button>
+            </div>
+        </div>
+    </div>
+    <div id="sourcePreviewModal" class="modal-overlay" style="display: none;">
+        <div class="modal source-preview-modal">
+            <div class="modal-header">
+                <h3 id="sourcePreviewModalTitle">新闻源测试结果</h3>
+                <button class="modal-close" onclick="closeSourcePreviewModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div id="sourcePreviewSummary" class="source-modal-summary"></div>
+                <div id="sourcePreviewList" class="source-modal-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="admin-btn" onclick="closeSourcePreviewModal()">关闭</button>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -214,7 +266,10 @@
 <script>
     const authed = {{ "true" if authed else "false" }};
     let codeMirrorEditor = null;
-    let sourcesEditorCM = null;
+    let configData = {};
+    let currentConfigText = "";
+    let sources = [];
+    let sourcePreviewResults = {};
     let logsTimer = null;
     let activeTab = "config";
     
@@ -236,29 +291,12 @@
             });
         }
         
-        const srcEditor = document.getElementById("sourcesEditor");
-        if (srcEditor && window.CodeMirror && !sourcesEditorCM) {
-            sourcesEditorCM = window.CodeMirror.fromTextArea(srcEditor, {
-                mode: { name: "javascript", json: true },
-                lineNumbers: true,
-                lineWrapping: true,
-                indentUnit: 2,
-                tabSize: 2,
-            });
-        }
-        
         resizeEditors();
     }
 
     function getEditorValue() {
         const editor = document.getElementById("configEditor");
         if (codeMirrorEditor) return codeMirrorEditor.getValue();
-        return editor?.value || "";
-    }
-
-    function getSourcesValue() {
-        const editor = document.getElementById("sourcesEditor");
-        if (sourcesEditorCM) return sourcesEditorCM.getValue();
         return editor?.value || "";
     }
 
@@ -272,27 +310,274 @@
         }
         resizeEditors();
     }
-    
-    function setSourcesValue(v) {
-        const editor = document.getElementById("sourcesEditor");
-        if (sourcesEditorCM) {
-            sourcesEditorCM.setValue(v || "");
-            sourcesEditorCM.refresh();
-        } else if (editor) {
-            editor.value = v || "";
-        }
-        resizeEditors();
+
+    function escapeHtml(text) {
+        return String(text || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
     }
 
-    function setAppNameFromYaml(yamlText) {
-        const m = (yamlText || "").match(/^\s*APP_NAME\s*:\s*(.+?)\s*$/m);
-        if (!m) return;
-        const newName = (m[1] || "").replace(/^['"]|['"]$/g, "").trim();
+    function setAppNameFromConfig() {
+        const newName = String(configData.APP_NAME || "").trim();
         if (!newName) return;
 
         document.title = newName + " - 管理";
         const logoText = document.querySelector(".logo span:last-child");
         if (logoText) logoText.textContent = newName;
+    }
+
+    const CONFIG_SECTIONS = [
+        {
+            title: "基础配置",
+            desc: "应用名称、日志级别、端口和数据库连接。",
+            fields: [
+                { key: "APP_NAME", label: "应用名称", type: "text" },
+                { key: "LOG_LEVEL", label: "日志等级", type: "select", options: ["DEBUG", "INFO", "WARNING", "ERROR"] },
+                { key: "PORT", label: "服务端口", type: "number" },
+                { key: "DATABASE_URL", label: "数据库地址", type: "text", wide: true },
+            ]
+        },
+        {
+            title: "模型与向量",
+            desc: "主力模型、备用模型和 Embedding 服务配置。",
+            fields: [
+                { key: "SILICONFLOW_BASE_URL", label: "Embedding Base URL", type: "text", wide: true },
+                { key: "SILICONFLOW_API_KEY", label: "Embedding API Key", type: "password", wide: true },
+                { key: "EMBEDDING_MODEL", label: "Embedding 模型", type: "text" },
+                { key: "MAIN_AI_BASE_URL", label: "主模型 Base URL", type: "text", wide: true },
+                { key: "MAIN_AI_API_KEY", label: "主模型 API Key", type: "password", wide: true },
+                { key: "MAIN_AI_MODEL", label: "主模型名称", type: "text" },
+                { key: "MAIN_AI_CONCURRENCY", label: "主模型并发", type: "number" },
+                { key: "BACKUP_AI_BASE_URL", label: "备用模型 Base URL", type: "text", wide: true },
+                { key: "BACKUP_AI_API_KEY", label: "备用模型 API Key", type: "password", wide: true },
+                { key: "BACKUP_AI_MODEL", label: "备用模型名称", type: "text" },
+                { key: "BACKUP_AI_CONCURRENCY", label: "备用模型并发", type: "number" },
+            ]
+        },
+        {
+            title: "自动任务与性能",
+            desc: "调度、摘要、分析和统一并发预算。",
+            fields: [
+                { key: "SCHEDULE_INTERVAL_MINUTES", label: "自动任务间隔(分钟)", type: "number" },
+                { key: "AUTO_SUMMARY_TOP_N", label: "自动摘要 Top N", type: "number" },
+                { key: "AUTO_ANALYSIS_TOP_N", label: "自动分析 Top N", type: "number" },
+                { key: "ANALYSIS_BATCH_SIZE", label: "分析批次大小", type: "number" },
+                { key: "CRAWLER_CONCURRENCY", label: "爬虫并发", type: "number" },
+                { key: "EMBEDDING_CONCURRENCY", label: "Embedding 并发", type: "number" },
+                { key: "LLM_CONCURRENCY", label: "LLM 总并发", type: "number" },
+            ]
+        },
+        {
+            title: "内容生成参数",
+            desc: "输入截断、摘要长度和关注关键词。",
+            fields: [
+                { key: "ANALYSIS_INPUT_MAX_LENGTH", label: "分析输入最大长度", type: "number" },
+                { key: "SUMMARY_INPUT_MAX_LENGTH", label: "摘要正文截断长度", type: "number" },
+                { key: "SUMMARY_ORIGIN_MAX_LENGTH", label: "原始摘要截断长度", type: "number" },
+                { key: "SUMMARY_OUTPUT_LENGTH", label: "摘要目标字数", type: "number" },
+                { key: "FOLLOW_KEYWORDS", label: "关注关键词", type: "text", wide: true },
+                { key: "FOLLOW_KEYWORDS_THRESHOLD", label: "关键词相似度阈值", type: "number", step: "0.05" },
+            ]
+        },
+        {
+            title: "专题追踪",
+            desc: "专题生成、召回、匹配和审核相关参数。",
+            fields: [
+                { key: "TOPIC_LOOKBACK_DAYS", label: "聚合时间窗口(天)", type: "number" },
+                { key: "TOPIC_AGGREGATION_TOP_N", label: "聚合种子数", type: "number" },
+                { key: "TOPIC_GENERATION_COUNT", label: "生成数量范围", type: "text" },
+                { key: "TOPIC_RECALL_POOL_SIZE", label: "向量召回池大小", type: "number" },
+                { key: "TOPIC_MATCH_THRESHOLD", label: "向量初筛阈值", type: "number", step: "0.05" },
+                { key: "TOPIC_MATCH_MAX_CANDIDATES", label: "最大核验候选数", type: "number" },
+                { key: "TOPIC_MIN_NEWS_COUNT", label: "最低新闻数量", type: "number" },
+                { key: "TOPIC_UPDATE_LOOKBACK_DAYS", label: "专题更新时间窗口", type: "number" },
+                { key: "TOPIC_SCHEDULE_INTERVAL_HOURS", label: "专题定时间隔(小时)", type: "number" },
+                { key: "TOPIC_NEWS_MIN_HEAT", label: "最低新闻热度", type: "number", step: "0.1" },
+                { key: "TOPIC_QUALITY_LEVEL", label: "专题质量等级", type: "number" },
+            ]
+        },
+        {
+            title: "AI 路由",
+            desc: "为不同功能选择 main 或 backup。",
+            fields: [
+                { key: "AI_ROUTE.SUMMARY", label: "摘要生成", type: "route" },
+                { key: "AI_ROUTE.SENTIMENT", label: "情感分析", type: "route" },
+                { key: "AI_ROUTE.KEYWORDS", label: "关键词实体", type: "route" },
+                { key: "AI_ROUTE.CLUSTERING", label: "聚类去重", type: "route" },
+                { key: "AI_ROUTE.TOPIC_NAME", label: "专题命名", type: "route" },
+                { key: "AI_ROUTE.TOPIC_EVAL", label: "专题评估", type: "route" },
+                { key: "AI_ROUTE.TOPIC_MATCH", label: "专题匹配", type: "route" },
+                { key: "AI_ROUTE.TOPIC_TIMELINE", label: "专题时间轴", type: "route" },
+                { key: "AI_ROUTE.TOPIC_OVERVIEW", label: "专题综述", type: "route" },
+                { key: "AI_ROUTE.TOPIC_INITIAL_SUMMARY", label: "专题初始摘要", type: "route" },
+                { key: "AI_ROUTE.REPORT", label: "报表生成", type: "route" },
+                { key: "AI_ROUTE.CHAT", label: "对话助手", type: "route" },
+            ]
+        },
+        {
+            title: "列表配置",
+            desc: "新闻分类与忽略域名。",
+            fields: [
+                { key: "NEWS_CATEGORIES", label: "新闻分类", type: "list", wide: true },
+                { key: "IGNORED_DOMAINS", label: "忽略域名", type: "list", wide: true },
+            ]
+        },
+        {
+            title: "爬虫配置",
+            desc: "微博 Cookie 等抓取配置。",
+            fields: [
+                { key: "WEIBO_COOKIE", label: "微博 Cookie", type: "textarea", wide: true },
+            ]
+        },
+    ];
+
+    const CONFIG_FIELD_HELP = {
+        APP_NAME: "用于页面标题和系统标识。示例：TrendSonar。",
+        LOG_LEVEL: "控制日志详细程度。生产环境建议 INFO，排查问题时可临时改为 DEBUG。",
+        PORT: "Web 服务监听端口。示例：8193，修改后需要通过新端口访问。",
+        DATABASE_URL: "数据库连接地址。SQLite 示例：sqlite+aiosqlite:///data/trendsonar.db；PostgreSQL 示例：postgresql+asyncpg://user:pass@host:5432/db。",
+        SILICONFLOW_BASE_URL: "Embedding 服务接口地址。示例：https://api.siliconflow.cn/v1。",
+        SILICONFLOW_API_KEY: "Embedding 服务密钥，用于生成新闻和查询向量。示例：sk-xxxxx。",
+        EMBEDDING_MODEL: "向量模型名称，影响搜索、RAG 和专题匹配。示例：BAAI/bge-m3。",
+        MAIN_AI_BASE_URL: "主力大模型接口地址，用于摘要、分析、对话等任务。示例：https://api.example.com/v1。",
+        MAIN_AI_API_KEY: "主力大模型 API Key。请填写服务商提供的密钥，避免泄露。",
+        MAIN_AI_MODEL: "主力模型名称。示例：glm-4-flash、gpt-4o-mini、deepseek-chat。",
+        MAIN_AI_CONCURRENCY: "主力模型最大并发请求数。数值越大速度越快但更容易触发限流，建议 3-10。",
+        BACKUP_AI_BASE_URL: "备用大模型接口地址，主力模型失败或指定路由时使用。示例：https://api.deepseek.com。",
+        BACKUP_AI_API_KEY: "备用大模型 API Key。可与主力模型相同，也可使用另一个服务商。",
+        BACKUP_AI_MODEL: "备用模型名称。适合放成本低或稳定性高的模型。示例：deepseek-chat。",
+        BACKUP_AI_CONCURRENCY: "备用模型最大并发请求数。建议根据备用服务商限流设置，通常 3-10。",
+        SCHEDULE_INTERVAL_MINUTES: "自动抓取和分析任务间隔，单位分钟。示例：120 表示每 2 小时执行一次。",
+        AUTO_SUMMARY_TOP_N: "每轮自动为热度最高的多少条新闻生成摘要。示例：30。",
+        AUTO_ANALYSIS_TOP_N: "每轮自动深度分析的新闻数量上限。示例：500，数据量大时可调低。",
+        ANALYSIS_BATCH_SIZE: "批量分析每批处理数量。过大可能超出模型上下文，建议 10-50。",
+        CRAWLER_CONCURRENCY: "正文抓取和新闻源请求的全局并发上限。示例：5。",
+        EMBEDDING_CONCURRENCY: "Embedding 请求全局并发上限。示例：5，避免向量服务限流。",
+        LLM_CONCURRENCY: "所有 LLM 调用共享的总并发上限。示例：5，用于控制外部 API 压力。",
+        ANALYSIS_INPUT_MAX_LENGTH: "情感/分类分析时输入给模型的最大文本长度。示例：500。",
+        SUMMARY_INPUT_MAX_LENGTH: "生成摘要时正文截断长度。示例：2000；设为 0 通常表示不额外截断。",
+        SUMMARY_ORIGIN_MAX_LENGTH: "已有原始摘要参与生成时的截断长度。示例：300。",
+        SUMMARY_OUTPUT_LENGTH: "希望 AI 输出摘要的大致字数。示例：300。",
+        FOLLOW_KEYWORDS: "关注关键词，多个词用逗号分隔。示例：中国, 美国, AI。为空则不过滤。",
+        FOLLOW_KEYWORDS_THRESHOLD: "关注关键词向量匹配阈值，范围 0-1。越高越严格，示例：0.5。",
+        TOPIC_LOOKBACK_DAYS: "专题聚合回看最近多少天新闻。示例：7。",
+        TOPIC_AGGREGATION_TOP_N: "用于发现专题的高热新闻种子数量。示例：100。",
+        TOPIC_GENERATION_COUNT: "每轮希望生成的专题数量范围。示例：3-6。",
+        TOPIC_RECALL_POOL_SIZE: "专题向量召回候选池大小。越大越全面但更慢，示例：2000。",
+        TOPIC_MATCH_THRESHOLD: "专题相关新闻向量初筛阈值，范围 0-1。示例：0.45。",
+        TOPIC_MATCH_MAX_CANDIDATES: "进入 AI 核验的最大候选新闻数。示例：50。",
+        TOPIC_MIN_NEWS_COUNT: "一个专题至少需要包含的新闻数。示例：3。",
+        TOPIC_UPDATE_LOOKBACK_DAYS: "专题更新时回看最近多少天新闻。示例：3。",
+        TOPIC_SCHEDULE_INTERVAL_HOURS: "专题定时刷新间隔，单位小时。示例：6。",
+        TOPIC_NEWS_MIN_HEAT: "进入专题候选的最低新闻热度。示例：1.0。",
+        TOPIC_QUALITY_LEVEL: "专题质量过滤等级，数值越高越严格。示例：2。",
+        "AI_ROUTE.SUMMARY": "选择摘要生成使用 main 或 backup。main 通常速度快，backup 可用于更稳定模型。",
+        "AI_ROUTE.SENTIMENT": "选择情感和分类分析使用的模型节点。示例：main。",
+        "AI_ROUTE.KEYWORDS": "选择关键词和实体提取使用的模型节点。示例：main。",
+        "AI_ROUTE.CLUSTERING": "选择新闻聚类去重判断使用的模型节点。建议使用稳定性较高的 backup。",
+        "AI_ROUTE.TOPIC_NAME": "选择专题命名使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_EVAL": "选择专题质量评估使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_MATCH": "选择专题与新闻匹配核验使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_TIMELINE": "选择专题时间轴生成使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_OVERVIEW": "选择专题综述生成使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_INITIAL_SUMMARY": "选择专题初始摘要使用的模型节点。示例：main。",
+        "AI_ROUTE.REPORT": "选择日报/周报等报表生成使用的模型节点。示例：backup。",
+        "AI_ROUTE.CHAT": "选择管理端问答助手使用的模型节点。示例：main。",
+        NEWS_CATEGORIES: "新闻分类列表，每行一个。示例：财经商业、科技科学、社会民生。",
+        IGNORED_DOMAINS: "忽略域名列表，每行一个。命中的链接不会抓取或入库。示例：twitter.com。",
+        WEIBO_COOKIE: "微博登录 Cookie，用于抓取微博详情。请从浏览器复制完整 Cookie，失效后需要更新。",
+    };
+
+    function getConfigHelp(field) {
+        return field.help || CONFIG_FIELD_HELP[field.key] || "请按配置文件要求填写；修改后保存并重启生效。";
+    }
+
+    function getConfigValue(path) {
+        const parts = path.split(".");
+        let cur = configData;
+        for (const part of parts) {
+            if (!cur || typeof cur !== "object") return "";
+            cur = cur[part];
+        }
+        return cur ?? "";
+    }
+
+    function setConfigValue(path, value) {
+        const parts = path.split(".");
+        let cur = configData;
+        for (let i = 0; i < parts.length - 1; i++) {
+            const part = parts[i];
+            if (!cur[part] || typeof cur[part] !== "object") cur[part] = {};
+            cur = cur[part];
+        }
+        cur[parts[parts.length - 1]] = value;
+    }
+
+    function parseConfigInputValue(field, raw) {
+        if (field.type === "number") return Number(raw || 0);
+        if (field.type === "list") return String(raw || "").split("\n").map((x) => x.trim()).filter(Boolean);
+        return raw;
+    }
+
+    function renderConfigForm() {
+        const root = document.getElementById("configForm");
+        if (!root) return;
+        root.innerHTML = CONFIG_SECTIONS.map((section) => `
+            <div class="config-section-card">
+                <div class="config-section-head">
+                    <h4>${escapeHtml(section.title)}</h4>
+                    <p>${escapeHtml(section.desc)}</p>
+                </div>
+                <div class="config-fields-grid">
+                    ${section.fields.map((field) => renderConfigField(field)).join("")}
+                </div>
+            </div>
+        `).join("");
+    }
+
+    function renderConfigField(field) {
+        const value = getConfigValue(field.key);
+        const id = "cfg_" + field.key.replace(/\./g, "_");
+        const wide = field.wide ? " wide" : "";
+        if (field.type === "select" || field.type === "route") {
+            const options = field.type === "route" ? ["main", "backup"] : field.options;
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<select id="${id}" class="admin-input" data-config-key="${field.key}" data-config-type="${field.type}">${options.map((opt) => `<option value="${opt}" ${String(value) === opt ? "selected" : ""}>${opt}</option>`).join("")}</select><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        if (field.type === "textarea") {
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<textarea id="${id}" class="admin-textarea config-textarea" data-config-key="${field.key}" data-config-type="${field.type}">${escapeHtml(value)}</textarea><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        if (field.type === "list") {
+            const text = Array.isArray(value) ? value.join("\n") : String(value || "");
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<textarea id="${id}" class="admin-textarea config-textarea small" data-config-key="${field.key}" data-config-type="${field.type}">${escapeHtml(text)}</textarea><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        const step = field.step ? ` step="${field.step}"` : "";
+        return `<label class="config-field${wide}">${escapeHtml(field.label)}<input id="${id}" class="admin-input" type="${field.type === "password" ? "password" : field.type}"${step} value="${escapeHtml(value)}" data-config-key="${field.key}" data-config-type="${field.type}"><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+    }
+
+    function collectConfigForm() {
+        document.querySelectorAll("[data-config-key]").forEach((el) => {
+            const field = CONFIG_SECTIONS.flatMap((s) => s.fields).find((item) => item.key === el.dataset.configKey) || { type: el.dataset.configType };
+            setConfigValue(el.dataset.configKey, parseConfigInputValue(field, el.value));
+        });
+    }
+
+    function syncAdvancedConfigFromForm() {
+        collectConfigForm();
+        currentConfigText = JSON.stringify(configData, null, 2);
+        setEditorValue(currentConfigText);
+        return currentConfigText;
+    }
+
+    function toggleAdvancedConfig() {
+        const wrap = document.getElementById("advancedConfigWrap");
+        if (!wrap) return;
+        const willShow = wrap.style.display === "none";
+        if (willShow) syncAdvancedConfigFromForm();
+        wrap.style.display = willShow ? "block" : "none";
+        setTimeout(resizeEditors, 20);
     }
 
     function resizeEditors() {
@@ -312,25 +597,6 @@
             } else {
                 configTextarea.style.minHeight = available + "px";
             }
-        }
-        
-        const sourcesPanel = document.getElementById("panelSources");
-        const sourcesTextarea = document.getElementById("sourcesEditor");
-        
-        if (sourcesPanel && sourcesTextarea && sourcesPanel.classList.contains("active")) {
-             // For sources panel, we have a toolbar above it, so we need to calculate available space carefully
-             const wrapper = sourcesPanel.querySelector(".CodeMirror");
-             // If wrapper exists, use its top. If not, use textarea's top.
-             // But wait, if CodeMirror is active, textarea is hidden.
-             const top = wrapper ? wrapper.getBoundingClientRect().top : sourcesTextarea.getBoundingClientRect().top;
-             
-             const available = Math.max(260, window.innerHeight - top - 20);
-             if (sourcesEditorCM) {
-                 sourcesEditorCM.setSize("100%", available + "px");
-                 sourcesEditorCM.refresh();
-             } else {
-                 sourcesTextarea.style.minHeight = available + "px";
-             }
         }
     }
 
@@ -372,23 +638,240 @@
             return;
         }
         const data = await resp.json();
-        setEditorValue(data.yaml || "");
-        setAppNameFromYaml(data.yaml || "");
+        currentConfigText = data.yaml || "";
+        configData = data.config || {};
+        setEditorValue(JSON.stringify(configData, null, 2));
+        renderConfigForm();
+        setAppNameFromConfig();
         setStatus(statusEl, "已加载。保存后将自动重启。", "ok");
     }
     
     async function loadSources() {
         const statusEl = document.getElementById("adminStatus");
+        const pathEl = document.getElementById("sourcesPath");
         setStatus(statusEl, "加载新闻源中...", "");
-        const resp = await fetch("/api/admin/news_sources", { method: "GET" });
+        const resp = await fetch("/api/admin/news_sources", { method: "GET", cache: "no-store" });
         if (!resp.ok) {
             const data = await resp.json().catch(() => ({}));
             setStatus(statusEl, data.detail || "加载失败", "error");
             return;
         }
         const data = await resp.json();
-        setSourcesValue(data.json || "[]");
-        setStatus(statusEl, "新闻源已加载 (路径: " + (data.path || "") + ")", "ok");
+        sources = Array.isArray(data.sources) ? data.sources : [];
+        if (pathEl) pathEl.textContent = "配置路径: " + (data.path || "");
+        renderSources();
+        setStatus(statusEl, "新闻源已加载，共 " + sources.length + " 个。", "ok");
+    }
+
+    function normalizeSourceForSave(source) {
+        return {
+            name: String(source.name || "").trim(),
+            weight: Number(source.weight || 1),
+            address: String(source.address || "").trim(),
+            enabled: source.enabled !== false,
+        };
+    }
+
+    function updateSourceField(index, field, value) {
+        if (!sources[index]) return;
+        if (field === "weight") sources[index][field] = Number(value || 1);
+        else if (field === "enabled") sources[index][field] = !!value;
+        else sources[index][field] = value;
+    }
+
+    function openSourceFormModal(index = null) {
+        const modal = document.getElementById("sourceFormModal");
+        const titleEl = document.getElementById("sourceFormModalTitle");
+        const indexEl = document.getElementById("editSourceIndex");
+        const nameEl = document.getElementById("sourceFormName");
+        const weightEl = document.getElementById("sourceFormWeight");
+        const addressEl = document.getElementById("sourceFormAddress");
+        const enabledEl = document.getElementById("sourceFormEnabled");
+        if (!modal || !titleEl || !indexEl || !nameEl || !weightEl || !addressEl || !enabledEl) return;
+        const isEdit = index !== null && index !== undefined;
+        const source = isEdit ? (sources[index] || {}) : { name: "", weight: 1, address: "", enabled: true };
+        titleEl.textContent = isEdit ? "编辑新闻源" : "新增新闻源";
+        indexEl.value = isEdit ? String(index) : "";
+        nameEl.value = source.name || "";
+        weightEl.value = source.weight || 1;
+        addressEl.value = source.address || "";
+        enabledEl.checked = source.enabled !== false;
+        modal.style.display = "flex";
+    }
+
+    function closeSourceFormModal() {
+        const modal = document.getElementById("sourceFormModal");
+        if (modal) modal.style.display = "none";
+    }
+
+    async function saveSourceForm() {
+        const indexValue = document.getElementById("editSourceIndex")?.value || "";
+        const source = {
+            name: document.getElementById("sourceFormName")?.value || "",
+            weight: Number(document.getElementById("sourceFormWeight")?.value || 1),
+            address: document.getElementById("sourceFormAddress")?.value || "",
+            enabled: !!document.getElementById("sourceFormEnabled")?.checked,
+            health: indexValue !== "" ? (sources[Number(indexValue)]?.health || {}) : {},
+        };
+        if (!source.name.trim() || !source.address.trim()) {
+            alert("新闻源名称和地址不能为空");
+            return;
+        }
+        if (indexValue === "") {
+            sources.unshift(source);
+        } else {
+            const index = Number(indexValue);
+            sources[index] = { ...sources[index], ...source };
+        }
+        closeSourceFormModal();
+        renderSources();
+        const saved = await saveSources(true);
+        if (!saved) openSourceFormModal(indexValue === "" ? 0 : Number(indexValue));
+    }
+
+    function addSource() {
+        openSourceFormModal();
+    }
+
+    async function removeSource(index) {
+        if (!confirm("确定删除这个新闻源吗？")) return;
+        const removed = sources.splice(index, 1);
+        renderSources();
+        const saved = await saveSources(true);
+        if (!saved && removed.length) {
+            sources.splice(index, 0, removed[0]);
+            renderSources();
+        }
+    }
+
+    function formatSourceTime(value) {
+        if (!value) return "-";
+        return String(value).replace("T", " ").slice(0, 19);
+    }
+
+    function getSourceStatusClass(status) {
+        if (status === "success") return "ok";
+        if (status === "failed") return "bad";
+        return "idle";
+    }
+
+    function getSourceStatusText(status, fallback) {
+        if (status === "success") return "成功";
+        if (status === "failed") return "失败";
+        return fallback || "未执行";
+    }
+
+    function closeSourcePreviewModal() {
+        const modal = document.getElementById("sourcePreviewModal");
+        if (modal) modal.style.display = "none";
+    }
+
+    function openSourcePreviewModal(index) {
+        const source = sources[index] || {};
+        const data = sourcePreviewResults[index] || { preview: [], message: "暂无测试结果", count: 0, ok: false };
+        const modal = document.getElementById("sourcePreviewModal");
+        const titleEl = document.getElementById("sourcePreviewModalTitle");
+        const summaryEl = document.getElementById("sourcePreviewSummary");
+        const listEl = document.getElementById("sourcePreviewList");
+        if (!modal || !titleEl || !summaryEl || !listEl) return;
+        titleEl.textContent = "新闻源测试结果 - " + (source.name || "未命名新闻源");
+        summaryEl.innerHTML = `
+            <div class="source-modal-kpis">
+                <span class="source-badge ${data.ok ? "ok" : "bad"}">${data.ok ? "测试成功" : "测试失败"}</span>
+                <span>提取 ${data.count || 0} 条</span>
+                <span>${escapeHtml(data.message || "")}</span>
+            </div>
+            <div class="source-modal-url">${escapeHtml(source.address || "")}</div>
+        `;
+        const preview = Array.isArray(data.preview) ? data.preview : [];
+        if (!preview.length) {
+            listEl.innerHTML = '<div class="source-empty">暂无可展示的提取结果。</div>';
+        } else {
+            listEl.innerHTML = preview.map((item, idx) => `
+                <div class="source-modal-item">
+                    <div class="source-modal-index">#${idx + 1}</div>
+                    <div class="source-modal-title">${escapeHtml(item.title || "无标题")}</div>
+                    <a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noopener">${escapeHtml(item.url || "")}</a>
+                    <div class="source-modal-field"><strong>来源：</strong>${escapeHtml(item.source || source.name || "")}</div>
+                    <div class="source-modal-field"><strong>发布时间：</strong>${escapeHtml(item.publish_date || item.time || "")}</div>
+                    <div class="source-modal-summary-text">${escapeHtml(item.summary || "无摘要")}</div>
+                </div>
+            `).join("");
+        }
+        modal.style.display = "flex";
+    }
+
+    async function testSource(index) {
+        const source = normalizeSourceForSave(sources[index] || {});
+        const statusEl = document.getElementById("sourceTestStatus" + index);
+        if (!source.name || !source.address) {
+            if (statusEl) statusEl.textContent = "名称和地址不能为空";
+            return;
+        }
+        if (statusEl) statusEl.textContent = "测试中...";
+        const resp = await fetch("/api/admin/news_sources/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(source)
+        });
+        const data = await resp.json().catch(() => ({}));
+        sources[index].health = data.health || sources[index].health || {};
+        sourcePreviewResults[index] = data;
+        if (statusEl) statusEl.textContent = (data.ok ? "测试成功" : "测试失败") + "，提取 " + (data.count || 0) + " 条";
+        renderSources();
+        openSourcePreviewModal(index);
+    }
+
+    function renderSources() {
+        const grid = document.getElementById("sourcesGrid");
+        if (!grid) return;
+        if (!sources.length) {
+            grid.innerHTML = '<div class="source-empty">暂无新闻源，请点击“新增新闻源”。</div>';
+            return;
+        }
+        grid.innerHTML = sources.map((source, index) => {
+            const health = source.health || {};
+            const enabled = source.enabled !== false;
+            const fetchStatus = health.last_fetch_status || "";
+            const testStatus = health.last_test_status || "";
+            const fetchClass = getSourceStatusClass(fetchStatus);
+            const testClass = getSourceStatusClass(testStatus);
+            const cachedPreview = sourcePreviewResults[index];
+            return `
+                <div class="source-card prompt-card ${enabled ? "" : "disabled"}">
+                    <div class="source-card-top">
+                        <div>
+                            <h4>${escapeHtml(source.name || "未命名新闻源")}</h4>
+                            <div class="source-key">${escapeHtml(source.address || "暂未填写地址")}</div>
+                        </div>
+                        <label class="source-switch-pill ${enabled ? "on" : "off"}">
+                            <input type="checkbox" ${enabled ? "checked" : ""} onchange="updateSourceField(${index}, 'enabled', this.checked); renderSources();">
+                            <span>${enabled ? "已启用" : "已停用"}</span>
+                        </label>
+                    </div>
+                    <div class="source-card-desc">
+                        <span class="source-badge ${fetchClass}">加载：${getSourceStatusText(fetchStatus, "未加载")}</span>
+                        <span class="source-badge ${testClass}">测试：${getSourceStatusText(testStatus, "未测试")}</span>
+                        <span class="source-badge idle">权重 ${escapeHtml(source.weight || 1)}</span>
+                    </div>
+                    <div class="source-card-meta">
+                        <div><strong>地址</strong><span class="source-address-text">${escapeHtml(source.address || "-")}</span></div>
+                        <div><strong>权重</strong><span>${escapeHtml(source.weight || 1)}</span></div>
+                        <div><strong>上次加载</strong><span>${formatSourceTime(health.last_fetch_at)} · ${health.last_fetch_count ?? 0} 条</span></div>
+                        <div><strong>上次测试</strong><span>${formatSourceTime(health.last_test_at)} · ${health.last_test_count ?? 0} 条</span></div>
+                        <div><strong>失败次数</strong><span>${health.failure_count ?? 0}</span></div>
+                    </div>
+                    ${(health.last_error || health.last_test_error) ? `<div class="source-card-error">${escapeHtml(health.last_error || health.last_test_error || "")}</div>` : ""}
+                    <div class="prompt-actions source-actions">
+                        <span id="sourceTestStatus${index}" class="source-test-status">${cachedPreview ? `最近测试提取 ${cachedPreview.count || 0} 条` : ""}</span>
+                        ${cachedPreview ? `<button class="admin-btn" onclick="openSourcePreviewModal(${index})">查看结果</button>` : ""}
+                        <button class="admin-btn" onclick="openSourceFormModal(${index})">编辑</button>
+                        <button class="admin-btn" onclick="testSource(${index})">测试抓取</button>
+                        <button class="admin-btn danger" onclick="removeSource(${index})">删除</button>
+                    </div>
+                </div>
+            `;
+        }).join("");
     }
 
     async function waitForRestartAndReload() {
@@ -407,11 +890,18 @@
     async function saveConfig() {
         const statusEl = document.getElementById("adminStatus");
         setStatus(statusEl, "保存中...", "");
-        const yamlText = getEditorValue();
+        const advancedWrap = document.getElementById("advancedConfigWrap");
+        const configText = advancedWrap && advancedWrap.style.display !== "none" ? getEditorValue() : syncAdvancedConfigFromForm();
+        try {
+            JSON.parse(configText);
+        } catch (e) {
+            setStatus(statusEl, "配置格式错误: " + e.message, "error");
+            return;
+        }
         const resp = await fetch("/api/admin/config", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ yaml_text: yamlText })
+            body: JSON.stringify({ yaml_text: configText })
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
@@ -419,34 +909,32 @@
             return;
         }
         setStatus(statusEl, "保存成功，服务即将重启（请等待 2-5 秒后刷新）。", "ok");
-        setAppNameFromYaml(yamlText);
+        setAppNameFromConfig();
         waitForRestartAndReload();
     }
 
-    async function saveSources() {
+    async function saveSources(showStatus = true) {
         const statusEl = document.getElementById("adminStatus");
-        setStatus(statusEl, "保存新闻源中...", "");
-        const jsonText = getSourcesValue();
-        
-        // Basic validation
-        try {
-            JSON.parse(jsonText);
-        } catch (e) {
-            setStatus(statusEl, "JSON 格式错误: " + e.message, "error");
-            return;
+        if (showStatus) setStatus(statusEl, "保存新闻源中...", "");
+        const cleanSources = sources.map(normalizeSourceForSave);
+        if (cleanSources.some((item) => !item.name || !item.address)) {
+            setStatus(statusEl, "保存失败：新闻源名称和地址不能为空。", "error");
+            return false;
         }
 
-        const resp = await fetch("/api/admin/news_sources", {
+        const resp = await fetch("/api/admin/news_sources/structured", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ json_text: jsonText })
+            body: JSON.stringify({ sources: cleanSources })
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
             setStatus(statusEl, data.detail || "保存失败", "error");
-            return;
+            return false;
         }
-        setStatus(statusEl, "保存成功，下次任务时生效。", "ok");
+        if (showStatus) setStatus(statusEl, "保存成功，配置已生效。", "ok");
+        await loadSources();
+        return true;
     }
 
     function setLogsHint(text) {
@@ -811,6 +1299,7 @@
             return;
         }
         document.getElementById("reloadConfigBtn")?.addEventListener("click", loadConfig);
+        document.getElementById("toggleAdvancedConfigBtn")?.addEventListener("click", toggleAdvancedConfig);
         document.getElementById("saveConfigBtn")?.addEventListener("click", saveConfig);
         document.getElementById("logoutBtn")?.addEventListener("click", logout);
         
@@ -844,7 +1333,7 @@
         });
         
         document.getElementById("reloadSourcesBtn")?.addEventListener("click", loadSources);
-        document.getElementById("saveSourcesBtn")?.addEventListener("click", saveSources);
+        document.getElementById("addSourceBtn")?.addEventListener("click", addSource);
         
         const logViewer = document.getElementById("logViewer");
         if (logViewer) logViewer.addEventListener("scroll", onLogScroll);

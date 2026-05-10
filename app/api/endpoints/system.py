@@ -8,18 +8,20 @@
 - `UpdateConfigPayload`: 配置更新请求体
 """
 
-import asyncio
+import gc
 import json
 import re
-import gc
+import time as perf_time
 from collections import deque
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +34,8 @@ from app.schemas.system import AdminAuth
 from app.services.ai_service import ai_service
 from app.services.admin_service import is_admin_request, load_config_yaml_text, save_config_yaml_text, schedule_restart
 from app.services.pipeline_service import background_analyze_all, reanalyze_all_categories, run_manual
+from app.services.source_health_service import source_health_service
+from app.services.task_manager import task_manager
 from app.utils.tools import parse_query_time_range
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -67,11 +71,15 @@ async def api_analyze_all_sentiment():
     - 启动结果
 
     作用:
-    - 以后台任务方式触发对历史数据的情感与关键词补全
+    - 以后台任务方式触发对历史数据的情感与关键词补全，并防止重复启动
     """
 
-    asyncio.create_task(background_analyze_all())
-    return {"status": "started"}
+    status = await task_manager.start_background(
+        "analyze_all",
+        background_analyze_all,
+        progress="全量情感与关键词补全执行中",
+    )
+    return {"status": "running" if status.get("running") else status.get("status"), "task": status}
 
 
 class UpdateConfigPayload(BaseModel):
@@ -80,6 +88,17 @@ class UpdateConfigPayload(BaseModel):
 
 class UpdateSourcesPayload(BaseModel):
     json_text: str
+
+
+class NewsSourcePayload(BaseModel):
+    name: str
+    weight: float = 1.0
+    address: str
+    enabled: bool = True
+
+
+class UpdateSourcesStructuredPayload(BaseModel):
+    sources: list[NewsSourcePayload]
 
 
 def _get_news_sources_path() -> Path:
@@ -92,6 +111,80 @@ def _get_news_sources_path() -> Path:
             return p
     # 默认为 data/news_sources.json
     return candidates[0]
+
+
+def _normalize_news_source(raw: dict) -> dict:
+    """
+    输入:
+    - `raw`: 原始新闻源配置项
+
+    输出:
+    - 标准化后的新闻源配置
+
+    作用:
+    - 兼容历史配置中缺少 enabled 字段的情况，并保证卡片编辑需要的字段完整
+    """
+
+    return {
+        "name": str(raw.get("name") or "").strip(),
+        "weight": float(raw.get("weight", 1.0) or 1.0),
+        "address": str(raw.get("address") or "").strip(),
+        "enabled": bool(raw.get("enabled", True)),
+    }
+
+
+def _load_news_sources_data() -> list[dict]:
+    """
+    输入:
+    - 无
+
+    输出:
+    - 标准化后的新闻源列表
+
+    作用:
+    - 从新闻源配置文件读取数据，并兼容旧格式
+    """
+
+    path = _get_news_sources_path()
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8") or "[]")
+    if not isinstance(data, list):
+        raise ValueError("新闻源配置必须是 JSON 列表")
+    return [_normalize_news_source(item) for item in data if isinstance(item, dict)]
+
+
+def _save_news_sources_data(sources: list[dict]) -> None:
+    """
+    输入:
+    - `sources`: 新闻源配置列表
+
+    输出:
+    - 无
+
+    作用:
+    - 保存标准化新闻源配置到配置文件
+    """
+
+    normalized = [_normalize_news_source(item) for item in sources]
+    path = _get_news_sources_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(normalized, ensure_ascii=False, indent=4), encoding="utf-8")
+
+
+def _source_key(source: dict) -> str:
+    """
+    输入:
+    - `source`: 新闻源配置项
+
+    输出:
+    - 用于健康状态索引的稳定键
+
+    作用:
+    - 优先使用地址作为唯一键，避免新闻源改名后丢失状态
+    """
+
+    return str(source.get("address") or source.get("name") or "").strip()
 
 
 def _get_logs_dir() -> Path:
@@ -107,7 +200,12 @@ async def api_get_app_info():
 async def api_get_admin_config(request: Request):
     if not is_admin_request(request):
         raise HTTPException(status_code=401, detail="未登录")
-    return {"yaml": load_config_yaml_text(), "missing_keys": get_missing_config_keys(settings)}
+    yaml_text = load_config_yaml_text()
+    try:
+        data = yaml.safe_load(yaml_text) or {}
+    except Exception:
+        data = {}
+    return {"yaml": yaml_text, "config": data, "missing_keys": get_missing_config_keys(settings)}
 
 
 @router.put("/admin/config")
@@ -210,11 +308,31 @@ async def api_trigger_crawl():
     - 启动结果
 
     作用:
-    - 手动触发一次抓取与分析全流程任务
+    - 手动触发一次抓取与分析全流程任务，并与定时流水线共享运行锁
     """
 
-    asyncio.create_task(run_manual())
-    return {"status": "started"}
+    status = await task_manager.start_background(
+        "pipeline",
+        run_manual,
+        progress="手动全流程执行中",
+    )
+    return {"status": "running" if status.get("running") else status.get("status"), "task": status}
+
+
+@router.get("/admin/tasks", dependencies=[Depends(verify_admin_access)])
+async def api_get_task_statuses():
+    """
+    输入:
+    - 无
+
+    输出:
+    - 所有后台任务状态
+
+    作用:
+    - 为管理端提供后台任务运行状态、时间、进度和失败原因
+    """
+
+    return {"tasks": await task_manager.get_all_statuses()}
 
 
 @router.get("/chat")
@@ -244,6 +362,7 @@ async def chat_api(
 
     context_text = ""
     if q_vec is not None:
+        rag_start = perf_time.perf_counter()
         start_date, end_date = parse_query_time_range(query)
 
         # 优化：RAG 只需要 embedding 和摘要，不需要加载正文
@@ -252,19 +371,23 @@ async def chat_api(
             stmt = stmt.where(News.publish_date >= start_date)
         if end_date:
             stmt = stmt.where(News.publish_date < end_date)
+        if not start_date and not end_date:
+            stmt = stmt.where(News.publish_date >= datetime.now() - timedelta(days=7))
+        stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date)).limit(2000)
 
         result = await db.execute(stmt)
         candidates = result.scalars().all()
 
         all_scored = []
         high_relevance_count = 0
+        norm_q = float(np.linalg.norm(q_vec))
+        q_dim = len(q_vec)
 
         for n in candidates:
-            if not n.embedding:
+            if not n.embedding or len(n.embedding) != q_dim:
                 continue
             n_vec = np.array(n.embedding)
             sim = 0.0
-            norm_q = np.linalg.norm(q_vec)
             norm_n = np.linalg.norm(n_vec)
             if norm_q > 0 and norm_n > 0:
                 sim = float(np.dot(q_vec, n_vec) / (norm_q * norm_n))
@@ -284,6 +407,12 @@ async def chat_api(
             context_text += (
                 f"{i+1}. [{n.title}] (来源:{n.source}, 时间:{n.publish_date}, 热度:{n.heat_score})\n摘要: {n.summary}\n\n"
             )
+
+        elapsed_ms = (perf_time.perf_counter() - rag_start) * 1000
+        logger.info(
+            f"/api/chat RAG 检索完成: candidates={len(candidates)}, scored={len(all_scored)}, "
+            f"context={len(top_news)}, elapsed={elapsed_ms:.1f}ms"
+        )
 
         # 显式清理 RAG 中间变量，释放内存
         del candidates, all_scored, top_news
@@ -324,7 +453,20 @@ async def api_get_news_sources(request: Request):
     if not is_admin_request(request):
         raise HTTPException(status_code=401, detail="未登录")
     path = _get_news_sources_path()
-    return {"json": path.read_text(encoding="utf-8") if path.exists() else "[]", "path": str(path)}
+    try:
+        sources = _load_news_sources_data()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"新闻源配置读取失败: {e}")
+    health = source_health_service.get_all_statuses()
+    items = []
+    for source in sources:
+        key = _source_key(source)
+        items.append({**source, "key": key, "health": health.get(key, {})})
+    return {
+        "sources": items,
+        "json": json.dumps(sources, ensure_ascii=False, indent=4),
+        "path": str(path),
+    }
 
 
 @router.put("/admin/news_sources")
@@ -335,9 +477,88 @@ async def api_update_news_sources(payload: UpdateSourcesPayload, request: Reques
         data = json.loads(payload.json_text)
         if not isinstance(data, list):
             raise ValueError("新闻源配置必须是 JSON 列表")
+        _save_news_sources_data(data)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"JSON 格式错误: {e}")
-    path = _get_news_sources_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(payload.json_text, encoding="utf-8")
     return {"ok": True}
+
+
+@router.put("/admin/news_sources/structured")
+async def api_update_news_sources_structured(payload: UpdateSourcesStructuredPayload, request: Request):
+    """
+    输入:
+    - `payload`: 结构化新闻源列表
+
+    输出:
+    - 保存结果
+
+    作用:
+    - 支持管理端卡片式编辑新闻源，保存时写回 news_sources.json
+    """
+
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    sources = [item.model_dump() for item in payload.sources]
+    if any(not item.get("name") or not item.get("address") for item in sources):
+        raise HTTPException(status_code=400, detail="新闻源名称和地址不能为空")
+    _save_news_sources_data(sources)
+    return {"ok": True}
+
+
+@router.post("/admin/news_sources/test")
+async def api_test_news_source(source: NewsSourcePayload, request: Request):
+    """
+    输入:
+    - `source`: 单个新闻源配置
+
+    输出:
+    - 测试抓取状态和最多 10 条预览结果
+
+    作用:
+    - 管理端测试单个新闻源是否可用，不写入数据库
+    """
+
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    from app.services.crawler_service import crawler_service
+    import aiohttp
+
+    normalized = _normalize_news_source(source.model_dump())
+    key = _source_key(normalized)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            items = await crawler_service.fetch_and_parse(session, normalized, prefix="测试")
+        preview = items[:10]
+        source_health_service.record_test_result(
+            key,
+            name=normalized["name"],
+            count=len(items),
+            ok=bool(items),
+            error=None if items else "未提取到新闻条目",
+        )
+        return {
+            "ok": bool(items),
+            "count": len(items),
+            "preview": preview,
+            "message": "测试成功" if items else "未提取到新闻条目",
+            "health": source_health_service.get_status(key),
+        }
+    except Exception as e:
+        source_health_service.record_test_result(
+            key,
+            name=normalized["name"],
+            count=0,
+            ok=False,
+            error=str(e),
+        )
+        return {
+            "ok": False,
+            "count": 0,
+            "preview": [],
+            "message": str(e),
+            "health": source_health_service.get_status(key),
+        }

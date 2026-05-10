@@ -18,6 +18,7 @@ from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.core.exceptions import AIConfigurationError
 from app.core.prompts import prompt_manager
+from app.services.concurrency_service import concurrency_service
 from app.utils.tools import normalize_regions_to_countries
 
 settings = get_settings()
@@ -179,9 +180,9 @@ class AIService:
                 try:
                     if semaphore:
                         async with semaphore:
-                            response = await do_call()
+                            response = await concurrency_service.run_llm(do_call)
                     else:
-                        response = await do_call()
+                        response = await concurrency_service.run_llm(do_call)
                     
                     content = response.choices[0].message.content
                     if logger.isEnabledFor(logging.DEBUG):
@@ -1047,19 +1048,21 @@ class AIService:
                 "encoding_format": "float",
             }
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            batch_res = sorted(data["data"], key=lambda x: x["index"])
-                            all_embeddings.extend([x["embedding"] for x in batch_res])
-                        elif resp.status == 401:
-                             error_text = await resp.text()
-                             logger.error(f"❌ 向量 API 认证失败 (401): {error_text}")
-                             raise AIConfigurationError("Embedding API Key 无效")
-                        else:
+                async def do_embedding_request() -> Any:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                batch_res = sorted(data["data"], key=lambda x: x["index"])
+                                return [x["embedding"] for x in batch_res]
+                            if resp.status == 401:
+                                error_text = await resp.text()
+                                logger.error(f"❌ 向量 API 认证失败 (401): {error_text}")
+                                raise AIConfigurationError("Embedding API Key 无效")
                             logger.error(f"❌ 向量 API 错误: {await resp.text()}")
-                            all_embeddings.extend([[] for _ in batch])
+                            return [[] for _ in batch]
+
+                all_embeddings.extend(await concurrency_service.run_embedding(do_embedding_request))
             except AIConfigurationError:
                 raise
             except Exception as e:
