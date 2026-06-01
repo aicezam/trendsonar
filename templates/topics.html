@@ -5,16 +5,20 @@
 
 {% block content %}
 <div class="app-container page-wrap">
-    <div class="page-title">
-        专题追踪
-        <button id="addTopicBtn" class="btn-primary" style="display:none; float: right; font-size: 14px; padding: 6px 12px;">+ 手动创建专题</button>
+    <div class="topics-hero">
+        <div>
+            <div class="topics-kicker">Topic Radar</div>
+            <div class="page-title">专题追踪</div>
+            <div class="hint">自动沉淀热点事件、时间轴和趋势分析，适合持续观察舆情发酵。</div>
+        </div>
+        <button id="addTopicBtn" class="topics-add-btn" style="display:none;">+ 手动创建专题</button>
     </div>
-    <div class="hint">自动生成/更新专题并沉淀时间轴。</div>
+    <div id="topicStats" class="topics-stats" style="display:none;"></div>
     <div id="loading" class="loading">加载中...</div>
     <div id="empty" class="empty" style="display:none;">暂无专题。请等待全流程任务运行后自动生成。</div>
     <div id="list" class="topic-list"></div>
-    <div id="loading-more" style="display:none; text-align: center; padding: 20px; color: #666;">正在加载更多数据...</div>
-    <div id="no-more-data" style="display:none; text-align: center; padding: 20px; color: #999;">没有更多数据了</div>
+    <div id="loading-more" class="topics-feed-state" style="display:none;">正在加载更多数据...</div>
+    <div id="no-more-data" class="topics-feed-state muted" style="display:none;">没有更多数据了</div>
 </div>
 {% endblock %}
 
@@ -27,6 +31,33 @@
         const d = new Date(iso);
         if (isNaN(d.getTime())) return iso;
         return d.toLocaleString();
+    }
+
+    function fmtShortDate(iso) {
+        if (!iso) return "-";
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+    }
+
+    function fmtRelative(iso) {
+        if (!iso) return "-";
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        const diff = Date.now() - d.getTime();
+        const minute = 60 * 1000;
+        const hour = 60 * minute;
+        const day = 24 * hour;
+        if (diff < hour) return `${Math.max(1, Math.floor(diff / minute))} 分钟前`;
+        if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
+        if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
+        return fmtShortDate(iso);
+    }
+
+    function heatTone(score) {
+        if (score >= 80) return "high";
+        if (score >= 40) return "mid";
+        return "low";
     }
 
     function el(tag, attrs = {}, children = []) {
@@ -137,35 +168,58 @@
             window.location.href = `/topics/${t.id}`;
         });
 
-        const header = el("div", { style: "display: flex; justify-content: space-between; align-items: flex-start;" });
+        const header = el("div", { class: "topic-card-head" });
         
-        const nameDiv = el("div", { class: "topic-name", text: t.name || "未命名专题", style: "flex: 1;" });
-        header.appendChild(nameDiv);
+        const nameWrap = el("div", { class: "topic-title-wrap" });
+        nameWrap.appendChild(el("div", { class: "topic-name", text: t.name || "未命名专题" }));
+        nameWrap.appendChild(el("div", { class: "topic-subline", text: `更新于 ${fmtRelative(t.updated_time)}` }));
+        header.appendChild(nameWrap);
+
+        const heat = Number(t.heat_score || 0);
+        const heatBadge = el("div", { class: `topic-heat ${heatTone(heat)}` });
+        heatBadge.innerHTML = `<span>热度</span><strong>${heat.toFixed(1)}</strong>`;
+        header.appendChild(heatBadge);
 
         if (IS_ADMIN) {
-            const editBtn = el("button", {
+            const actions = el("div", { class: "topic-actions" });
+            actions.appendChild(el("button", {
                 text: "编辑",
-                style: "background: #3b82f6; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 10px; white-space: nowrap;",
+                class: "topic-action-btn",
                 onClick: (e) => editTopic(e, t.id, t.name)
-            });
-            header.appendChild(editBtn);
+            }));
 
-            const delBtn = el("button", { 
+            actions.appendChild(el("button", {
                 text: "删除",
-                style: "background: #ef4444; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 5px; white-space: nowrap;",
+                class: "topic-action-btn danger",
                 onClick: (e) => deleteTopic(e, t.id, t.name)
-            });
-            header.appendChild(delBtn);
+            }));
+            header.appendChild(actions);
         }
         card.appendChild(header);
 
         const meta = el("div", { class: "meta" });
-        meta.appendChild(el("span", { class: "tag", text: `发布时间 ${fmtTime(t.start_time)}` }));
-        meta.appendChild(el("span", { class: "tag", text: `更新时间 ${fmtTime(t.updated_time)}` }));
+        meta.appendChild(el("span", { class: "tag", text: `开始 ${fmtTime(t.start_time)}` }));
+        meta.appendChild(el("span", { class: "tag", text: `更新 ${fmtTime(t.updated_time)}` }));
         card.appendChild(meta);
 
-        card.appendChild(el("div", { class: "topic-summary", text: t.summary || "暂无描述" }));
+        card.appendChild(el("div", { class: "topic-summary", text: t.summary || "暂无概览，等待更多相关新闻沉淀。" }));
+        const footer = el("div", { class: "topic-card-footer" });
+        footer.appendChild(el("span", { text: "查看时间轴、趋势仪表盘与来源新闻" }));
+        footer.appendChild(el("span", { class: "topic-arrow", text: "→" }));
+        card.appendChild(footer);
         return card;
+    }
+
+    function renderStats(data) {
+        const stats = document.getElementById("topicStats");
+        const total = Number(data.total || 0);
+        const loaded = document.getElementById("list").children.length;
+        stats.innerHTML = `
+            <div><strong>${total}</strong><span>活跃专题</span></div>
+            <div><strong>${loaded}</strong><span>当前展示</span></div>
+            <div><strong>${fmtShortDate(new Date().toISOString())}</strong><span>今日日期</span></div>
+        `;
+        stats.style.display = "grid";
     }
 
     async function loadTopics(page = 1) {
@@ -219,6 +273,7 @@
             for (const t of items) {
                 list.appendChild(renderTopicCard(t));
             }
+            renderStats(data);
             
             currentPage = page;
 

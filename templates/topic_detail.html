@@ -41,6 +41,43 @@
         </div>
     </div>
 
+    <div id="trendCard" class="card hidden">
+        <div class="card-head">
+            <div>
+                <div class="card-title">专题趋势仪表盘</div>
+                <div id="trendHint" class="trend-hint"></div>
+            </div>
+            <button id="refreshTrendBtn" class="btn-mini" type="button" onclick="loadTopicTrends(true)">刷新趋势</button>
+        </div>
+        <div id="trendMetrics" class="trend-metrics"></div>
+        <div class="trend-grid">
+            <div class="chart-card trend-chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">热度与报道量</span>
+                </div>
+                <div id="topicTrendHeat" class="chart-container"></div>
+            </div>
+            <div class="chart-card trend-chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">情绪变化</span>
+                </div>
+                <div id="topicTrendSentiment" class="chart-container"></div>
+            </div>
+            <div class="chart-card trend-chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">来源演变</span>
+                </div>
+                <div id="topicTrendSource" class="chart-container"></div>
+            </div>
+            <div class="chart-card trend-chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">关键词演变</span>
+                </div>
+                <div id="topicTrendKeyword" class="chart-container"></div>
+            </div>
+        </div>
+    </div>
+
     <div id="analysisCard" class="card hidden">
         <div class="card-title">专题多维分析</div>
         <div class="analysis-section">
@@ -119,6 +156,11 @@
     let chartCorrelation = null;
     let chartFreqTrend = null;
     let chartSentimentTrend = null;
+    let chartTrendHeat = null;
+    let chartTrendSentiment = null;
+    let chartTrendSource = null;
+    let chartTrendKeyword = null;
+    let topicTrendLoaded = false;
 
     function fmtTime(iso) {
         if (!iso) return "-";
@@ -328,8 +370,10 @@
 
             header.classList.remove("hidden");
             grid.classList.remove("hidden");
+            document.getElementById("trendCard").classList.remove("hidden");
             analysisCard.classList.remove("hidden");
             loading.style.display = "none"; // 确保加载完成后隐藏loading
+            await loadTopicTrends(false);
             await loadTopicAnalysis(topic, news);
         } catch (e) {
             error.classList.remove("hidden");
@@ -505,6 +549,117 @@
         });
     }
 
+    function renderTrendMetrics(metrics) {
+        const el = document.getElementById("trendMetrics");
+        const items = [
+            ["相关新闻", metrics.news_count || 0],
+            ["时间轴节点", metrics.timeline_count || 0],
+            ["累计热度", Number(metrics.total_heat || 0).toFixed(1)],
+            ["平均情绪", Number(metrics.avg_sentiment || 0).toFixed(1)],
+            ["媒体来源", metrics.source_count || 0],
+            ["峰值日期", metrics.peak_day || "-"],
+        ];
+        el.innerHTML = items.map(([label, value]) => `
+            <div class="trend-metric">
+                <div class="trend-metric-value">${value}</div>
+                <div class="trend-metric-label">${label}</div>
+            </div>
+        `).join("");
+    }
+
+    function ensureTrendChart(current, id) {
+        if (current) current.dispose();
+        const container = document.getElementById(id);
+        container.innerHTML = "";
+        return echarts.init(container);
+    }
+
+    function renderTrendHeatChart(data) {
+        chartTrendHeat = ensureTrendChart(chartTrendHeat, "topicTrendHeat");
+        const dates = data.dates || [];
+        chartTrendHeat.setOption({
+            tooltip: { trigger: "axis" },
+            legend: { top: 0 },
+            grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+            xAxis: { type: "category", data: dates, axisLabel: { rotate: isMobileScreen() ? 45 : 0 } },
+            yAxis: [
+                { type: "value", name: "热度" },
+                { type: "value", name: "数量" }
+            ],
+            series: [
+                { name: "热度", type: "line", smooth: true, areaStyle: {}, data: data.series?.heat || [] },
+                { name: "报道量", type: "bar", yAxisIndex: 1, data: data.series?.news_count || [] }
+            ]
+        });
+    }
+
+    function renderTrendSentimentChart(data) {
+        chartTrendSentiment = ensureTrendChart(chartTrendSentiment, "topicTrendSentiment");
+        chartTrendSentiment.setOption({
+            tooltip: { trigger: "axis" },
+            legend: { top: 0 },
+            grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+            xAxis: { type: "category", data: data.dates || [], axisLabel: { rotate: isMobileScreen() ? 45 : 0 } },
+            yAxis: [
+                { type: "value", name: "数量" },
+                { type: "value", name: "分值", min: 0, max: 100 }
+            ],
+            series: [
+                { name: "正面", type: "bar", stack: "sentiment", data: data.series?.positive || [] },
+                { name: "中立", type: "bar", stack: "sentiment", data: data.series?.neutral || [] },
+                { name: "负面", type: "bar", stack: "sentiment", data: data.series?.negative || [] },
+                { name: "平均情绪", type: "line", yAxisIndex: 1, smooth: true, data: data.series?.avg_sentiment || [] }
+            ]
+        });
+    }
+
+    function renderTrendLineChart(data, id, current, seriesKey) {
+        const chart = ensureTrendChart(current, id);
+        const series = data.series?.[seriesKey] || [];
+        if (!series.length) {
+            chart.clear();
+            document.getElementById(id).innerHTML = '<div class="analysis-empty">暂无数据</div>';
+            return chart;
+        }
+        chart.setOption({
+            tooltip: { trigger: "axis" },
+            legend: { type: "scroll", top: 0 },
+            grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+            xAxis: { type: "category", data: data.dates || [], axisLabel: { rotate: isMobileScreen() ? 45 : 0 } },
+            yAxis: { type: "value" },
+            series
+        });
+        return chart;
+    }
+
+    async function loadTopicTrends(force) {
+        if (topicTrendLoaded && !force) return;
+        const btn = document.getElementById("refreshTrendBtn");
+        const hint = document.getElementById("trendHint");
+        btn.disabled = true;
+        btn.textContent = "加载中...";
+        hint.textContent = "正在聚合专题相关新闻趋势";
+        try {
+            const res = await fetch(`/api/topics/${TOPIC_ID}/trends`, { method: "GET", cache: "no-store" });
+            if (!res.ok) throw new Error("请求失败");
+            const data = await res.json();
+            renderTrendMetrics(data.metrics || {});
+            renderTrendHeatChart(data);
+            renderTrendSentimentChart(data);
+            chartTrendSource = renderTrendLineChart(data, "topicTrendSource", chartTrendSource, "source");
+            chartTrendKeyword = renderTrendLineChart(data, "topicTrendKeyword", chartTrendKeyword, "keyword");
+            const metric = data.metrics || {};
+            hint.textContent = `覆盖 ${data.dates?.length || 0} 天，峰值日期 ${metric.peak_day || "-"}`;
+            topicTrendLoaded = true;
+        } catch (e) {
+            document.getElementById("trendMetrics").innerHTML = '<div class="analysis-empty">趋势数据加载失败</div>';
+            hint.textContent = "趋势数据加载失败";
+        } finally {
+            btn.disabled = false;
+            btn.textContent = "刷新趋势";
+        }
+    }
+
     async function loadTopicAnalysis(topic, newsList) {
         const name = (topic.name || "").trim();
         const start = topic.start_time ? topic.start_time.substring(0, 10) : "";
@@ -564,6 +719,10 @@
         if (chartCorrelation) chartCorrelation.resize();
         if (chartFreqTrend) chartFreqTrend.resize();
         if (chartSentimentTrend) chartSentimentTrend.resize();
+        if (chartTrendHeat) chartTrendHeat.resize();
+        if (chartTrendSentiment) chartTrendSentiment.resize();
+        if (chartTrendSource) chartTrendSource.resize();
+        if (chartTrendKeyword) chartTrendKeyword.resize();
     });
 
     loadDetail();

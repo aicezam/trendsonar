@@ -16,13 +16,14 @@ import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from PIL import Image, ImageDraw, ImageFont
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from app.core.database import get_db
 from app.core.logger import logger
 from app.models.news import News
+from app.models.topic import Topic, TopicTimelineItem
 from app.services.ai_service import ai_service
 from app.services.crawler_service import crawler_service
 from app.utils.news_query import build_news_query_filters, serialize_news_item
@@ -69,6 +70,26 @@ def _set_filter_cache(key: str, value: list[str]) -> list[str]:
 
     _FILTER_CACHE[key] = {"created_at": perf_time.monotonic(), "value": value}
     return value
+
+
+def _normalize_source_item(source: dict[str, Any]) -> dict[str, Any]:
+    """
+    输入:
+    - `source`: 聚合来源中的原始字典
+
+    输出:
+    - 面向详情页展示的来源对象
+
+    作用:
+    - 兼容历史来源字段差异，避免前端反复判断 name/title/url/id。
+    """
+
+    return {
+        "id": source.get("id"),
+        "name": source.get("name") or source.get("source") or "未知来源",
+        "title": source.get("title") or "",
+        "url": source.get("url") or "",
+    }
 
 
 @router.get("/sources")
@@ -295,6 +316,141 @@ async def get_top_news(
     result = await db.execute(stmt.limit(limit))
     data = [serialize_news_item(n) for n in result.scalars().all()]
     return {"data": data, "limit": limit}
+
+
+@router.get("/news/{news_id}")
+async def get_news_detail(news_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    输入:
+    - `news_id`: 新闻 ID
+    - `db`: 数据库会话
+
+    输出:
+    - 新闻详情、关联报道、相似新闻、相关专题和内容状态
+
+    作用:
+    - 为首页新闻详情弹层提供可复核的完整上下文。
+    """
+
+    news = await db.get(
+        News,
+        news_id,
+        options=[defer(News.content), defer(News.embedding)],
+    )
+    if not news:
+        raise HTTPException(status_code=404, detail="新闻不存在")
+
+    related_sources = [_normalize_source_item(s) for s in (news.sources or []) if isinstance(s, dict)]
+    if not any(s.get("url") == news.url for s in related_sources):
+        related_sources.insert(
+            0,
+            {
+                "id": news.id,
+                "name": news.source or "主报道",
+                "title": news.title or "",
+                "url": news.url or "",
+            },
+        )
+
+    similar_items = []
+    keyword_conditions = []
+    for kw in (news.keywords or [])[:6]:
+        if isinstance(kw, str) and kw.strip():
+            keyword_conditions.append(News.title.ilike(f"%{kw.strip()}%"))
+
+    if keyword_conditions:
+        start = (news.publish_date or datetime.now()) - timedelta(days=10)
+        end = (news.publish_date or datetime.now()) + timedelta(days=10)
+        stmt = (
+            select(News)
+            .options(defer(News.content), defer(News.embedding))
+            .where(
+                News.id != news_id,
+                News.publish_date >= start,
+                News.publish_date <= end,
+                or_(*keyword_conditions),
+            )
+            .order_by(desc(News.heat_score), desc(News.publish_date))
+            .limit(8)
+        )
+        similar_items = [serialize_news_item(item) for item in (await db.execute(stmt)).scalars().all()]
+
+    if not similar_items:
+        start = (news.publish_date or datetime.now()) - timedelta(days=3)
+        end = (news.publish_date or datetime.now()) + timedelta(days=3)
+        stmt = (
+            select(News)
+            .options(defer(News.content), defer(News.embedding))
+            .where(
+                News.id != news_id,
+                News.category == news.category,
+                News.publish_date >= start,
+                News.publish_date <= end,
+            )
+            .order_by(desc(News.heat_score), desc(News.publish_date))
+            .limit(6)
+        )
+        similar_items = [serialize_news_item(item) for item in (await db.execute(stmt)).scalars().all()]
+
+    topic_rows = (
+        await db.execute(
+            select(Topic, TopicTimelineItem)
+            .join(TopicTimelineItem, TopicTimelineItem.topic_id == Topic.id)
+            .where(
+                Topic.status == "active",
+                or_(TopicTimelineItem.news_id == news_id, TopicTimelineItem.sources.is_not(None)),
+            )
+            .order_by(desc(Topic.updated_time))
+            .limit(5000)
+        )
+    ).all()
+
+    topic_map: dict[int, dict[str, Any]] = {}
+    for topic, item in topic_rows:
+        matched = item.news_id == news_id
+        if not matched and item.sources:
+            for source in item.sources:
+                if not isinstance(source, dict) or not source.get("id"):
+                    continue
+                try:
+                    matched = int(source["id"]) == news_id
+                except (TypeError, ValueError):
+                    matched = False
+                if matched:
+                    break
+        if not matched:
+            continue
+        if topic.id in topic_map:
+            continue
+        topic_map[topic.id] = {
+            "id": topic.id,
+            "name": topic.name,
+            "summary": topic.summary,
+            "heat_score": float(topic.heat_score or 0.0),
+            "updated_time": topic.updated_time.isoformat() if topic.updated_time else None,
+            "matched_timeline": {
+                "id": item.id,
+                "time": item.event_time.isoformat() if item.event_time else None,
+                "content": item.content,
+            },
+        }
+
+    return {
+        "news": {
+            **serialize_news_item(news),
+            "is_ai_summary": bool(news.is_ai_summary),
+            "crawled_at": news.crawled_at.isoformat() if news.crawled_at else None,
+            "keywords": news.keywords or [],
+            "entities": news.entities or [],
+        },
+        "related_sources": related_sources,
+        "similar_news": similar_items,
+        "topics": list(topic_map.values()),
+        "content_status": {
+            "has_summary": bool(news.summary),
+            "related_source_count": len(related_sources),
+        },
+    }
 
 
 @router.post("/generate_summary/{news_id}")

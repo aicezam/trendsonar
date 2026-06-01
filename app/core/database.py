@@ -48,9 +48,14 @@ def get_engine() -> AsyncEngine:
         @event.listens_for(_engine.sync_engine, "connect")
         def set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
+            try:
+                cursor.execute("PRAGMA busy_timeout=5000")
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+            except Exception as e:
+                logger.warning(f"⚠️ SQLite PRAGMA 初始化失败，继续使用当前连接模式: {e}")
+            finally:
+                cursor.close()
 
     return _engine
 

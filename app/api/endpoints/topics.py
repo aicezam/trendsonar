@@ -5,6 +5,8 @@
 - `get_topic_detail`: 获取专题详情
 """
 
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta
 from typing import Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
@@ -27,6 +29,37 @@ class TopicCreate(BaseModel):
 
 class TopicUpdate(BaseModel):
     name: str
+
+
+def _collect_timeline_news_ids(items: List[TopicTimelineItem]) -> set[int]:
+    """
+    输入:
+    - `items`: 专题时间轴条目
+
+    输出:
+    - 时间轴关联到的新闻 ID 集合
+
+    作用:
+    - 兼容旧字段 news_id 和新字段 sources，供详情和趋势接口复用。
+    """
+
+    news_ids: set[int] = set()
+    for item in items:
+        if item.news_id:
+            news_ids.add(item.news_id)
+        if item.sources:
+            for source in item.sources:
+                if isinstance(source, dict) and source.get("id"):
+                    try:
+                        news_ids.add(int(source["id"]))
+                    except (TypeError, ValueError):
+                        continue
+    return news_ids
+
+
+def _date_range(start: datetime, end: datetime) -> list[str]:
+    days = max(1, min((end.date() - start.date()).days + 1, 120))
+    return [(start.date() + timedelta(days=i)).isoformat() for i in range(days)]
 
 @router.post("/topics/manual_create")
 async def manual_create_topic(
@@ -170,14 +203,7 @@ async def get_topic_detail(
     items = (await db.execute(items_stmt)).scalars().all()
 
     # 收集所有相关的新闻 ID，包括旧的 news_id 和新的 sources 字段
-    news_ids = set()
-    for i in items:
-        if i.news_id:
-            news_ids.add(i.news_id)
-        if i.sources:
-            for s in i.sources:
-                if isinstance(s, dict) and s.get("id"):
-                     news_ids.add(s["id"])
+    news_ids = _collect_timeline_news_ids(items)
 
     news_cards: List[Dict] = []
     if news_ids:
@@ -231,6 +257,169 @@ async def get_topic_detail(
         },
         "timeline": timeline,
         "news": news_cards,
+    }
+
+
+@router.get("/topics/{topic_id}/trends")
+async def get_topic_trends(topic_id: int, db: AsyncSession = Depends(get_db)) -> Dict:
+    """
+    输入:
+    - `topic_id`: 专题 ID
+
+    输出:
+    - 专题趋势仪表盘数据
+
+    作用:
+    - 聚合专题相关新闻的热度、数量、情感、来源和关键词变化。
+    """
+
+    topic = (await db.execute(select(Topic).where(Topic.id == topic_id))).scalar_one_or_none()
+    if not topic:
+        raise HTTPException(status_code=404, detail="专题不存在")
+
+    timeline_items = (
+        await db.execute(
+            select(TopicTimelineItem)
+            .where(TopicTimelineItem.topic_id == topic_id)
+            .order_by(asc(TopicTimelineItem.event_time))
+            .limit(500)
+        )
+    ).scalars().all()
+
+    news_ids = _collect_timeline_news_ids(timeline_items)
+    news_list: List[News] = []
+    if news_ids:
+        news_list = (
+            await db.execute(select(News).where(News.id.in_(list(news_ids))).order_by(asc(News.publish_date)))
+        ).scalars().all()
+
+    if news_list:
+        min_time = min((n.publish_date for n in news_list if n.publish_date), default=topic.start_time or datetime.now())
+        max_time = max((n.publish_date for n in news_list if n.publish_date), default=topic.updated_time or datetime.now())
+    else:
+        min_time = topic.start_time or datetime.now()
+        max_time = topic.updated_time or min_time
+
+    labels = _date_range(min_time, max_time)
+    daily = {
+        label: {
+            "news_count": 0,
+            "heat": 0.0,
+            "sentiment_total": 0.0,
+            "sentiment_count": 0,
+            "positive": 0,
+            "neutral": 0,
+            "negative": 0,
+        }
+        for label in labels
+    }
+
+    source_counter: Counter[str] = Counter()
+    keyword_counter: Counter[str] = Counter()
+    source_daily: dict[str, Counter[str]] = defaultdict(Counter)
+    keyword_daily: dict[str, Counter[str]] = defaultdict(Counter)
+
+    for item in news_list:
+        if not item.publish_date:
+            continue
+        day = item.publish_date.date().isoformat()
+        if day not in daily:
+            daily[day] = {
+                "news_count": 0,
+                "heat": 0.0,
+                "sentiment_total": 0.0,
+                "sentiment_count": 0,
+                "positive": 0,
+                "neutral": 0,
+                "negative": 0,
+            }
+            labels.append(day)
+        bucket = daily[day]
+        bucket["news_count"] += 1
+        bucket["heat"] += float(item.heat_score or 0.0)
+        if item.sentiment_score is not None:
+            bucket["sentiment_total"] += float(item.sentiment_score or 0.0)
+            bucket["sentiment_count"] += 1
+
+        label = (item.sentiment_label or "中立").strip()
+        if label == "正面":
+            bucket["positive"] += 1
+        elif label == "负面":
+            bucket["negative"] += 1
+        else:
+            bucket["neutral"] += 1
+
+        source = item.source or "未知来源"
+        source_counter[source] += 1
+        source_daily[source][day] += 1
+
+        for kw in (item.keywords or []):
+            if isinstance(kw, str) and kw.strip():
+                key = kw.strip()
+                keyword_counter[key] += 1
+                keyword_daily[key][day] += 1
+
+    labels = sorted(set(labels))
+    avg_sentiment = []
+    for label in labels:
+        bucket = daily[label]
+        if bucket["sentiment_count"]:
+            avg_sentiment.append(round(bucket["sentiment_total"] / bucket["sentiment_count"], 2))
+        else:
+            avg_sentiment.append(None)
+
+    top_sources = source_counter.most_common(8)
+    top_keywords = keyword_counter.most_common(8)
+
+    source_series = [
+        {"name": name, "type": "line", "smooth": True, "data": [source_daily[name].get(label, 0) for label in labels]}
+        for name, _ in top_sources[:5]
+    ]
+    keyword_series = [
+        {"name": name, "type": "line", "smooth": True, "data": [keyword_daily[name].get(label, 0) for label in labels]}
+        for name, _ in top_keywords[:5]
+    ]
+
+    peak_day = None
+    if labels:
+        peak_day = max(labels, key=lambda label: (daily[label]["heat"], daily[label]["news_count"]))
+
+    return {
+        "topic": {
+            "id": topic.id,
+            "name": topic.name,
+            "heat_score": float(topic.heat_score or 0.0),
+            "start_time": topic.start_time.isoformat() if topic.start_time else None,
+            "updated_time": topic.updated_time.isoformat() if topic.updated_time else None,
+        },
+        "metrics": {
+            "news_count": len(news_list),
+            "timeline_count": len(timeline_items),
+            "source_count": len(source_counter),
+            "keyword_count": len(keyword_counter),
+            "total_heat": round(sum(float(n.heat_score or 0.0) for n in news_list), 2),
+            "avg_sentiment": round(
+                sum(float(n.sentiment_score or 0.0) for n in news_list if n.sentiment_score is not None)
+                / max(1, len([n for n in news_list if n.sentiment_score is not None])),
+                2,
+            ),
+            "peak_day": peak_day,
+        },
+        "dates": labels,
+        "series": {
+            "news_count": [daily[label]["news_count"] for label in labels],
+            "heat": [round(daily[label]["heat"], 2) for label in labels],
+            "avg_sentiment": avg_sentiment,
+            "positive": [daily[label]["positive"] for label in labels],
+            "neutral": [daily[label]["neutral"] for label in labels],
+            "negative": [daily[label]["negative"] for label in labels],
+            "source": source_series,
+            "keyword": keyword_series,
+        },
+        "rankings": {
+            "sources": [{"name": name, "value": count} for name, count in top_sources],
+            "keywords": [{"name": name, "value": count} for name, count in top_keywords],
+        },
     }
 
 
