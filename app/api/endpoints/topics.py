@@ -6,17 +6,20 @@
 """
 
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta
-from typing import Dict, List
+from datetime import datetime, time, timedelta
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy import desc, select, asc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AIConfigurationError
+from app.core.logger import logger
 from app.core.database import get_db
 from app.api.deps import verify_admin_access
 from app.models.news import News
 from app.models.topic import Topic, TopicTimelineItem
+from app.services.ai_service import ai_service
 from app.services.topic_service import topic_service
 
 router = APIRouter(prefix="/api", tags=["topics"])
@@ -60,6 +63,78 @@ def _collect_timeline_news_ids(items: List[TopicTimelineItem]) -> set[int]:
 def _date_range(start: datetime, end: datetime) -> list[str]:
     days = max(1, min((end.date() - start.date()).days + 1, 120))
     return [(start.date() + timedelta(days=i)).isoformat() for i in range(days)]
+
+
+def _apply_topic_filters(
+    stmt,
+    *,
+    date: str = "all",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    min_heat: Optional[float] = 30,
+):
+    now = datetime.now()
+    if start_date or end_date:
+        try:
+            if start_date:
+                s_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+                stmt = stmt.where(Topic.updated_time >= datetime.combine(s_date, time.min))
+            if end_date:
+                e_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+                stmt = stmt.where(Topic.updated_time <= datetime.combine(e_date, time.max))
+        except ValueError:
+            pass
+    else:
+        try:
+            if date == "today":
+                stmt = stmt.where(Topic.updated_time >= datetime.combine(now.date(), time.min))
+            elif date == "24h":
+                stmt = stmt.where(Topic.updated_time >= now - timedelta(hours=24))
+            elif date == "3d":
+                stmt = stmt.where(Topic.updated_time >= now - timedelta(days=3))
+            elif date == "7d":
+                stmt = stmt.where(Topic.updated_time >= now - timedelta(days=7))
+            elif date == "week":
+                start = now - timedelta(days=now.weekday())
+                stmt = stmt.where(Topic.updated_time >= datetime.combine(start.date(), time.min))
+            elif date == "month":
+                stmt = stmt.where(Topic.updated_time >= datetime.combine(now.replace(day=1).date(), time.min))
+            elif date == "year":
+                stmt = stmt.where(Topic.updated_time >= datetime(now.year, 1, 1))
+            elif date == "all":
+                pass
+            elif date:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+                stmt = stmt.where(
+                    Topic.updated_time >= datetime.combine(target_date, time.min),
+                    Topic.updated_time <= datetime.combine(target_date, time.max),
+                )
+        except ValueError:
+            pass
+
+    if min_heat is not None:
+        stmt = stmt.where(Topic.heat_score >= min_heat)
+
+    return stmt
+
+
+def _order_topics(stmt, sort_by: str):
+    if sort_by == "heat":
+        return stmt.order_by(desc(Topic.heat_score), desc(Topic.updated_time))
+    if sort_by == "start":
+        return stmt.order_by(desc(Topic.start_time), desc(Topic.updated_time))
+    return stmt.order_by(desc(Topic.updated_time), desc(Topic.heat_score))
+
+
+def _serialize_topic(t: Topic) -> Dict:
+    return {
+        "id": t.id,
+        "name": t.name,
+        "summary": t.summary,
+        "start_time": t.start_time.isoformat() if t.start_time else None,
+        "updated_time": t.updated_time.isoformat() if t.updated_time else None,
+        "heat_score": float(t.heat_score or 0.0),
+    }
 
 @router.post("/topics/manual_create")
 async def manual_create_topic(
@@ -138,28 +213,70 @@ async def update_topic(
 
 @router.get("/topics/list")
 async def get_topics_list(
+    q: str = "",
     page: int = 1,
     size: int = 20,
+    date: str = "all",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    sort_by: str = "updated",
+    min_heat: Optional[float] = 30,
     db: AsyncSession = Depends(get_db)
 ) -> Dict:
-    stmt = select(Topic).where(Topic.status == "active").order_by(desc(Topic.updated_time))
-    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
-    
-    items = (await db.execute(stmt.offset((page - 1) * size).limit(size))).scalars().all()
+    page = max(1, page)
+    size = max(1, min(size, 50))
+    offset = (page - 1) * size
+    query_text = (q or "").strip()
+
+    stmt = _apply_topic_filters(
+        select(Topic).where(Topic.status == "active"),
+        date=date,
+        start_date=start_date,
+        end_date=end_date,
+        min_heat=min_heat,
+    )
+
+    if query_text:
+        candidate_stmt = _order_topics(stmt, sort_by).limit(1000)
+        candidates = (await db.execute(candidate_stmt)).scalars().all()
+
+        try:
+            q_emb_list = await ai_service.get_embeddings([query_text])
+            q_vec = q_emb_list[0] if q_emb_list and q_emb_list[0] else []
+        except AIConfigurationError as e:
+            logger.warning(f"/api/topics/list 语义搜索不可用，退回模糊搜索: {e}")
+            q_vec = []
+
+        scored_topics = []
+        lowered_q = query_text.lower()
+        for topic in candidates:
+            score = 0.0
+            haystack = f"{topic.name or ''} {topic.summary or ''}".lower()
+            if lowered_q in haystack:
+                score += 0.6
+            if q_vec and topic.embedding and len(topic.embedding) == len(q_vec):
+                score += topic_service._cosine_similarity(q_vec, list(topic.embedding))
+            if score > 0.2:
+                scored_topics.append((score, topic))
+
+        scored_topics.sort(
+            key=lambda row: (
+                row[0],
+                float(row[1].heat_score or 0.0),
+                row[1].updated_time or datetime.min,
+            ),
+            reverse=True,
+        )
+        total = len(scored_topics)
+        items = [topic for _, topic in scored_topics[offset : offset + size]]
+    else:
+        ordered_stmt = _order_topics(stmt, sort_by)
+        total = (await db.execute(select(func.count()).select_from(ordered_stmt.subquery()))).scalar_one()
+        items = (await db.execute(ordered_stmt.offset(offset).limit(size))).scalars().all()
     
     return {
         "total": total,
-        "items": [
-            {
-                "id": t.id,
-                "name": t.name,
-                "summary": t.summary,
-                "start_time": t.start_time.isoformat() if t.start_time else None,
-                "updated_time": t.updated_time.isoformat() if t.updated_time else None,
-                "heat_score": float(t.heat_score or 0.0),
-            }
-            for t in items
-        ],
+        "items": [_serialize_topic(t) for t in items],
         "page": page,
         "size": size
     }

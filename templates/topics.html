@@ -5,11 +5,69 @@
 
 {% block content %}
 <div class="app-container page-wrap">
-    <div class="topics-hero">
-        <div>
-            <div class="topics-kicker">Topic Radar</div>
-            <div class="page-title">专题追踪</div>
-            <div class="hint">自动沉淀热点事件、时间轴和趋势分析，适合持续观察舆情发酵。</div>
+    <div id="mobileTopicFilter" class="topics-filter-overlay">
+        <div class="topics-filter-panel">
+            <div class="topics-filter-head">
+                <h3>筛选选项</h3>
+                <button id="closeMobileFilter" class="topics-filter-close" type="button">&times;</button>
+            </div>
+            <div class="topics-filter-section">
+                <div class="topics-filter-label">时间范围</div>
+                <div id="mobileTimeOptions" class="topics-filter-grid"></div>
+                <div id="mobileDateRange" class="topics-date-range" style="display:none;">
+                    <input type="date" id="mobileStartDate">
+                    <span>-</span>
+                    <input type="date" id="mobileEndDate">
+                </div>
+            </div>
+            <div class="topics-filter-section">
+                <div class="topics-filter-label">最低热度</div>
+                <select id="mobileHeatSelect" class="topics-select">
+                    <option value="10">10+</option>
+                    <option value="20">20+</option>
+                    <option value="30">30+</option>
+                    <option value="50">50+</option>
+                    <option value="100">100+</option>
+                </select>
+            </div>
+            <div class="topics-filter-section">
+                <div class="topics-filter-label">排序方式</div>
+                <div class="topics-segmented">
+                    <button class="topics-filter-btn" data-sort="updated" id="mobileSortUpdated" type="button">按更新</button>
+                    <button class="topics-filter-btn" data-sort="heat" id="mobileSortHeat" type="button">按热度</button>
+                    <button class="topics-filter-btn" data-sort="start" id="mobileSortStart" type="button">按开始</button>
+                </div>
+            </div>
+            <button id="applyMobileFilter" class="topics-primary-btn" type="button">确认筛选</button>
+        </div>
+    </div>
+    <div class="topics-mobile-toolbar">
+        <div class="topics-search-group">
+            <input type="text" id="mobileSearchInput" placeholder="搜索专题 (支持语义)...">
+            <button id="mobileSearchBtn" type="button">搜索</button>
+        </div>
+        <button id="openMobileFilter" class="topics-more-btn" type="button">筛选</button>
+    </div>
+    <div class="topics-toolbar">
+        <div class="topics-segmented">
+            <button class="topics-filter-btn" data-sort="updated" id="desktopSortUpdated" type="button">按更新</button>
+            <button class="topics-filter-btn" data-sort="heat" id="desktopSortHeat" type="button">按热度</button>
+            <button class="topics-filter-btn" data-sort="start" id="desktopSortStart" type="button">按开始</button>
+        </div>
+        <select id="desktopTimeSelect" class="topics-select"></select>
+        <div id="desktopDateRange" class="topics-date-range" style="display:none;">
+            <input type="date" id="desktopStartDate">
+            <input type="date" id="desktopEndDate">
+        </div>
+        <select id="desktopHeatSelect" class="topics-select">
+            <option value="10">10+</option>
+            <option value="20">20+</option>
+            <option value="30">30+</option>
+            <option value="50">50+</option>
+            <option value="100">100+</option>
+        </select>
+        <div class="topics-search-box">
+            <input type="text" id="desktopSearchInput" placeholder="搜索专题 (支持模糊搜索与语义搜索)...">
         </div>
         <button id="addTopicBtn" class="topics-add-btn" style="display:none;">+ 手动创建专题</button>
     </div>
@@ -25,6 +83,54 @@
 {% block scripts %}
 <script>
     const IS_ADMIN = {{ "true" if authed else "false" }};
+    const TIME_OPTIONS = [
+        { label: "全部时间", value: "all" },
+        { label: "今日", value: "today" },
+        { label: "24小时", value: "24h" },
+        { label: "3天内", value: "3d" },
+        { label: "7天内", value: "7d" },
+        { label: "本周", value: "week" },
+        { label: "本月", value: "month" },
+        { label: "今年", value: "year" },
+        { label: "其他", value: "other" }
+    ];
+    const state = {
+        filter: {
+            q: "",
+            sortBy: "updated",
+            dateOption: "all",
+            startDate: "",
+            endDate: "",
+            minHeat: "30"
+        }
+    };
+    const els = {
+        mobileFilter: document.getElementById("mobileTopicFilter"),
+        openMobileFilter: document.getElementById("openMobileFilter"),
+        closeMobileFilter: document.getElementById("closeMobileFilter"),
+        applyMobileFilter: document.getElementById("applyMobileFilter"),
+        mobileSearchInput: document.getElementById("mobileSearchInput"),
+        mobileSearchBtn: document.getElementById("mobileSearchBtn"),
+        desktopSearchInput: document.getElementById("desktopSearchInput"),
+        mobileTimeOptions: document.getElementById("mobileTimeOptions"),
+        desktopTimeSelect: document.getElementById("desktopTimeSelect"),
+        mobileDateRange: document.getElementById("mobileDateRange"),
+        desktopDateRange: document.getElementById("desktopDateRange"),
+        mobileStartDate: document.getElementById("mobileStartDate"),
+        mobileEndDate: document.getElementById("mobileEndDate"),
+        desktopStartDate: document.getElementById("desktopStartDate"),
+        desktopEndDate: document.getElementById("desktopEndDate"),
+        mobileHeatSelect: document.getElementById("mobileHeatSelect"),
+        desktopHeatSelect: document.getElementById("desktopHeatSelect"),
+        sortBtns: {
+            mobileUpdated: document.getElementById("mobileSortUpdated"),
+            mobileHeat: document.getElementById("mobileSortHeat"),
+            mobileStart: document.getElementById("mobileSortStart"),
+            desktopUpdated: document.getElementById("desktopSortUpdated"),
+            desktopHeat: document.getElementById("desktopSortHeat"),
+            desktopStart: document.getElementById("desktopSortStart")
+        }
+    };
 
     function fmtTime(iso) {
         if (!iso) return "-";
@@ -70,6 +176,127 @@
         }
         for (const c of children) node.appendChild(c);
         return node;
+    }
+
+    function isMobile() {
+        return window.innerWidth <= 720;
+    }
+
+    function getEffectiveDate() {
+        return state.filter.dateOption === "other" ? "" : state.filter.dateOption;
+    }
+
+    function syncFilterUI() {
+        const showRange = state.filter.dateOption === "other";
+        els.mobileDateRange.style.display = showRange ? "flex" : "none";
+        els.desktopDateRange.style.display = showRange ? "flex" : "none";
+
+        for (const btn of Array.from(els.mobileTimeOptions.children)) {
+            btn.classList.toggle("active", btn.dataset.val === state.filter.dateOption);
+        }
+        els.desktopTimeSelect.value = state.filter.dateOption;
+
+        els.mobileStartDate.value = state.filter.startDate;
+        els.mobileEndDate.value = state.filter.endDate;
+        els.desktopStartDate.value = state.filter.startDate;
+        els.desktopEndDate.value = state.filter.endDate;
+        els.mobileHeatSelect.value = state.filter.minHeat || "30";
+        els.desktopHeatSelect.value = state.filter.minHeat || "30";
+
+        Object.values(els.sortBtns).forEach(btn => {
+            btn.classList.toggle("active", btn.dataset.sort === state.filter.sortBy);
+        });
+    }
+
+    function setTimeOption(value) {
+        state.filter.dateOption = value;
+        if (value !== "other") {
+            state.filter.startDate = "";
+            state.filter.endDate = "";
+        }
+        syncFilterUI();
+        if (!isMobile() && value !== "other") loadTopics(1);
+    }
+
+    function setSort(value) {
+        state.filter.sortBy = value;
+        syncFilterUI();
+        if (!isMobile()) loadTopics(1);
+    }
+
+    function renderTimeOptions() {
+        els.mobileTimeOptions.innerHTML = "";
+        TIME_OPTIONS.forEach(opt => {
+            const btn = el("button", {
+                class: "topics-filter-btn",
+                text: opt.label,
+                type: "button",
+                "data-val": opt.value,
+                onClick: () => setTimeOption(opt.value)
+            });
+            els.mobileTimeOptions.appendChild(btn);
+        });
+
+        els.desktopTimeSelect.innerHTML = "";
+        TIME_OPTIONS.forEach(opt => {
+            const item = el("option", { value: opt.value, text: opt.label });
+            els.desktopTimeSelect.appendChild(item);
+        });
+    }
+
+    function bindFilterEvents() {
+        els.openMobileFilter.onclick = () => els.mobileFilter.classList.add("show");
+        els.closeMobileFilter.onclick = () => els.mobileFilter.classList.remove("show");
+        els.mobileFilter.onclick = (e) => {
+            if (e.target === els.mobileFilter) els.mobileFilter.classList.remove("show");
+        };
+
+        const runSearch = (value) => {
+            state.filter.q = (value || "").trim();
+            els.mobileSearchInput.value = state.filter.q;
+            els.desktopSearchInput.value = state.filter.q;
+            loadTopics(1);
+        };
+        const onSearchKey = (e) => {
+            if (e.key === "Enter") runSearch(e.target.value);
+        };
+        els.mobileSearchInput.onkeyup = onSearchKey;
+        els.desktopSearchInput.onkeyup = onSearchKey;
+        els.mobileSearchBtn.onclick = () => runSearch(els.mobileSearchInput.value);
+
+        els.desktopTimeSelect.onchange = (e) => setTimeOption(e.target.value);
+        els.mobileHeatSelect.onchange = (e) => {
+            state.filter.minHeat = e.target.value;
+            els.desktopHeatSelect.value = state.filter.minHeat;
+        };
+        els.desktopHeatSelect.onchange = (e) => {
+            state.filter.minHeat = e.target.value;
+            els.mobileHeatSelect.value = state.filter.minHeat;
+            loadTopics(1);
+        };
+
+        const onDateChange = (e, field) => {
+            state.filter[field] = e.target.value;
+            syncFilterUI();
+            if (!isMobile() && state.filter.dateOption === "other" && state.filter.startDate && state.filter.endDate) {
+                loadTopics(1);
+            }
+        };
+        els.mobileStartDate.onchange = (e) => onDateChange(e, "startDate");
+        els.mobileEndDate.onchange = (e) => onDateChange(e, "endDate");
+        els.desktopStartDate.onchange = (e) => onDateChange(e, "startDate");
+        els.desktopEndDate.onchange = (e) => onDateChange(e, "endDate");
+
+        Object.values(els.sortBtns).forEach(btn => {
+            btn.onclick = () => setSort(btn.dataset.sort);
+        });
+
+        els.applyMobileFilter.onclick = () => {
+            state.filter.q = els.mobileSearchInput.value.trim();
+            els.desktopSearchInput.value = state.filter.q;
+            els.mobileFilter.classList.remove("show");
+            loadTopics(1);
+        };
     }
 
     async function deleteTopic(e, id, name) {
@@ -198,15 +425,11 @@
         card.appendChild(header);
 
         const meta = el("div", { class: "meta" });
-        meta.appendChild(el("span", { class: "tag", text: `开始 ${fmtTime(t.start_time)}` }));
-        meta.appendChild(el("span", { class: "tag", text: `更新 ${fmtTime(t.updated_time)}` }));
+        meta.appendChild(el("span", { class: "topic-time-text", text: `开始 ${fmtTime(t.start_time)}` }));
+        meta.appendChild(el("span", { class: "topic-time-text", text: `更新 ${fmtTime(t.updated_time)}` }));
         card.appendChild(meta);
 
         card.appendChild(el("div", { class: "topic-summary", text: t.summary || "暂无概览，等待更多相关新闻沉淀。" }));
-        const footer = el("div", { class: "topic-card-footer" });
-        footer.appendChild(el("span", { text: "查看时间轴、趋势仪表盘与来源新闻" }));
-        footer.appendChild(el("span", { class: "topic-arrow", text: "→" }));
-        card.appendChild(footer);
         return card;
     }
 
@@ -235,6 +458,7 @@
         if (page === 1) {
             loading.style.display = "block";
             empty.style.display = "none";
+            empty.textContent = "暂无专题。请等待全流程任务运行后自动生成。";
             list.innerHTML = "";
             loadingMore.style.display = "none";
             noMoreData.style.display = "none";
@@ -244,7 +468,19 @@
         }
 
         try {
-            const resp = await fetch(`/api/topics/list?page=${page}&size=${pageSize}`, { method: "GET", cache: "no-store" });
+            const params = new URLSearchParams({
+                page,
+                size: pageSize,
+                q: state.filter.q,
+                sort_by: state.filter.sortBy,
+                date: getEffectiveDate()
+            });
+            params.append("min_heat", state.filter.minHeat || "30");
+            if (state.filter.dateOption === "other") {
+                if (state.filter.startDate) params.append("start_date", state.filter.startDate);
+                if (state.filter.endDate) params.append("end_date", state.filter.endDate);
+            }
+            const resp = await fetch(`/api/topics/list?${params.toString()}`, { method: "GET", cache: "no-store" });
             if (!resp.ok) throw new Error("请求失败");
             const data = await resp.json();
             const items = (data && data.items) || [];
@@ -252,6 +488,10 @@
             if (page === 1) {
                 loading.style.display = "none";
                 if (!items.length) {
+                    renderStats(data);
+                    empty.textContent = state.filter.q || state.filter.minHeat || state.filter.dateOption !== "all"
+                        ? "没有符合条件的专题。"
+                        : "暂无专题。请等待全流程任务运行后自动生成。";
                     empty.style.display = "block";
                     hasMore = false;
                     isLoading = false;
@@ -288,6 +528,10 @@
             isLoading = false;
         }
     }
+
+    renderTimeOptions();
+    bindFilterEvents();
+    syncFilterUI();
 
     // Scroll listener
     window.addEventListener('scroll', () => {

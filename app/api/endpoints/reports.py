@@ -6,18 +6,58 @@
 - `get_report_history`: 获取报表历史
 """
 
+from collections import Counter, defaultdict
+from datetime import datetime
+from itertools import combinations
 from typing import Optional, List
 import hashlib
 import json
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import verify_admin_access
+from app.api.endpoints.news import _semantic_news_search
+from app.core.database import get_db
+from app.models.news import News
 from app.services.report_service import report_service
 from app.services.task_manager import task_manager
+from app.utils.news_query import build_news_query_filters, serialize_news_item
 
 router = APIRouter(prefix="/api/report", tags=["report"])
+
+
+def _valid_report_term(value: str) -> bool:
+    text = (value or "").strip()
+    return bool(text and text.lower() not in {"无内容", "分析失败", "暂无关键词", "其他", "其它", "null", "none"})
+
+
+def _news_terms(news: News, limit: int = 12) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for item in (news.keywords or []) + (news.entities or []):
+        if not isinstance(item, str) or not _valid_report_term(item):
+            continue
+        value = item.strip()
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(value)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def _label_sentiment(label: str) -> str:
+    text = (label or "").strip()
+    if text == "正面":
+        return "positive"
+    if text == "负面":
+        return "negative"
+    return "neutral"
 
 
 @router.get("/recent")
@@ -128,6 +168,117 @@ async def get_report_analysis(
         news_ids=news_ids,
         save_cache=False if nocache else True,
     )
+
+
+@router.get("/term-analysis")
+async def get_report_term_analysis(
+    term: str = Query(..., min_length=1, max_length=80),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    category: Optional[str] = None,
+    region: Optional[str] = None,
+    source: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    query = (term or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="term is required")
+
+    stmt = build_news_query_filters(
+        select(News),
+        date="all",
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+    )
+    scored, total, elapsed_ms = await _semantic_news_search(
+        db,
+        stmt,
+        query,
+        offset=0,
+        limit=30,
+        candidate_limit=2000,
+        min_score=0.2,
+        text_terms=[query],
+    )
+    news_list = [item for _, item in scored]
+
+    related_news = [serialize_news_item(item) for item in news_list[:10]]
+    dates: list[str] = []
+    daily: dict[str, dict[str, float | int]] = defaultdict(lambda: {"heat": 0.0, "count": 0, "sentiment_sum": 0.0, "sentiment_count": 0})
+    sentiment_counts: Counter[str] = Counter()
+    keyword_counter: Counter[str] = Counter()
+    pair_counter: Counter[tuple[str, str]] = Counter()
+
+    for item in news_list:
+        day = (item.publish_date or datetime.now()).date().isoformat()
+        dates.append(day)
+        bucket = daily[day]
+        bucket["count"] = int(bucket["count"]) + 1
+        bucket["heat"] = float(bucket["heat"]) + float(item.heat_score or 0.0)
+        if item.sentiment_score is not None:
+            bucket["sentiment_sum"] = float(bucket["sentiment_sum"]) + float(item.sentiment_score)
+            bucket["sentiment_count"] = int(bucket["sentiment_count"]) + 1
+        sentiment_counts[_label_sentiment(item.sentiment_label)] += 1
+
+        terms = _news_terms(item)
+        for kw in terms:
+            keyword_counter[kw] += 1
+        for left, right in combinations(sorted(set(terms), key=str.lower)[:8], 2):
+            pair_counter[(left, right)] += 1
+
+    labels = sorted(set(dates))
+    trend = {
+        "dates": labels,
+        "heat": [round(float(daily[label]["heat"]), 2) for label in labels],
+        "count": [int(daily[label]["count"]) for label in labels],
+    }
+    sentiment_trend = {
+        "dates": labels,
+        "series": [
+            {
+                "name": "情绪均值",
+                "type": "line",
+                "smooth": True,
+                "data": [
+                    round(float(daily[label]["sentiment_sum"]) / max(1, int(daily[label]["sentiment_count"])), 2)
+                    if int(daily[label]["sentiment_count"]) else None
+                    for label in labels
+                ],
+            }
+        ],
+    }
+
+    top_terms = keyword_counter.most_common(18)
+    nodes = [{"name": name, "value": int(value), "symbolSize": min(58, 16 + int(value) * 4)} for name, value in top_terms]
+    known = {node["name"] for node in nodes}
+    links = [
+        {"source": left, "target": right, "value": int(value)}
+        for (left, right), value in pair_counter.most_common(30)
+        if left in known and right in known
+    ]
+
+    return {
+        "term": query,
+        "summary": {
+            "related_count": total,
+            "returned_count": len(news_list),
+            "total_heat": round(sum(float(item.heat_score or 0.0) for item in news_list), 2),
+            "avg_sentiment": round(
+                sum(float(item.sentiment_score or 0.0) for item in news_list if item.sentiment_score is not None)
+                / max(1, len([item for item in news_list if item.sentiment_score is not None])),
+                2,
+            ),
+            "sentiment_counts": dict(sentiment_counts),
+            "elapsed_ms": round(elapsed_ms, 1),
+        },
+        "related_news": related_news,
+        "trend": trend,
+        "sentiment_trend": sentiment_trend,
+        "cooccurrence": {"nodes": nodes, "links": links},
+    }
 
 
 @router.post("/generate")

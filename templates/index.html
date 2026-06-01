@@ -856,12 +856,14 @@
             const status = data.content_status || {};
             const time = news.time ? new Date(news.time).toLocaleString('zh-CN') : '-';
             const summary = news.summary ? marked.parse(news.summary) : '<div class="detail-empty">暂无摘要，可在新闻卡片中生成摘要。</div>';
-            const similarSection = data.similar_news && data.similar_news.length ? `
-                <div class="detail-section">
-                    <div class="detail-section-title">相似报道</div>
-                    <div class="detail-list">${renderDetailNewsList(data.similar_news, '')}</div>
+            const similarSection = `
+                <div class="detail-section" id="similarNewsSection">
+                    <div class="detail-section-title">可能相似的报道</div>
+                    <div id="similarNewsList" class="detail-list">
+                        <div class="detail-empty">查询中……</div>
+                    </div>
                 </div>
-            ` : '';
+            `;
             const topicSection = data.topics && data.topics.length ? `
                 <div class="detail-section">
                     <div class="detail-section-title">相关专题</div>
@@ -905,10 +907,28 @@
                         <div class="detail-chip-row">${renderDetailTags(news.entities, '暂无实体')}</div>
                     </div>
                 </div>
-                ${similarSection}
                 ${topicSection}
                 ${sourceSection}
+                ${similarSection}
             `;
+        }
+
+        async function loadSimilarNews(id) {
+            const listEl = document.getElementById('similarNewsList');
+            if (!listEl) return;
+            try {
+                const resp = await fetch(`/api/news/${id}/similar`, { method: 'GET', cache: 'no-store' });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                const items = data.data || [];
+                if (!items.length) {
+                    listEl.innerHTML = '<div class="detail-empty">暂无相似报道</div>';
+                    return;
+                }
+                listEl.innerHTML = renderDetailNewsList(items, '暂无相似报道');
+            } catch (e) {
+                listEl.innerHTML = `<div class="detail-empty">相似报道加载失败：${escapeHtml(e.message)}</div>`;
+            }
         }
 
         window.openNewsDetail = async (id) => {
@@ -924,6 +944,7 @@
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
                 renderNewsDetail(data);
+                loadSimilarNews(id);
             } catch (e) {
                 detailEls.body.innerHTML = `<div class="detail-empty">加载失败：${escapeHtml(e.message)}</div>`;
             } finally {

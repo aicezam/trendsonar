@@ -16,14 +16,14 @@ import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from PIL import Image, ImageDraw, ImageFont
-from sqlalchemy import desc, or_, select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from app.core.database import get_db
+from app.core.exceptions import AIConfigurationError
 from app.core.logger import logger
 from app.models.news import News
-from app.models.topic import Topic, TopicTimelineItem
 from app.services.ai_service import ai_service
 from app.services.crawler_service import crawler_service
 from app.utils.news_query import build_news_query_filters, serialize_news_item
@@ -90,6 +90,103 @@ def _normalize_source_item(source: dict[str, Any]) -> dict[str, Any]:
         "title": source.get("title") or "",
         "url": source.get("url") or "",
     }
+
+
+def _normalize_similarity_terms(items: Any, limit: int = 16) -> list[str]:
+    if not isinstance(items, list):
+        return []
+
+    values: list[str] = []
+    seen: set[str] = set()
+    ignored = {"无内容", "分析失败", "暂无关键词", "其他", "其它", "unknown", "none", "null"}
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value.lower() in ignored:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(value)
+        if len(values) >= limit:
+            break
+    return values
+
+
+async def _semantic_news_search(
+    db: AsyncSession,
+    stmt,
+    query_text: str,
+    *,
+    offset: int = 0,
+    limit: int = 20,
+    candidate_limit: int = 2000,
+    min_score: float = 0.2,
+    text_terms: Optional[list[str]] = None,
+):
+    search_start = perf_time.perf_counter()
+    query_text = (query_text or "").strip()
+    if not query_text:
+        return [], 0, 0.0
+
+    candidate_stmt = (
+        stmt.options(defer(News.content))
+        .order_by(desc(News.publish_date), desc(News.heat_score))
+        .limit(candidate_limit)
+    )
+    result = await db.execute(candidate_stmt)
+    candidates = result.scalars().all()
+
+    try:
+        q_emb_list = await ai_service.get_embeddings([query_text])
+        q_vec = np.array(q_emb_list[0]) if q_emb_list and q_emb_list[0] else None
+    except AIConfigurationError as e:
+        logger.warning(f"/api/news 语义搜索不可用，退回文本匹配: {e}")
+        q_vec = None
+
+    norm_q = float(np.linalg.norm(q_vec)) if q_vec is not None else 0.0
+    q_dim = len(q_vec) if q_vec is not None else 0
+    lowered_q = query_text.lower()
+    normalized_terms = []
+    for term in text_terms or [query_text]:
+        value = (term or "").strip().lower()
+        if value and value not in normalized_terms:
+            normalized_terms.append(value)
+
+    scored_news = []
+    for n in candidates:
+        score = 0.0
+        title = (n.title or "").lower()
+        summary = (n.summary or "").lower()
+        item_terms = [
+            t.strip().lower()
+            for t in (n.keywords or []) + (n.entities or [])
+            if isinstance(t, str) and t.strip()
+        ]
+
+        if lowered_q and lowered_q in title:
+            score += 0.5
+        if normalized_terms:
+            title_hits = sum(1 for term in normalized_terms if term in title)
+            summary_hits = sum(1 for term in normalized_terms if term in summary)
+            tag_hits = sum(1 for term in normalized_terms if term in item_terms)
+            score += min(0.5, title_hits * 0.12 + summary_hits * 0.05 + tag_hits * 0.1)
+
+        if q_vec is not None and n.embedding and len(n.embedding) == q_dim:
+            n_vec = np.array(n.embedding)
+            norm_n = np.linalg.norm(n_vec)
+            if norm_q > 0 and norm_n > 0:
+                sim = np.dot(q_vec, n_vec) / (norm_q * norm_n)
+                score += float(sim)
+
+        if score >= min_score:
+            scored_news.append((score, n))
+
+    scored_news.sort(key=lambda x: x[0], reverse=True)
+    elapsed_ms = (perf_time.perf_counter() - search_start) * 1000
+    return scored_news[offset : offset + limit], len(scored_news), elapsed_ms
 
 
 @router.get("/sources")
@@ -218,44 +315,17 @@ async def get_news(
     )
 
     if q:
-        search_start = perf_time.perf_counter()
-        search_candidate_limit = 2000
-        candidate_stmt = (
-            stmt.options(defer(News.content))
-            .order_by(desc(News.publish_date), desc(News.heat_score))
-            .limit(search_candidate_limit)
+        sliced, total, elapsed_ms = await _semantic_news_search(
+            db,
+            stmt,
+            q,
+            offset=offset,
+            limit=page_size,
+            candidate_limit=2000,
+            min_score=0.2,
         )
-        result = await db.execute(candidate_stmt)
-        candidates = result.scalars().all()
-
-        q_emb_list = await ai_service.get_embeddings([q])
-        q_vec = np.array(q_emb_list[0]) if q_emb_list and q_emb_list[0] else None
-        norm_q = float(np.linalg.norm(q_vec)) if q_vec is not None else 0.0
-        q_dim = len(q_vec) if q_vec is not None else 0
-
-        scored_news = []
-        for n in candidates:
-            score = 0.0
-            if n.title and q.lower() in n.title.lower():
-                score += 0.5
-
-            if q_vec is not None and n.embedding and len(n.embedding) == q_dim:
-                n_vec = np.array(n.embedding)
-                norm_n = np.linalg.norm(n_vec)
-                if norm_q > 0 and norm_n > 0:
-                    sim = np.dot(q_vec, n_vec) / (norm_q * norm_n)
-                    score += float(sim)
-
-            if score > 0.2:
-                scored_news.append((score, n))
-
-        scored_news.sort(key=lambda x: x[0], reverse=True)
-        sliced = scored_news[offset : offset + page_size]
-
         data = [serialize_news_item(n) for _, n in sliced]
-        elapsed_ms = (perf_time.perf_counter() - search_start) * 1000
-        logger.info(f"/api/news 搜索完成: q={q}, candidates={len(candidates)}, matched={len(scored_news)}, elapsed={elapsed_ms:.1f}ms")
-
+        logger.info(f"/api/news 搜索完成: q={q}, matched={total}, elapsed={elapsed_ms:.1f}ms")
         return {"data": data, "page": page}
 
     if sort_by == "heat":
@@ -352,89 +422,6 @@ async def get_news_detail(news_id: int, db: AsyncSession = Depends(get_db)):
             },
         )
 
-    similar_items = []
-    keyword_conditions = []
-    for kw in (news.keywords or [])[:6]:
-        if isinstance(kw, str) and kw.strip():
-            keyword_conditions.append(News.title.ilike(f"%{kw.strip()}%"))
-
-    if keyword_conditions:
-        start = (news.publish_date or datetime.now()) - timedelta(days=10)
-        end = (news.publish_date or datetime.now()) + timedelta(days=10)
-        stmt = (
-            select(News)
-            .options(defer(News.content), defer(News.embedding))
-            .where(
-                News.id != news_id,
-                News.publish_date >= start,
-                News.publish_date <= end,
-                or_(*keyword_conditions),
-            )
-            .order_by(desc(News.heat_score), desc(News.publish_date))
-            .limit(8)
-        )
-        similar_items = [serialize_news_item(item) for item in (await db.execute(stmt)).scalars().all()]
-
-    if not similar_items:
-        start = (news.publish_date or datetime.now()) - timedelta(days=3)
-        end = (news.publish_date or datetime.now()) + timedelta(days=3)
-        stmt = (
-            select(News)
-            .options(defer(News.content), defer(News.embedding))
-            .where(
-                News.id != news_id,
-                News.category == news.category,
-                News.publish_date >= start,
-                News.publish_date <= end,
-            )
-            .order_by(desc(News.heat_score), desc(News.publish_date))
-            .limit(6)
-        )
-        similar_items = [serialize_news_item(item) for item in (await db.execute(stmt)).scalars().all()]
-
-    topic_rows = (
-        await db.execute(
-            select(Topic, TopicTimelineItem)
-            .join(TopicTimelineItem, TopicTimelineItem.topic_id == Topic.id)
-            .where(
-                Topic.status == "active",
-                or_(TopicTimelineItem.news_id == news_id, TopicTimelineItem.sources.is_not(None)),
-            )
-            .order_by(desc(Topic.updated_time))
-            .limit(5000)
-        )
-    ).all()
-
-    topic_map: dict[int, dict[str, Any]] = {}
-    for topic, item in topic_rows:
-        matched = item.news_id == news_id
-        if not matched and item.sources:
-            for source in item.sources:
-                if not isinstance(source, dict) or not source.get("id"):
-                    continue
-                try:
-                    matched = int(source["id"]) == news_id
-                except (TypeError, ValueError):
-                    matched = False
-                if matched:
-                    break
-        if not matched:
-            continue
-        if topic.id in topic_map:
-            continue
-        topic_map[topic.id] = {
-            "id": topic.id,
-            "name": topic.name,
-            "summary": topic.summary,
-            "heat_score": float(topic.heat_score or 0.0),
-            "updated_time": topic.updated_time.isoformat() if topic.updated_time else None,
-            "matched_timeline": {
-                "id": item.id,
-                "time": item.event_time.isoformat() if item.event_time else None,
-                "content": item.content,
-            },
-        }
-
     return {
         "news": {
             **serialize_news_item(news),
@@ -444,13 +431,58 @@ async def get_news_detail(news_id: int, db: AsyncSession = Depends(get_db)):
             "entities": news.entities or [],
         },
         "related_sources": related_sources,
-        "similar_news": similar_items,
-        "topics": list(topic_map.values()),
+        "similar_news": [],
+        "similar_news_deferred": True,
+        "topics": [],
         "content_status": {
             "has_summary": bool(news.summary),
             "related_source_count": len(related_sources),
         },
     }
+
+
+@router.get("/news/{news_id}/similar")
+async def get_similar_news(news_id: int, db: AsyncSession = Depends(get_db)):
+    news = await db.get(
+        News,
+        news_id,
+        options=[defer(News.content), defer(News.embedding)],
+    )
+    if not news:
+        raise HTTPException(status_code=404, detail="新闻不存在")
+
+    keywords = _normalize_similarity_terms(news.keywords, limit=10)
+    entities = _normalize_similarity_terms(news.entities, limit=8)
+    keyword_keys = {kw.lower() for kw in keywords}
+    query_terms = keywords + [entity for entity in entities if entity.lower() not in keyword_keys]
+    if not query_terms:
+        return {"data": []}
+
+    stmt = (
+        select(News)
+        .options(defer(News.content))
+        .where(News.id != news_id)
+    )
+    query_text = " ".join(query_terms)
+    scored_items, total, elapsed_ms = await _semantic_news_search(
+        db,
+        stmt,
+        query_text,
+        offset=0,
+        limit=10,
+        candidate_limit=2000,
+        min_score=0.5,
+        text_terms=query_terms,
+    )
+    logger.info(f"/api/news/{news_id}/similar 语义召回完成: terms={len(query_terms)}, matched={total}, elapsed={elapsed_ms:.1f}ms")
+
+    similar_items = []
+    for score, item in scored_items:
+        payload = serialize_news_item(item)
+        payload["similarity_score"] = round(float(score), 4)
+        similar_items.append(payload)
+
+    return {"data": similar_items}
 
 
 @router.post("/generate_summary/{news_id}")

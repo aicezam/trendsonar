@@ -653,11 +653,11 @@ class TopicService:
             logger.info(f"   ⚠️ [新专题] AI 核验通过数量不足 ({len(confirmed_news)} < {settings.TOPIC_MIN_NEWS_COUNT})，跳过")
             return None
             
-        # 检查热度指标 ( > 3.5 以允许普通新闻成专题)
-        # 计算热度（取新闻最大热度）
+        # 检查热度指标：新专题的总新闻热度必须大于 20
         max_heat = max([float(n.heat_score or 0) for n in confirmed_news]) if confirmed_news else 0
-        if not is_duplicate and max_heat < 3.5:
-             logger.info(f"   ⚠️ [新专题] 热度不足 ({max_heat} < 3.5)，跳过")
+        total_heat = sum(float(n.heat_score or 0) for n in confirmed_news)
+        if not is_duplicate and total_heat <= 20:
+             logger.info(f"   ⚠️ [新专题] 总新闻热度不足 ({total_heat:.1f} <= 20)，跳过")
              return None
         
         # 旧专题：不限制最小数量，只要有新的就合并
@@ -685,7 +685,7 @@ class TopicService:
         else:
             logger.info(f"   ✨ 创建新专题: {t_name} (包含 {len(confirmed_news)} 条新闻)")
             
-            # 计算热度（取新闻最大热度）
+            # 计算展示热度（取新闻最大热度），准入门槛使用上面的总热度
             max_heat = max([float(n.heat_score or 0) for n in confirmed_news]) if confirmed_news else 0
             # 最早时间
             start_time = min([n.publish_date for n in confirmed_news if n.publish_date]) if confirmed_news else datetime.now()
