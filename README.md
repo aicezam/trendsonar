@@ -1,53 +1,76 @@
 # TrendSonar
 
-TrendSonar 是一款**智能舆情与热点专题追踪系统**，利用 AI 技术帮助你更高效地获取有价值的资讯，打破信息茧房。
+TrendSonar 是一个用于新闻热点聚合、事件去重、专题追踪和舆情报表生成的 Web 工具。它从配置的新闻源中抓取内容，结合 Embedding 与大模型能力，对新闻进行摘要、分类、情感分析、关键词提取和专题整理。
 
-它不仅聚合新闻，还能帮你自动整理和分析。通过自动化流水线，TrendSonar 能够从海量碎片化信息中提炼价值 —— 自动识别热点、去重聚合事件、分析情感风向，并生成可视化的专题时间轴。
+项目适合用来搭建个人或团队内部的资讯观察台，例如跟踪行业动态、观察公共事件进展、整理关键词相关报道等。分析结果会受到新闻源质量、模型能力、配置参数和数据积累时间影响，建议将其作为辅助阅读与整理工具，而不是直接替代人工判断。
 
-无论是追踪行业动态、监控品牌舆情，还是捕捉市场信号，TrendSonar 都能助你**穿透噪音，直达本质**。
+## 在线演示
 
-## 🌐 在线演示
+体验地址：[https://ainews.izam.cn](https://ainews.izam.cn)
 
-👉 **立即体验**: [https://ainews.izam.cn](https://ainews.izam.cn)
+## 主要功能
 
-## ✨ 核心特性
+### 新闻采集与入库
 
-### 📡 全域情报捕获
-- **多源异构采集**: 内置强大的爬虫引擎，支持 **RSS 订阅**、**API 对接** 及 **网页深度抓取**。
-- **智能热度过滤**: 采用**权重与热度算法**，支持用户自定义新闻源权重。系统自动计算内容热度并过滤低价值噪音，确保您只看到最重要、最具影响力的新闻。
-- **关键词雷达**: 内置**关键词监控**功能，您可以设置特定的关注词（如公司名、行业术语），系统将优先筛选并呈现相关动态，实现精准情报追踪。
-- **灵活配置**: 可自定义关注源与屏蔽规则，轻松覆盖新闻门户、社交媒体及行业博客。
+- 支持通过 `news_sources.json` 配置多个新闻源。
+- 兼容 RSS/XML 与 JSON 接口类数据源。
+- 支持来源权重、启用状态和忽略域名配置。
+- 可在需要时补抓新闻正文，用于摘要和后续分析。
 
-### 🧠 深度语义理解
-- **智能摘要**: 摒弃机械截取，利用 LLM 生成高质量、信达雅的核心摘要，10秒读懂长文。
-- **情感罗盘**: 精准识别文本的情感倾向（正面/负面/中性）与情绪烈度，量化舆论风向。
-- **实体画像**: 自动提取核心实体（人名、机构、地名）与关键标签，构建信息知识图谱。
+### 热点列表与检索
 
-### 🔗 智能事件聚类
-- **向量化去重**: 基于 **Embedding 向量模型** 计算新闻相似度，自动将同一事件的不同报道聚合归类。
-- **降噪聚合**: 有效解决信息过载问题，将成百上千条碎片信息合并为一个完整的“事件卡片”。
+- 按热度或时间展示新闻列表。
+- 支持时间范围、分类、地区、来源等筛选。
+- 支持关键词搜索，并在可用时结合向量相似度提升召回效果。
+- 可生成热点新闻图片，便于分享或归档。
 
-### 📉 专题脉络追踪
-- **动态时间轴**: 自动串联孤立事件，生成可视化的时间轴，清晰呈现事件的起因、经过与结果。
-- **深度综述**: AI 自动撰写专题分析报告，多维度解读事件影响。
+### AI 辅助分析
 
-### 🛡️ 企业级架构设计
-- **双模 AI 引擎**: 支持 智谱 glm-4-flash、DeepSeek、SiliconFlow 等多种模型混用，在保障性能的同时大幅降低成本。
-- **自动化报表**: 支持定时生成日报、周报、关键词深度分析报告。
-- **开箱即用**: 提供标准 Docker 镜像与可视化管理后台，部署简单，维护便捷。
+- 为热点新闻生成摘要。
+- 对新闻进行分类、情感倾向分析、关键词和实体提取。
+- 支持主力模型、备用模型和按功能模块配置 AI 路由。
+- AI 输出质量依赖所使用的模型和提示词配置，重要结论建议复核原文。
 
-## 🚀 快速开始 (Docker)
+### 事件聚合与专题追踪
 
-我们提供了预构建的 Docker 镜像，您可以选择 Docker Compose（推荐）或 Docker CLI 进行部署。
+- 使用 Embedding 相似度和 AI 核验，对同一事件的多来源报道进行合并。
+- 根据近期热点新闻生成专题，并维护专题时间轴。
+- 支持手动新增、编辑、删除专题。
+- 专题筛选门槛、召回范围、更新时间窗口等参数可在配置文件中调整。
 
-### 准备工作
+### 报表与图表
 
-在宿主机上创建一个目录（例如 `trendsonar_data`），并在其中准备配置文件。
-你需要下载 `config.yaml.example` 并重命名为 `config.yaml`，填入你的 API Key 和其他配置。
+- 支持日报、周报、月报和关键词报表。
+- 提供来源分布、词云、情感分布、趋势图、相关新闻等图表数据。
+- 可缓存历史报表，便于回看和对比。
 
-### 方式一：使用 Docker Compose (推荐)
+### 管理与配置
 
-1. 创建 `docker-compose.yml` 文件：
+- 提供管理后台，用于维护配置、提示词、任务和专题。
+- 支持 SQLite，配置 PostgreSQL 后也可使用 PostgreSQL。
+- 提供 Docker 镜像，适合快速部署。
+
+## 快速开始（Docker）
+
+推荐使用 Docker Compose 部署。启动前需要准备配置文件和新闻源文件。
+
+### 准备文件
+
+在部署目录下创建 `data` 目录，并准备以下文件：
+
+- `data/config.yaml`：运行配置，可参考仓库中的 `docker/data/config.yaml`。
+- `data/news_sources.json`：新闻源配置，可参考仓库中的 `docker/data/news_sources.json` 或 `data/news_sources.json`。
+
+需要重点修改的配置包括：
+
+- `SILICONFLOW_API_KEY`：用于 Embedding。
+- `MAIN_AI_API_KEY` / `MAIN_AI_BASE_URL` / `MAIN_AI_MODEL`：主力生成模型。
+- `BACKUP_AI_API_KEY` / `BACKUP_AI_BASE_URL` / `BACKUP_AI_MODEL`：备用生成模型。
+- `ADMIN_PASSWORD`：管理员密码，推荐通过环境变量设置。
+
+### 使用 Docker Compose
+
+创建 `docker-compose.yml`：
 
 ```yaml
 version: '3.8'
@@ -60,101 +83,124 @@ services:
     ports:
       - "8193:8193"
     volumes:
-      # 挂载 config.yaml 到容器根目录
-      - ./config.yaml:/app/config.yaml
-      # 挂载 data 目录 (包含 news_sources.json 和数据库文件)
+      - ./data/config.yaml:/app/config.yaml
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
-      # 【必填】管理员密码
       - ADMIN_PASSWORD=your_secure_password
 ```
 
-2. 启动服务：
+启动服务：
 
 ```bash
 docker-compose up -d
 ```
 
-### 方式二：使用 Docker CLI
+启动后访问：
+
+- 首页：`http://localhost:8193`
+- 管理后台：`http://localhost:8193/admin`
+
+### 使用 Docker CLI
 
 ```bash
 docker run -d \
   --name trendsonar \
   -p 8193:8193 \
-  -v /path/to/your/config.yaml:/app/config.yaml \
+  -v /path/to/your/data/config.yaml:/app/config.yaml \
   -v /path/to/your/data:/app/data \
   -e TZ=Asia/Shanghai \
   -e ADMIN_PASSWORD=your_secure_password \
   instarsea/trendsonar
 ```
 
-> **注意**：
-> 1. 请将 `/path/to/your/...` 替换为实际的文件/目录路径。
-> 2. `ADMIN_PASSWORD` 环境变量为**必填项**，用于设置管理后台的登录密码。
+请将 `/path/to/your/data` 替换为实际目录路径。
 
-启动后，访问 `http://localhost:8193` 即可进入系统。管理后台位于 `http://localhost:8193/admin`。
+## 本地运行（可选）
 
-## ⚙️ 配置说明
+如果希望直接从源码运行：
 
-核心配置位于 `config.yaml` 文件中，主要包含：
+```bash
+pip install -r requirements.txt
+python main.py
+```
 
-- **数据库**: 默认使用 SQLite，支持 PostgreSQL。
-- **AI 模型**:
-  - `SILICONFLOW_API_KEY`: 用于 Embedding 和 Rerank (推荐 BAAI/bge-m3)。
-  - `MAIN_AI_API_KEY`: 主力生成模型 (如 GLM-4)。
-  - `BACKUP_AI_API_KEY`: 备用生成模型 (如 DeepSeek)。
-- **抓取设置**: 可配置抓取间隔、忽略域名等。
+本地运行同样需要准备 `config.yaml` 和 `data/news_sources.json`。正文抓取依赖 Crawl4AI，首次运行可能需要额外安装浏览器相关依赖；如果只是部署使用，Docker 方式更省心。
 
-更多详细配置项请参考 `config.yaml.example` 文件中的注释。
+## 配置说明
 
-## 🎉 效果说明
+核心配置位于 `config.yaml`，常用项包括：
 
-部署完成后，系统需要一定时间来积累数据和构建上下文，**通常运行 48 小时后效果最佳**。
+- **数据库**：`DATABASE_URL`，默认可使用 SQLite。
+- **模型配置**：Embedding、主力生成模型、备用生成模型及并发数。
+- **AI 路由**：`AI_ROUTE`，可为摘要、情感分析、聚类、专题、报表等任务指定使用 `main` 或 `backup`。
+- **采集与调度**：`SCHEDULE_INTERVAL_MINUTES`、`CRAWLER_CONCURRENCY`。
+- **聚类参数**：`CLUSTERING_THRESHOLD`、`CLUSTERING_TIME_WINDOW_HOURS`。
+- **关键词过滤**：`FOLLOW_KEYWORDS`、`FOLLOW_KEYWORDS_THRESHOLD`。
+- **专题参数**：`TOPIC_LOOKBACK_DAYS`、`TOPIC_MIN_NEWS_COUNT`、`TOPIC_QUALITY_LEVEL` 等。
+- **数据清理**：`DATA_CLEANUP_ENABLED`、`DATA_CLEANUP_MIN_HEAT`、`DATA_CLEANUP_PROTECT_DAYS`。
 
-TrendSonar 的分析质量主要取决于以下因素：
-1. **数据积累**: 初始阶段数据较少，聚类和专题分析可能不够丰富，随着时间推移效果会显著提升。
-2. **参数配置**: `config.yaml` 中的热度阈值、权重设置会直接影响信息的筛选结果。
-3. **AI 模型**: 所选用的 LLM (如 GLM-4, DeepSeek) 和 Embedding 模型的性能决定了摘要、情感分析、聚类、深度报告生成的准确度。
-4. **新闻源质量**: 优质、高频更新的 RSS 源能提供更丰富的信息输入（推荐参考下方“推荐新闻源”）。
+新闻源通过 `data/news_sources.json` 管理，每个来源通常包含：
 
-##  🧩 推荐新闻源
+```json
+{
+  "name": "来源名称",
+  "weight": 1.0,
+  "address": "https://example.com/rss-or-api",
+  "enabled": true
+}
+```
 
-如果您需要添加更多高质量的新闻源（RSS），推荐参考以下开源项目或服务获取订阅链接：
+## 使用建议
 
-- **[Hot News](https://github.com/orz-ai/hot_news)**: 每日热点新闻聚合。
-- **[NewsNow](https://github.com/ourongxing/newsnow)**: 实时热点聚合，提供多平台的热榜 RSS 接口。
-- **[RSSHub](https://github.com/DIYgod/RSSHub)**: 万物皆可 RSS，为海量网站提供 RSS 生成服务。
-- **[AnyFeeder](https://plink.anyfeeder.com/)**: 另一个强大的 RSS 源聚合服务。
+- 初始运行时数据较少，列表、聚类和专题效果会比较有限；运行一段时间后会更稳定。
+- 新闻源失效、反爬限制或登录态过期会影响抓取结果，微博等来源可能需要配置有效 Cookie。
+- 聚类和专题生成依赖阈值设置，阈值过低可能误合并，阈值过高可能漏合并。
+- 报表和摘要是辅助信息，涉及业务、法律、投资等重要判断时应回看原文并人工确认。
 
-## 📸 界面预览
+## 推荐新闻源
 
-### 📊 热点新闻列表
+如果需要扩展 RSS 或热点来源，可以参考：
+
+- [Hot News](https://github.com/orz-ai/hot_news)：每日热点新闻聚合。
+- [NewsNow](https://github.com/ourongxing/newsnow)：多平台热榜聚合，提供部分 RSS/API 接口。
+- [RSSHub](https://github.com/DIYgod/RSSHub)：为许多网站生成 RSS。
+- [AnyFeeder](https://plink.anyfeeder.com/)：RSS 源聚合服务。
+
+## 界面预览
+
+### 热点新闻列表
+
 <img src="docs/images/index.png" alt="热点新闻列表" width="100%">
 
-### 🕸️ 专题追踪
+### 专题追踪
+
 <img src="docs/images/topic.png" alt="专题追踪" width="100%">
 
-### 📑 深度报表
+### 深度报表
+
 <img src="docs/images/baobiao1.png" alt="报表预览1" width="100%">
 <img src="docs/images/baobiao2.png" alt="报表预览2" width="100%">
-
-## 🌟 Star History
 
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=aicezam/trendsonar&type=date&legend=top-left)](https://www.star-history.com/#aicezam/trendsonar&type=date&legend=top-left)
 
+## 更新日志
 
-## 📆 更新日志
+- **v0.1.0**：初始版本，发布至 Docker Hub。
+- **v0.1.1**：修复部分鉴权问题。
+- **v0.1.2**：优化配置异常时的定时任务流程。
+- **v0.1.3**：优化内存占用，优化专题追踪模块的复核逻辑。
+- **v0.1.4**：新增专题质量审核等级配置，优化专题生成逻辑。
+- **v0.1.5**：优化专题生成逻辑，允许手动新增、编辑、删除专题。
+- **v0.1.6**：优化关键词深度分析交互，并允许在管理后台自定义提示词。
+- **v0.1.7**：尝试优化 token 消耗、聚合流程和首页筛选交互。
+- **v0.2.0**：优化 token 消耗、日志显示和专题重复生成问题。
+- **v0.2.1**：专题模块新增报表功能，包括词云、来源分布、情感分析、相关新闻、关键词趋势等。
+- **v0.2.5**：搜索优化、向量召回优化、专题模块新增关键词趋势分析、报表页面关键词分析、UI交互优化、新闻详情弹窗等等
 
-- **v0.1.0**: 初始版本，发布至 Docker Hub。
-- **v0.1.1**: 修复部分鉴权问题。
-- **v0.1.2**: 优化配置异常时的定时任务流程。
-- **v0.1.3**: 优化内存占用，优化专题追踪模块的复核逻辑。
-- **v0.1.4**: 新增专题质量审核等级配置，优化专题生成逻辑。
-- **v0.1.5**: 优化专题生成逻辑，允许手动新增、编辑、删除专题。
-- **v0.1.6**: 优化关键词深度分析交互，并允许所有提示词可以自定义（管理-提示词）。
-- **v0.1.7**: 尝试优化tokens消耗、聚合流程优化、首页筛选交互。
-- **v0.2.0**: 优化tokens消耗，优化日志显示，优化专题生成重复的问题。
-- **v0.2.1**: 专题模块新增报表功能，包括词云、来源分布、情感分析、相关新闻、关键词趋势等。
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。
