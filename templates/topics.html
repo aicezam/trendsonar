@@ -21,8 +21,17 @@
                 </div>
             </div>
             <div class="topics-filter-section">
+                <div class="topics-filter-label">地区筛选</div>
+                <div id="mobileRegionContainer" class="ms-container full-width"></div>
+            </div>
+            <div class="topics-filter-section">
+                <div class="topics-filter-label">来源筛选</div>
+                <div id="mobileSourceContainer" class="ms-container full-width"></div>
+            </div>
+            <div class="topics-filter-section">
                 <div class="topics-filter-label">最低热度</div>
                 <select id="mobileHeatSelect" class="topics-select">
+                    <option value="0">不限</option>
                     <option value="10">10+</option>
                     <option value="20">20+</option>
                     <option value="30">30+</option>
@@ -41,6 +50,7 @@
             <button id="applyMobileFilter" class="topics-primary-btn" type="button">确认筛选</button>
         </div>
     </div>
+    <div id="topicCategoryTabs" class="category-tabs-container topics-category-tabs"></div>
     <div class="topics-mobile-toolbar">
         <div class="topics-search-group">
             <input type="text" id="mobileSearchInput" placeholder="搜索专题 (支持语义)...">
@@ -60,16 +70,55 @@
             <input type="date" id="desktopEndDate">
         </div>
         <select id="desktopHeatSelect" class="topics-select">
+            <option value="0">不限</option>
             <option value="10">10+</option>
             <option value="20">20+</option>
             <option value="30">30+</option>
             <option value="50">50+</option>
             <option value="100">100+</option>
         </select>
+        <div id="desktopSourceSelect" class="ms-container"></div>
         <div class="topics-search-box">
             <input type="text" id="desktopSearchInput" placeholder="搜索专题 (支持模糊搜索与语义搜索)...">
         </div>
+        <button id="openDesktopFilter" class="topics-more-btn" type="button">更多筛选</button>
         <button id="addTopicBtn" class="topics-add-btn" style="display:none;">+ 手动创建专题</button>
+    </div>
+    <div id="desktopTopicFilter" class="desktop-drawer-overlay">
+        <div class="desktop-drawer-content">
+            <div class="drawer-header">
+                <h3>高级筛选</h3>
+                <button id="closeDesktopFilter" class="btn-icon" type="button">&times;</button>
+            </div>
+            <div class="drawer-body">
+                <div class="filter-section-drawer">
+                    <label>时间范围</label>
+                    <select id="drawerTimeSelect" class="topics-select" style="width:100%;"></select>
+                    <div id="drawerDateRange" class="topics-date-range" style="display:none; margin-top:8px; flex-direction:column; align-items:stretch;">
+                        <input type="date" id="drawerStartDate">
+                        <input type="date" id="drawerEndDate">
+                    </div>
+                </div>
+                <div class="filter-section-drawer">
+                    <label>地区筛选</label>
+                    <div id="desktopRegionSelect" class="ms-container full-width"></div>
+                </div>
+                <div class="filter-section-drawer">
+                    <label>最低热度</label>
+                    <select id="drawerHeatSelect" class="topics-select" style="width:100%;">
+                        <option value="0">不限</option>
+                        <option value="10">10+</option>
+                        <option value="20">20+</option>
+                        <option value="30">30+</option>
+                        <option value="50">50+</option>
+                        <option value="100">100+</option>
+                    </select>
+                </div>
+            </div>
+            <div class="drawer-footer">
+                <button id="applyDesktopFilter" class="topics-primary-btn" type="button">确认筛选</button>
+            </div>
+        </div>
     </div>
     <div id="topicStats" class="topics-stats" style="display:none;"></div>
     <div id="loading" class="loading">加载中...</div>
@@ -101,27 +150,44 @@
             dateOption: "all",
             startDate: "",
             endDate: "",
-            minHeat: "30"
+            minHeat: "30",
+            category: "all",
+            source: "",
+            region: ""
         }
     };
     const els = {
         mobileFilter: document.getElementById("mobileTopicFilter"),
+        desktopFilter: document.getElementById("desktopTopicFilter"),
+        openDesktopFilter: document.getElementById("openDesktopFilter"),
+        closeDesktopFilter: document.getElementById("closeDesktopFilter"),
+        applyDesktopFilter: document.getElementById("applyDesktopFilter"),
         openMobileFilter: document.getElementById("openMobileFilter"),
         closeMobileFilter: document.getElementById("closeMobileFilter"),
         applyMobileFilter: document.getElementById("applyMobileFilter"),
+        categoryTabs: document.getElementById("topicCategoryTabs"),
         mobileSearchInput: document.getElementById("mobileSearchInput"),
         mobileSearchBtn: document.getElementById("mobileSearchBtn"),
         desktopSearchInput: document.getElementById("desktopSearchInput"),
         mobileTimeOptions: document.getElementById("mobileTimeOptions"),
         desktopTimeSelect: document.getElementById("desktopTimeSelect"),
+        drawerTimeSelect: document.getElementById("drawerTimeSelect"),
         mobileDateRange: document.getElementById("mobileDateRange"),
         desktopDateRange: document.getElementById("desktopDateRange"),
+        drawerDateRange: document.getElementById("drawerDateRange"),
         mobileStartDate: document.getElementById("mobileStartDate"),
         mobileEndDate: document.getElementById("mobileEndDate"),
         desktopStartDate: document.getElementById("desktopStartDate"),
         desktopEndDate: document.getElementById("desktopEndDate"),
+        drawerStartDate: document.getElementById("drawerStartDate"),
+        drawerEndDate: document.getElementById("drawerEndDate"),
         mobileHeatSelect: document.getElementById("mobileHeatSelect"),
         desktopHeatSelect: document.getElementById("desktopHeatSelect"),
+        drawerHeatSelect: document.getElementById("drawerHeatSelect"),
+        mobileRegionContainer: document.getElementById("mobileRegionContainer"),
+        desktopRegionSelect: document.getElementById("desktopRegionSelect"),
+        mobileSourceContainer: document.getElementById("mobileSourceContainer"),
+        desktopSourceSelect: document.getElementById("desktopSourceSelect"),
         sortBtns: {
             mobileUpdated: document.getElementById("mobileSortUpdated"),
             mobileHeat: document.getElementById("mobileSortHeat"),
@@ -178,6 +244,96 @@
         return node;
     }
 
+    class MultiSelect {
+        constructor(container, placeholder, options, selectedValues, onChange) {
+            this.container = typeof container === "string" ? document.getElementById(container) : container;
+            this.placeholder = placeholder;
+            this.options = options || [];
+            this.selected = new Set(selectedValues ? selectedValues.split(",").filter(x => x && x !== "all") : []);
+            this.onChange = onChange;
+            this.render();
+        }
+
+        render() {
+            if (!this.container) return;
+            this.container.innerHTML = "";
+            const trigger = el("div", { class: "ms-trigger" });
+            this.updateTriggerText(trigger);
+            trigger.onclick = (e) => {
+                e.stopPropagation();
+                this.toggleDropdown();
+            };
+            this.container.appendChild(trigger);
+
+            const dropdown = el("div", { class: "ms-dropdown" });
+            this.dropdown = dropdown;
+            if (this.options.length > 8) {
+                const searchBox = el("div", { class: "ms-search" });
+                const input = el("input", { placeholder: "搜索..." });
+                input.onclick = (e) => e.stopPropagation();
+                input.onkeyup = (e) => {
+                    const term = e.target.value.toLowerCase();
+                    dropdown.querySelectorAll(".ms-option").forEach(opt => {
+                        opt.style.display = opt.textContent.toLowerCase().includes(term) ? "flex" : "none";
+                    });
+                };
+                searchBox.appendChild(input);
+                dropdown.appendChild(searchBox);
+            }
+
+            this.options.forEach(opt => {
+                const row = el("div", { class: "ms-option" });
+                const cb = el("input", { type: "checkbox" });
+                cb.checked = this.selected.has(opt.value);
+                const toggle = (checked) => {
+                    if (checked) this.selected.add(opt.value);
+                    else this.selected.delete(opt.value);
+                    cb.checked = this.selected.has(opt.value);
+                    this.updateTriggerText(trigger);
+                    this.onChange(Array.from(this.selected).join(","));
+                };
+                row.onclick = (e) => {
+                    e.stopPropagation();
+                    toggle(!this.selected.has(opt.value));
+                };
+                cb.onclick = (e) => {
+                    e.stopPropagation();
+                    toggle(e.target.checked);
+                };
+                row.appendChild(cb);
+                row.appendChild(document.createTextNode(opt.label));
+                dropdown.appendChild(row);
+            });
+            this.container.appendChild(dropdown);
+        }
+
+        updateTriggerText(trigger) {
+            if (this.selected.size === 0) {
+                trigger.textContent = this.placeholder;
+            } else if (this.selected.size === 1) {
+                const val = Array.from(this.selected)[0];
+                const opt = this.options.find(item => item.value === val);
+                trigger.textContent = opt ? opt.label : val;
+            } else {
+                trigger.textContent = `${this.placeholder} (${this.selected.size})`;
+            }
+        }
+
+        toggleDropdown() {
+            document.querySelectorAll(".ms-dropdown.show").forEach(d => {
+                if (d !== this.dropdown) d.classList.remove("show");
+            });
+            this.dropdown.classList.toggle("show");
+        }
+
+        updateSelected(value) {
+            this.selected = new Set(value ? value.split(",").filter(x => x && x !== "all") : []);
+            this.render();
+        }
+    }
+
+    let msRegion, msMobileRegion, msSource, msMobileSource;
+
     function isMobile() {
         return window.innerWidth <= 720;
     }
@@ -195,17 +351,29 @@
             btn.classList.toggle("active", btn.dataset.val === state.filter.dateOption);
         }
         els.desktopTimeSelect.value = state.filter.dateOption;
+        els.drawerTimeSelect.value = state.filter.dateOption;
 
         els.mobileStartDate.value = state.filter.startDate;
         els.mobileEndDate.value = state.filter.endDate;
         els.desktopStartDate.value = state.filter.startDate;
         els.desktopEndDate.value = state.filter.endDate;
+        els.drawerStartDate.value = state.filter.startDate;
+        els.drawerEndDate.value = state.filter.endDate;
         els.mobileHeatSelect.value = state.filter.minHeat || "30";
         els.desktopHeatSelect.value = state.filter.minHeat || "30";
+        els.drawerHeatSelect.value = state.filter.minHeat || "30";
+        if (els.drawerDateRange) els.drawerDateRange.style.display = showRange ? "flex" : "none";
 
         Object.values(els.sortBtns).forEach(btn => {
             btn.classList.toggle("active", btn.dataset.sort === state.filter.sortBy);
         });
+
+        if (els.categoryTabs) {
+            Array.from(els.categoryTabs.children).forEach(btn => {
+                const isAll = state.filter.category === "all" || !state.filter.category;
+                btn.classList.toggle("active", (btn.dataset.category === "all" && isAll) || btn.dataset.category === state.filter.category);
+            });
+        }
     }
 
     function setTimeOption(value) {
@@ -238,10 +406,76 @@
         });
 
         els.desktopTimeSelect.innerHTML = "";
+        els.drawerTimeSelect.innerHTML = "";
         TIME_OPTIONS.forEach(opt => {
             const item = el("option", { value: opt.value, text: opt.label });
             els.desktopTimeSelect.appendChild(item);
+            els.drawerTimeSelect.appendChild(el("option", { value: opt.value, text: opt.label }));
         });
+    }
+
+    function fetchTopicCategories() {
+        const fallback = ["全部"{% for cat in settings.NEWS_CATEGORIES %}, "{{ cat }}"{% endfor %}];
+        renderTopicCategoryTabs(fallback);
+    }
+
+    function renderTopicCategoryTabs(categories) {
+        if (!els.categoryTabs) return;
+        els.categoryTabs.innerHTML = "";
+        categories.forEach(cat => {
+            const val = cat === "全部" ? "all" : cat;
+            const btn = el("div", { class: "category-tab-item", text: cat, "data-category": val });
+            btn.onclick = () => {
+                state.filter.category = val;
+                syncFilterUI();
+                loadTopics(1);
+                const scrollLeft = btn.offsetLeft - (els.categoryTabs.offsetWidth / 2) + (btn.offsetWidth / 2);
+                els.categoryTabs.scrollTo({ left: scrollLeft, behavior: "smooth" });
+            };
+            els.categoryTabs.appendChild(btn);
+        });
+        syncFilterUI();
+    }
+
+    async function fetchTopicRegions() {
+        try {
+            const resp = await fetch("/api/regions", { cache: "no-store" });
+            if (!resp.ok) throw new Error(resp.status);
+            const list = await resp.json();
+            const options = list.map(r => ({ label: r, value: r }));
+            msRegion = new MultiSelect(els.desktopRegionSelect, "全部地区", options, state.filter.region, (val) => {
+                state.filter.region = val;
+                if (msMobileRegion) msMobileRegion.updateSelected(val);
+            });
+            msMobileRegion = new MultiSelect(els.mobileRegionContainer, "全部地区", options, state.filter.region, (val) => {
+                state.filter.region = val;
+                if (msRegion) msRegion.updateSelected(val);
+            });
+        } catch (e) {
+            msRegion = new MultiSelect(els.desktopRegionSelect, "加载失败", [], "", () => {});
+            msMobileRegion = new MultiSelect(els.mobileRegionContainer, "加载失败", [], "", () => {});
+        }
+    }
+
+    async function fetchTopicSources() {
+        try {
+            const resp = await fetch("/api/sources", { cache: "no-store" });
+            if (!resp.ok) throw new Error(resp.status);
+            const list = await resp.json();
+            const options = list.map(s => ({ label: s, value: s }));
+            msSource = new MultiSelect(els.desktopSourceSelect, "全部来源", options, state.filter.source, (val) => {
+                state.filter.source = val;
+                if (msMobileSource) msMobileSource.updateSelected(val);
+                loadTopics(1);
+            });
+            msMobileSource = new MultiSelect(els.mobileSourceContainer, "全部来源", options, state.filter.source, (val) => {
+                state.filter.source = val;
+                if (msSource) msSource.updateSelected(val);
+            });
+        } catch (e) {
+            msSource = new MultiSelect(els.desktopSourceSelect, "加载失败", [], "", () => {});
+            msMobileSource = new MultiSelect(els.mobileSourceContainer, "加载失败", [], "", () => {});
+        }
     }
 
     function bindFilterEvents() {
@@ -249,6 +483,11 @@
         els.closeMobileFilter.onclick = () => els.mobileFilter.classList.remove("show");
         els.mobileFilter.onclick = (e) => {
             if (e.target === els.mobileFilter) els.mobileFilter.classList.remove("show");
+        };
+        els.openDesktopFilter.onclick = () => els.desktopFilter.classList.add("show");
+        els.closeDesktopFilter.onclick = () => els.desktopFilter.classList.remove("show");
+        els.desktopFilter.onclick = (e) => {
+            if (e.target === els.desktopFilter) els.desktopFilter.classList.remove("show");
         };
 
         const runSearch = (value) => {
@@ -265,14 +504,21 @@
         els.mobileSearchBtn.onclick = () => runSearch(els.mobileSearchInput.value);
 
         els.desktopTimeSelect.onchange = (e) => setTimeOption(e.target.value);
+        els.drawerTimeSelect.onchange = (e) => setTimeOption(e.target.value);
         els.mobileHeatSelect.onchange = (e) => {
             state.filter.minHeat = e.target.value;
             els.desktopHeatSelect.value = state.filter.minHeat;
+            els.drawerHeatSelect.value = state.filter.minHeat;
         };
         els.desktopHeatSelect.onchange = (e) => {
             state.filter.minHeat = e.target.value;
             els.mobileHeatSelect.value = state.filter.minHeat;
+            els.drawerHeatSelect.value = state.filter.minHeat;
             loadTopics(1);
+        };
+        els.drawerHeatSelect.onchange = (e) => {
+            state.filter.minHeat = e.target.value;
+            syncFilterUI();
         };
 
         const onDateChange = (e, field) => {
@@ -286,6 +532,8 @@
         els.mobileEndDate.onchange = (e) => onDateChange(e, "endDate");
         els.desktopStartDate.onchange = (e) => onDateChange(e, "startDate");
         els.desktopEndDate.onchange = (e) => onDateChange(e, "endDate");
+        els.drawerStartDate.onchange = (e) => onDateChange(e, "startDate");
+        els.drawerEndDate.onchange = (e) => onDateChange(e, "endDate");
 
         Object.values(els.sortBtns).forEach(btn => {
             btn.onclick = () => setSort(btn.dataset.sort);
@@ -297,6 +545,18 @@
             els.mobileFilter.classList.remove("show");
             loadTopics(1);
         };
+        els.applyDesktopFilter.onclick = () => {
+            state.filter.q = els.desktopSearchInput.value.trim();
+            els.mobileSearchInput.value = state.filter.q;
+            els.desktopFilter.classList.remove("show");
+            loadTopics(1);
+        };
+
+        document.addEventListener("click", (e) => {
+            if (!e.target.closest(".ms-container")) {
+                document.querySelectorAll(".ms-dropdown.show").forEach(d => d.classList.remove("show"));
+            }
+        });
     }
 
     async function deleteTopic(e, id, name) {
@@ -476,6 +736,9 @@
                 date: getEffectiveDate()
             });
             params.append("min_heat", state.filter.minHeat || "30");
+            if (state.filter.category && state.filter.category !== "all") params.append("category", state.filter.category);
+            if (state.filter.source) params.append("source", state.filter.source);
+            if (state.filter.region) params.append("region", state.filter.region);
             if (state.filter.dateOption === "other") {
                 if (state.filter.startDate) params.append("start_date", state.filter.startDate);
                 if (state.filter.endDate) params.append("end_date", state.filter.endDate);
@@ -489,7 +752,7 @@
                 loading.style.display = "none";
                 if (!items.length) {
                     renderStats(data);
-                    empty.textContent = state.filter.q || state.filter.minHeat || state.filter.dateOption !== "all"
+                    empty.textContent = state.filter.q || Number(state.filter.minHeat || 0) > 0 || state.filter.dateOption !== "all" || state.filter.category !== "all" || state.filter.source || state.filter.region
                         ? "没有符合条件的专题。"
                         : "暂无专题。请等待全流程任务运行后自动生成。";
                     empty.style.display = "block";
@@ -532,6 +795,9 @@
     renderTimeOptions();
     bindFilterEvents();
     syncFilterUI();
+    fetchTopicCategories();
+    fetchTopicRegions();
+    fetchTopicSources();
 
     // Scroll listener
     window.addEventListener('scroll', () => {

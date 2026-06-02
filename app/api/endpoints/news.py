@@ -8,6 +8,7 @@
 
 import io
 import os
+import re
 import time as perf_time
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -16,7 +17,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from PIL import Image, ImageDraw, ImageFont
-from sqlalchemy import desc, select
+from sqlalchemy import Text, cast, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
@@ -115,6 +116,93 @@ def _normalize_similarity_terms(items: Any, limit: int = 16) -> list[str]:
     return values
 
 
+def _split_search_terms(query_text: str, text_terms: Optional[list[str]] = None) -> list[str]:
+    raw_terms = text_terms or re.split(r"[\s,，、/|;；]+", query_text or "")
+    terms: list[str] = []
+    full_query = (query_text or "").strip().lower()
+    if full_query:
+        terms.append(full_query)
+    for term in raw_terms:
+        value = (term or "").strip().lower()
+        if value and value not in terms:
+            terms.append(value)
+    return terms
+
+
+def _text_match_score(news: News, query_text: str, terms: list[str]) -> float:
+    lowered_q = (query_text or "").strip().lower()
+    title = (news.title or "").lower()
+    summary = (news.summary or "").lower()
+    source = (news.source or "").lower()
+    category = (news.category or "").lower()
+    region = (news.region or "").lower()
+    item_terms = [
+        t.strip().lower()
+        for t in (news.keywords or []) + (news.entities or [])
+        if isinstance(t, str) and t.strip()
+    ]
+
+    score = 0.0
+    if lowered_q:
+        if lowered_q in title:
+            score += 0.72
+        if lowered_q in summary:
+            score += 0.18
+        if lowered_q in source or lowered_q in category or lowered_q in region:
+            score += 0.2
+        if lowered_q in item_terms:
+            score += 0.35
+
+    for term in terms:
+        if term in title:
+            score += 0.12
+        if term in summary:
+            score += 0.05
+        if term in source or term in category or term in region:
+            score += 0.08
+        if term in item_terms:
+            score += 0.1
+
+    return min(score, 1.0)
+
+
+def _recency_score(publish_date: Optional[datetime], now: datetime) -> float:
+    if not publish_date:
+        return 0.0
+    try:
+        age_days = max(0.0, (now - publish_date).total_seconds() / 86400)
+    except TypeError:
+        return 0.0
+    if age_days <= 1:
+        return 1.0
+    if age_days <= 3:
+        return 0.86
+    if age_days <= 7:
+        return 0.72
+    if age_days <= 30:
+        return 0.52
+    if age_days <= 180:
+        return 0.28
+    if age_days <= 365:
+        return 0.16
+    return 0.08
+
+
+def _heat_score(heat: Optional[float], max_heat: float) -> float:
+    value = max(0.0, float(heat or 0.0))
+    if max_heat <= 0:
+        return 0.0
+    return min(1.0, float(np.log1p(value) / np.log1p(max_heat)))
+
+
+def _combined_search_score(news: News, relevance: float, max_heat: float, now: datetime) -> float:
+    relevance = max(0.0, min(1.0, float(relevance or 0.0)))
+    freshness = _recency_score(news.publish_date, now)
+    heat = _heat_score(news.heat_score, max_heat)
+    relevance_gate = min(1.0, relevance / 0.45)
+    return relevance * 0.55 + freshness * 0.35 * relevance_gate + heat * 0.10 * relevance_gate
+
+
 async def _semantic_news_search(
     db: AsyncSession,
     stmt,
@@ -131,13 +219,23 @@ async def _semantic_news_search(
     if not query_text:
         return [], 0, 0.0
 
-    candidate_stmt = (
-        stmt.options(defer(News.content))
-        .order_by(desc(News.publish_date), desc(News.heat_score))
-        .limit(candidate_limit)
-    )
-    result = await db.execute(candidate_stmt)
-    candidates = result.scalars().all()
+    normalized_terms = _split_search_terms(query_text, text_terms)
+    text_conditions = []
+    for term in normalized_terms or [query_text.lower()]:
+        if not term:
+            continue
+        like = f"%{term}%"
+        text_conditions.extend(
+            [
+                News.title.ilike(like),
+                News.summary.ilike(like),
+                News.source.ilike(like),
+                News.category.ilike(like),
+                News.region.ilike(like),
+                cast(News.keywords, Text).ilike(like),
+                cast(News.entities, Text).ilike(like),
+            ]
+        )
 
     try:
         q_emb_list = await ai_service.get_embeddings([query_text])
@@ -146,33 +244,34 @@ async def _semantic_news_search(
         logger.warning(f"/api/news 语义搜索不可用，退回文本匹配: {e}")
         q_vec = None
 
+    candidate_options = [defer(News.content)]
+    if q_vec is None:
+        candidate_options.append(defer(News.embedding))
+
+    if text_conditions:
+        candidate_stmt = (
+            stmt.options(*candidate_options)
+            .where(or_(*text_conditions))
+            .order_by(desc(News.publish_date), desc(News.heat_score))
+            .limit(max(candidate_limit, offset + limit))
+        )
+    else:
+        candidate_stmt = (
+            stmt.options(*candidate_options)
+            .order_by(desc(News.publish_date), desc(News.heat_score))
+            .limit(candidate_limit)
+        )
+
+    result = await db.execute(candidate_stmt)
+    candidates = result.scalars().all()
+    now = datetime.now()
+    max_heat = max((float(n.heat_score or 0.0) for n in candidates), default=0.0)
+
     norm_q = float(np.linalg.norm(q_vec)) if q_vec is not None else 0.0
     q_dim = len(q_vec) if q_vec is not None else 0
-    lowered_q = query_text.lower()
-    normalized_terms = []
-    for term in text_terms or [query_text]:
-        value = (term or "").strip().lower()
-        if value and value not in normalized_terms:
-            normalized_terms.append(value)
-
     scored_news = []
     for n in candidates:
-        score = 0.0
-        title = (n.title or "").lower()
-        summary = (n.summary or "").lower()
-        item_terms = [
-            t.strip().lower()
-            for t in (n.keywords or []) + (n.entities or [])
-            if isinstance(t, str) and t.strip()
-        ]
-
-        if lowered_q and lowered_q in title:
-            score += 0.5
-        if normalized_terms:
-            title_hits = sum(1 for term in normalized_terms if term in title)
-            summary_hits = sum(1 for term in normalized_terms if term in summary)
-            tag_hits = sum(1 for term in normalized_terms if term in item_terms)
-            score += min(0.5, title_hits * 0.12 + summary_hits * 0.05 + tag_hits * 0.1)
+        score = _text_match_score(n, query_text, normalized_terms)
 
         if q_vec is not None and n.embedding and len(n.embedding) == q_dim:
             n_vec = np.array(n.embedding)
@@ -182,9 +281,38 @@ async def _semantic_news_search(
                 score += float(sim)
 
         if score >= min_score:
-            scored_news.append((score, n))
+            scored_news.append((_combined_search_score(n, score, max_heat, now), n))
+
+    seen_ids = {n.id for _, n in scored_news}
+    if normalized_terms:
+        keyword_stmt = (
+            stmt.options(defer(News.content), defer(News.embedding))
+            .order_by(desc(News.publish_date), desc(News.heat_score))
+            .limit(candidate_limit)
+        )
+        keyword_result = await db.execute(keyword_stmt)
+        for n in keyword_result.scalars().all():
+            if n.id in seen_ids:
+                continue
+            score = _text_match_score(n, query_text, normalized_terms)
+            if score > 0:
+                scored_news.append((_combined_search_score(n, score, max_heat, now), n))
+                seen_ids.add(n.id)
 
     scored_news.sort(key=lambda x: x[0], reverse=True)
+    if not scored_news and normalized_terms:
+        fallback_stmt = (
+            stmt.options(defer(News.content), defer(News.embedding))
+            .order_by(desc(News.publish_date), desc(News.heat_score))
+            .limit(candidate_limit)
+        )
+        fallback_result = await db.execute(fallback_stmt)
+        for n in fallback_result.scalars().all():
+            score = _text_match_score(n, query_text, normalized_terms)
+            if score > 0:
+                scored_news.append((_combined_search_score(n, score, max_heat, now), n))
+        scored_news.sort(key=lambda x: x[0], reverse=True)
+
     elapsed_ms = (perf_time.perf_counter() - search_start) * 1000
     return scored_news[offset : offset + limit], len(scored_news), elapsed_ms
 
@@ -273,6 +401,7 @@ async def get_regions(db: AsyncSession = Depends(get_db)):
 async def get_news(
     q: str = "",
     page: int = 1,
+    page_size: Optional[int] = None,
     date: str = "24h",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -299,7 +428,9 @@ async def get_news(
     - 提供新闻列表查询接口，支持筛选、排序与语义检索
     """
 
-    page_size = 20
+    has_query = bool((q or "").strip())
+    page_size = page_size or (10 if has_query else 20)
+    page_size = max(1, min(page_size, 50))
     max_page = 500 if date == "all" else 1000
     page = max(1, min(page, max_page))
     offset = (page - 1) * page_size
@@ -314,7 +445,7 @@ async def get_news(
         source=source,
     )
 
-    if q:
+    if has_query:
         sliced, total, elapsed_ms = await _semantic_news_search(
             db,
             stmt,

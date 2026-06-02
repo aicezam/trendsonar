@@ -160,6 +160,11 @@ def configure_logging() -> None:
     """
 
     log_level = _resolve_level(settings.LOG_LEVEL)
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     root = logging.getLogger()
     if not root.handlers:
         handler = logging.StreamHandler(sys.stdout)

@@ -161,6 +161,9 @@
     let chartTrendSource = null;
     let chartTrendKeyword = null;
     let topicTrendLoaded = false;
+    let currentTimeline = [];
+    let timelineExpanded = false;
+    const TIMELINE_PREVIEW_LIMIT = 10;
 
     function fmtTime(iso) {
         if (!iso) return "-";
@@ -183,8 +186,14 @@
     
     function toggleSort() {
         currentSort = (currentSort === "asc") ? "desc" : "asc";
+        timelineExpanded = false;
         loadDetail();
     }
+
+    window.toggleTimelineMore = function() {
+        timelineExpanded = true;
+        renderTimeline(currentTimeline);
+    };
 
     window.toggleSourceGroup = function(header) {
         const list = header.nextElementSibling;
@@ -217,6 +226,58 @@
         } finally {
             btn.disabled = false;
             btn.textContent = "重新生成";
+        }
+    }
+
+    function renderTimelineItem(it) {
+        const item = el("div", { class: "tl-item" });
+        item.appendChild(el("div", { class: "tl-time", text: fmtTime(it.time) }));
+        item.appendChild(el("div", { class: "tl-content", text: it.content || "" }));
+
+        if (it.sources && it.sources.length > 0) {
+            const sourcesContainer = el("div", { class: "tl-source" });
+            sourcesContainer.appendChild(document.createTextNode("来源: "));
+
+            it.sources.forEach((source, index) => {
+                if (index > 0) sourcesContainer.appendChild(document.createTextNode(", "));
+                const a = el("a", {
+                    href: source.url,
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    text: source.name || source.title || "来源"
+                });
+                sourcesContainer.appendChild(a);
+            });
+            item.appendChild(sourcesContainer);
+        } else if (it.source_url) {
+            const a = el("a", { href: it.source_url, target: "_blank", rel: "noopener noreferrer", text: (it.source_name || "来源") });
+            item.appendChild(el("div", { class: "tl-source" }, [a]));
+        }
+
+        return item;
+    }
+
+    function renderTimeline(timeline) {
+        const timelineEl = document.getElementById("timeline");
+        timelineEl.innerHTML = "";
+        if (!timeline.length) {
+            timelineEl.appendChild(el("div", { class: "text", text: "暂无时间轴条目。" }));
+            return;
+        }
+
+        const visibleItems = timelineExpanded ? timeline : timeline.slice(0, TIMELINE_PREVIEW_LIMIT);
+        visibleItems.forEach(it => timelineEl.appendChild(renderTimelineItem(it)));
+
+        if (!timelineExpanded && timeline.length > TIMELINE_PREVIEW_LIMIT) {
+            const moreWrap = el("div", { class: "timeline-more" });
+            const moreBtn = el("button", {
+                class: "btn-mini timeline-more-btn",
+                type: "button",
+                text: `查看更多 ${timeline.length - TIMELINE_PREVIEW_LIMIT} 条`
+            });
+            moreBtn.addEventListener("click", window.toggleTimelineMore);
+            moreWrap.appendChild(moreBtn);
+            timelineEl.appendChild(moreWrap);
         }
     }
 
@@ -256,45 +317,8 @@
                 document.getElementById("summaryBox").classList.add("hidden");
             }
 
-            const timelineEl = document.getElementById("timeline");
-            timelineEl.innerHTML = "";
-            const timeline = data.timeline || [];
-            if (!timeline.length) {
-                timelineEl.appendChild(el("div", { class: "text", text: "暂无时间轴条目。" }));
-            } else {
-                for (const it of timeline) {
-                    const item = el("div", { class: "tl-item" });
-                    item.appendChild(el("div", { class: "tl-time", text: fmtTime(it.time) }));
-                    item.appendChild(el("div", { class: "tl-content", text: it.content || "" }));
-                    
-                    // Display multiple sources if available
-                    if (it.sources && it.sources.length > 0) {
-                        const sourcesContainer = el("div", { class: "tl-source" });
-                        sourcesContainer.appendChild(document.createTextNode("来源: "));
-                        
-                        it.sources.forEach((source, index) => {
-                            if (index > 0) {
-                                sourcesContainer.appendChild(document.createTextNode(", "));
-                            }
-                            const a = el("a", { 
-                                href: source.url, 
-                                target: "_blank", 
-                                rel: "noopener noreferrer", 
-                                text: source.name || source.title || "来源"
-                            });
-                            sourcesContainer.appendChild(a);
-                        });
-                        item.appendChild(sourcesContainer);
-                    } else if (it.source_url) {
-                        // Fallback for backward compatibility
-                        const a = el("a", { href: it.source_url, target: "_blank", rel: "noopener noreferrer", text: (it.source_name || "来源") });
-                        const src = el("div", { class: "tl-source" }, [a]);
-                        item.appendChild(src);
-                    }
-                    
-                    timelineEl.appendChild(item);
-                }
-            }
+            currentTimeline = data.timeline || [];
+            renderTimeline(currentTimeline);
 
             const recordContent = (topic.record || "").trim();
             const recordEl = document.getElementById("record");

@@ -322,6 +322,11 @@
     let chartCorrelation = null, chartFreqTrend = null, chartSentimentTrend = null;
     let chartTermTrend = null, chartTermSentiment = null, chartTermCooccurrence = null;
     let reportClickableTerms = [];
+    let activeTermAnalysis = { term: "", range: "year" };
+    let termAnalysisAbortController = null;
+    let termAnalysisRequestId = 0;
+    const termAnalysisCache = new Map();
+    const TERM_ANALYSIS_CACHE_LIMIT = 12;
 
     function escapeHtml(text) {
         return String(text || "")
@@ -860,7 +865,15 @@
         }
 
         // Save params
-        window.currentReportParams = { keyword, start, end, limit, category, source, region };
+        window.currentReportParams = {
+            keyword,
+            start_date: start,
+            end_date: end,
+            limit,
+            category,
+            source,
+            region
+        };
         
         if (isBackground) {
              pollingStartTime = new Date();
@@ -1196,8 +1209,8 @@
     function restoreFilters(p) {
         if(!p) return;
         if(p.keyword) document.getElementById('keyword').value = p.keyword;
-        if(p.start_date) document.getElementById('startDate').value = p.start_date;
-        if(p.end_date) document.getElementById('endDate').value = p.end_date;
+        if(p.start_date || p.start) document.getElementById('startDate').value = p.start_date || p.start;
+        if(p.end_date || p.end) document.getElementById('endDate').value = p.end_date || p.end;
         if(p.limit) document.getElementById('limitSelect').value = p.limit;
         
         // Helper to set checkboxes
@@ -1358,7 +1371,9 @@
             span.className = 'cloud-tag report-clickable-term';
             span.textContent = w.name;
             span.title = '点击查看分析';
-            span.onclick = () => openTermAnalysis(w.name);
+            span.dataset.term = w.name;
+            span.setAttribute('role', 'button');
+            span.tabIndex = 0;
             
             let size = minSize;
             if (maxVal > minVal) {
@@ -1448,7 +1463,9 @@
                 span.className = 'report-clickable-term';
                 span.textContent = match;
                 span.title = '点击查看分析';
-                span.onclick = () => openTermAnalysis(match);
+                span.dataset.term = match;
+                span.setAttribute('role', 'button');
+                span.tabIndex = 0;
                 frag.appendChild(span);
                 last = offset + match.length;
                 return match;
@@ -1459,19 +1476,59 @@
         return box.innerHTML;
     }
 
-    function getReportAnalysisParams() {
-        const p = window.currentReportParams || {};
+    function formatLocalDate(date) {
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    }
+
+    function getDefaultTermDateRange(range = "year") {
+        if (range === "all") return { start_date: "", end_date: "" };
+        const end = new Date();
+        const start = new Date(end);
+        if (range === "year") start.setFullYear(start.getFullYear() - 1);
+        else start.setDate(start.getDate() - 30);
         return {
-            start_date: document.getElementById('startDate')?.value || p.start_date || '',
-            end_date: document.getElementById('endDate')?.value || p.end_date || '',
+            start_date: formatLocalDate(start),
+            end_date: formatLocalDate(end)
+        };
+    }
+
+    function getReportAnalysisParams(range = "year") {
+        const p = window.currentReportParams || {};
+        const defaultRange = getDefaultTermDateRange(range);
+        return {
+            start_date: defaultRange.start_date,
+            end_date: defaultRange.end_date,
             category: p.category || getCheckedValues('cat-cb', 'cat-all') || '',
             source: p.source || getCheckedValues('src-cb', 'src-all') || '',
             region: p.region || getCheckedValues('reg-cb', 'reg-all') || ''
         };
     }
 
+    function handleReportTermClick(target) {
+        if (!target || typeof target.closest !== 'function') return false;
+        const el = target.closest('.report-clickable-term');
+        if (!el) return false;
+        openTermAnalysis(el.dataset.term || el.textContent);
+        return true;
+    }
+
+    document.addEventListener('click', (e) => {
+        if (handleReportTermClick(e.target)) e.preventDefault();
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if ((e.key === 'Enter' || e.key === ' ') && handleReportTermClick(e.target)) {
+            e.preventDefault();
+        }
+    });
+
     function closeTermAnalysis() {
         const modal = document.getElementById('termAnalysisModal');
+        if (termAnalysisAbortController) {
+            termAnalysisAbortController.abort();
+            termAnalysisAbortController = null;
+        }
         modal.classList.remove('show');
         modal.setAttribute('aria-hidden', 'true');
         document.body.classList.remove('modal-open');
@@ -1487,61 +1544,184 @@
     async function openTermAnalysis(term) {
         const cleanTerm = String(term || '').trim();
         if (!cleanTerm) return;
+        activeTermAnalysis = { term: cleanTerm, range: "year" };
+        await loadTermAnalysis(cleanTerm, "year", true);
+    }
+
+    async function loadTermAnalysis(term, range = "year", openModal = false) {
+        const cleanTerm = String(term || '').trim();
+        if (!cleanTerm) return;
+        activeTermAnalysis = { term: cleanTerm, range };
         const modal = document.getElementById('termAnalysisModal');
         const title = document.getElementById('termAnalysisTitle');
         const body = document.getElementById('termAnalysisBody');
+        const requestId = ++termAnalysisRequestId;
         title.textContent = cleanTerm;
-        body.innerHTML = '<div class="detail-loading">加载中...</div>';
-        modal.classList.add('show');
-        modal.setAttribute('aria-hidden', 'false');
-        document.body.classList.add('modal-open');
+        if (termAnalysisAbortController) {
+            termAnalysisAbortController.abort();
+            termAnalysisAbortController = null;
+        }
+        renderTermAnalysisShell({ loading: true });
+        if (openModal || !modal.classList.contains('show')) {
+            modal.classList.add('show');
+            modal.setAttribute('aria-hidden', 'false');
+            document.body.classList.add('modal-open');
+        }
 
         try {
             const params = new URLSearchParams({ term: cleanTerm });
-            const filters = getReportAnalysisParams();
+            params.append('range', range);
+            const filters = getReportAnalysisParams(range);
             Object.entries(filters).forEach(([key, val]) => {
                 if (val && val !== 'all') params.append(key, val);
             });
-            const resp = await fetch(`/api/report/term-analysis?${params.toString()}`, { cache: 'no-store' });
+            const cacheKey = params.toString();
+            const cached = termAnalysisCache.get(cacheKey);
+            if (cached) {
+                renderTermAnalysis(cached, { fromCache: true });
+                return;
+            }
+
+            termAnalysisAbortController = new AbortController();
+            const resp = await fetch(`/api/report/term-analysis?${cacheKey}`, {
+                cache: 'no-store',
+                signal: termAnalysisAbortController.signal
+            });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            if (requestId !== termAnalysisRequestId) return;
+            rememberTermAnalysis(cacheKey, data);
             renderTermAnalysis(data);
         } catch (e) {
+            if (e.name === 'AbortError') return;
+            if (requestId !== termAnalysisRequestId) return;
             body.innerHTML = `<div class="detail-empty">加载失败：${escapeHtml(e.message)}</div>`;
+        } finally {
+            if (requestId === termAnalysisRequestId) termAnalysisAbortController = null;
         }
     }
 
-    function renderTermAnalysis(data) {
+    window.changeTermAnalysisRange = function(range) {
+        if (!activeTermAnalysis.term) return;
+        loadTermAnalysis(activeTermAnalysis.term, range, false);
+    };
+
+    function rememberTermAnalysis(key, data) {
+        if (!key) return;
+        if (termAnalysisCache.has(key)) termAnalysisCache.delete(key);
+        termAnalysisCache.set(key, data);
+        while (termAnalysisCache.size > TERM_ANALYSIS_CACHE_LIMIT) {
+            termAnalysisCache.delete(termAnalysisCache.keys().next().value);
+        }
+    }
+
+    function nextFrame(callback) {
+        if ('requestIdleCallback' in window) {
+            window.requestIdleCallback(callback, { timeout: 500 });
+        } else {
+            window.requestAnimationFrame(() => setTimeout(callback, 0));
+        }
+    }
+
+    function disposeTermCharts() {
+        [chartTermTrend, chartTermSentiment, chartTermCooccurrence].forEach(chart => chart && chart.dispose());
+        chartTermTrend = chartTermSentiment = chartTermCooccurrence = null;
+    }
+
+    function renderTermAnalysisShell(options = {}) {
         const body = document.getElementById('termAnalysisBody');
-        const summary = data.summary || {};
+        disposeTermCharts();
+        const loadingClass = options.loading ? ' loading' : '';
         body.innerHTML = `
-            <div class="term-metrics">
-                <div><strong>${Number(summary.related_count || 0)}</strong><span>相关报道</span></div>
-                <div><strong>${Number(summary.total_heat || 0).toFixed(1)}</strong><span>总热度</span></div>
-                <div><strong>${Number(summary.avg_sentiment || 0).toFixed(1)}</strong><span>情绪均值</span></div>
+            <div class="term-range-toolbar">
+                <button type="button" class="${activeTermAnalysis.range === '30d' ? 'active' : ''}" onclick="changeTermAnalysisRange('30d')">最近30天</button>
+                <button type="button" class="${activeTermAnalysis.range === 'year' ? 'active' : ''}" onclick="changeTermAnalysisRange('year')">1年内</button>
+                <button type="button" class="${activeTermAnalysis.range === 'all' ? 'active' : ''}" onclick="changeTermAnalysisRange('all')">所有时间</button>
+            </div>
+            <div id="termAnalysisStatus" class="term-analysis-status${loadingClass}">${options.loading ? '正在汇总词项数据...' : ''}</div>
+            <div id="termMetrics" class="term-metrics">
+                ${renderTermMetricSkeletons()}
             </div>
             <div class="term-analysis-grid">
                 <div class="term-chart-card">
                     <div class="term-section-title">热度与报道量</div>
+                    <div class="term-chart-placeholder">等待数据...</div>
                     <div id="termTrendChart" class="term-chart"></div>
                 </div>
                 <div class="term-chart-card">
                     <div class="term-section-title">情绪变化</div>
+                    <div class="term-chart-placeholder">等待数据...</div>
                     <div id="termSentimentChart" class="term-chart"></div>
                 </div>
                 <div class="term-chart-card full">
                     <div class="term-section-title">关键词共现关系图谱</div>
+                    <div class="term-chart-placeholder">等待数据...</div>
                     <div id="termCooccurrenceChart" class="term-chart large"></div>
                 </div>
             </div>
             <div class="term-news-section">
                 <div class="term-section-title">相关报道</div>
-                <div class="term-news-list">${renderTermNewsList(data.related_news || [])}</div>
+                <div id="termNewsList" class="term-news-list">${renderTermNewsSkeletons()}</div>
             </div>
         `;
-        renderTermTrendChart(data.trend || {});
-        renderTermSentimentChart(data.sentiment_trend || {});
-        renderTermCooccurrenceChart(data.cooccurrence || {});
+    }
+
+    function renderTermMetricSkeletons() {
+        return `
+            <div class="term-skeleton-block"><strong></strong><span></span></div>
+            <div class="term-skeleton-block"><strong></strong><span></span></div>
+            <div class="term-skeleton-block"><strong></strong><span></span></div>
+        `;
+    }
+
+    function renderTermNewsSkeletons() {
+        return Array.from({ length: 4 }).map(() => `
+            <div class="term-news-item term-news-skeleton">
+                <div></div>
+                <span></span>
+            </div>
+        `).join('');
+    }
+
+    function renderTermAnalysis(data, options = {}) {
+        const body = document.getElementById('termAnalysisBody');
+        if (!document.getElementById('termTrendChart')) {
+            renderTermAnalysisShell();
+        }
+        const summary = data.summary || {};
+        const status = document.getElementById('termAnalysisStatus');
+        if (status) {
+            status.classList.remove('loading');
+            status.textContent = options.fromCache ? '已使用最近一次分析结果' : `分析完成${summary.elapsed_ms ? `（${summary.elapsed_ms}ms）` : ''}`;
+        }
+        const metrics = document.getElementById('termMetrics');
+        if (metrics) {
+            metrics.innerHTML = `
+                <div><strong>${Number(summary.related_count || 0)}</strong><span>相关报道</span></div>
+                <div><strong>${Number(summary.total_heat || 0).toFixed(1)}</strong><span>总热度</span></div>
+                <div><strong>${Number(summary.avg_sentiment || 0).toFixed(1)}</strong><span>情绪均值</span></div>
+            `;
+        }
+        const newsList = document.getElementById('termNewsList');
+        if (newsList) newsList.innerHTML = renderTermNewsList(data.related_news || []);
+
+        clearTermChartPlaceholders(body);
+        nextFrame(() => renderTermTrendChart(data.trend || {}));
+        nextFrame(() => renderTermSentimentChart(data.sentiment_trend || {}));
+        nextFrame(() => renderTermCooccurrenceChart(data.cooccurrence || {}));
+    }
+
+    function clearTermChartPlaceholders(root) {
+        root.querySelectorAll('.term-chart-placeholder').forEach(el => {
+            el.textContent = '正在绘制...';
+        });
+    }
+
+    function hideTermChartPlaceholder(chartId) {
+        const chartEl = document.getElementById(chartId);
+        const card = chartEl ? chartEl.closest('.term-chart-card') : null;
+        const placeholder = card ? card.querySelector('.term-chart-placeholder') : null;
+        if (placeholder) placeholder.style.display = 'none';
     }
 
     function renderTermNewsList(items) {
@@ -1562,6 +1742,7 @@
     }
 
     function renderTermTrendChart(data) {
+        if (chartTermTrend) chartTermTrend.dispose();
         chartTermTrend = echarts.init(document.getElementById('termTrendChart'));
         chartTermTrend.setOption({
             tooltip: { trigger: 'axis' },
@@ -1574,9 +1755,11 @@
                 { name: '热度', type: 'line', yAxisIndex: 1, smooth: true, data: data.heat || [], itemStyle: { color: '#ef4444' } }
             ]
         });
+        hideTermChartPlaceholder('termTrendChart');
     }
 
     function renderTermSentimentChart(data) {
+        if (chartTermSentiment) chartTermSentiment.dispose();
         chartTermSentiment = echarts.init(document.getElementById('termSentimentChart'));
         chartTermSentiment.setOption({
             tooltip: { trigger: 'axis' },
@@ -1585,9 +1768,11 @@
             yAxis: { type: 'value', min: 0, max: 100 },
             series: data.series || []
         });
+        hideTermChartPlaceholder('termSentimentChart');
     }
 
     function renderTermCooccurrenceChart(data) {
+        if (chartTermCooccurrence) chartTermCooccurrence.dispose();
         chartTermCooccurrence = echarts.init(document.getElementById('termCooccurrenceChart'));
         chartTermCooccurrence.setOption({
             tooltip: {},
@@ -1602,6 +1787,7 @@
                 lineStyle: { color: 'source', curveness: 0.25 }
             }]
         });
+        hideTermChartPlaceholder('termCooccurrenceChart');
     }
 
     function renderCorrelationChart(data) {
@@ -1797,9 +1983,9 @@
                     <div class="detail-chip-row">${renderDetailTags(news.entities, '暂无实体')}</div>
                 </div>
             </div>
-            ${similarSection}
             ${topicSection}
             ${sourceSection}
+            ${similarSection}
         `;
     }
 

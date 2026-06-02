@@ -10,7 +10,7 @@ from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
-from sqlalchemy import desc, select, asc, func
+from sqlalchemy import desc, select, asc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AIConfigurationError
@@ -21,6 +21,7 @@ from app.models.news import News
 from app.models.topic import Topic, TopicTimelineItem
 from app.services.ai_service import ai_service
 from app.services.topic_service import topic_service
+from app.utils.tools import normalize_regions_to_countries
 
 router = APIRouter(prefix="/api", tags=["topics"])
 
@@ -116,6 +117,73 @@ def _apply_topic_filters(
         stmt = stmt.where(Topic.heat_score >= min_heat)
 
     return stmt
+
+
+async def _topic_ids_by_news_filters(
+    db: AsyncSession,
+    *,
+    category: Optional[str] = None,
+    source: Optional[str] = None,
+    region: Optional[str] = None,
+) -> set[int] | None:
+    all_values = {"all", "全部"}
+    categories = [c.strip() for c in (category or "").split(",") if c.strip() and c.strip() not in all_values]
+    source_filters = [s.strip() for s in (source or "").split(",") if s.strip() and s.strip() not in all_values]
+    normalized_region = normalize_regions_to_countries(region) if region and region not in all_values else ""
+    regions = [
+        r.strip()
+        for r in normalized_region.split(",")
+        if r.strip() and r.strip() not in {"其他", "其它", "全球"}
+    ]
+
+    if not categories and not source_filters and not regions:
+        return None
+
+    timeline_rows = (await db.execute(select(TopicTimelineItem.topic_id, TopicTimelineItem.news_id, TopicTimelineItem.sources))).all()
+    direct_news_ids: set[int] = set()
+    source_news_ids: set[int] = set()
+    source_topic_pairs: list[tuple[int, int]] = []
+    direct_topic_pairs: list[tuple[int, int]] = []
+
+    for topic_id, news_id, timeline_sources in timeline_rows:
+        if news_id:
+            try:
+                nid = int(news_id)
+                direct_news_ids.add(nid)
+                direct_topic_pairs.append((topic_id, nid))
+            except (TypeError, ValueError):
+                pass
+        if isinstance(timeline_sources, list):
+            for timeline_source in timeline_sources:
+                if not isinstance(timeline_source, dict) or not timeline_source.get("id"):
+                    continue
+                try:
+                    nid = int(timeline_source["id"])
+                    source_news_ids.add(nid)
+                    source_topic_pairs.append((topic_id, nid))
+                except (TypeError, ValueError):
+                    continue
+
+    all_news_ids = direct_news_ids | source_news_ids
+    if not all_news_ids:
+        return set()
+
+    news_stmt = select(News.id).where(News.id.in_(all_news_ids))
+    if categories:
+        news_stmt = news_stmt.where(News.category.in_(categories))
+    if source_filters:
+        news_stmt = news_stmt.where(News.source.in_(source_filters))
+    if regions:
+        news_stmt = news_stmt.where(or_(*[News.region.ilike(f"%{item}%") for item in regions]))
+
+    rows = (await db.execute(news_stmt)).scalars().all()
+    matched_news_ids = {int(nid) for nid in rows}
+    matched_topic_ids = {
+        int(topic_id)
+        for topic_id, news_id in direct_topic_pairs + source_topic_pairs
+        if int(news_id) in matched_news_ids
+    }
+    return matched_topic_ids
 
 
 def _order_topics(stmt, sort_by: str):
@@ -221,6 +289,9 @@ async def get_topics_list(
     end_date: Optional[str] = None,
     sort_by: str = "updated",
     min_heat: Optional[float] = 30,
+    category: Optional[str] = None,
+    source: Optional[str] = None,
+    region: Optional[str] = None,
     db: AsyncSession = Depends(get_db)
 ) -> Dict:
     page = max(1, page)
@@ -235,6 +306,12 @@ async def get_topics_list(
         end_date=end_date,
         min_heat=min_heat,
     )
+
+    matched_topic_ids = await _topic_ids_by_news_filters(db, category=category, source=source, region=region)
+    if matched_topic_ids is not None:
+        if not matched_topic_ids:
+            return {"total": 0, "items": [], "page": page, "size": size}
+        stmt = stmt.where(Topic.id.in_(matched_topic_ids))
 
     if query_text:
         candidate_stmt = _order_topics(stmt, sort_by).limit(1000)

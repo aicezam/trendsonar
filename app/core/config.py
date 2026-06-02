@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     EMBEDDING_CONCURRENCY: int = 5
     LLM_CONCURRENCY: int = 5
 
+    DATA_CLEANUP_ENABLED: bool = False
+    DATA_CLEANUP_MIN_HEAT: float = 1.0
+    DATA_CLEANUP_PROTECT_DAYS: int = 3
+
     CLUSTERING_THRESHOLD: float = 0.78
     CLUSTERING_TIME_WINDOW_HOURS: int = 24
     SCHEDULE_INTERVAL_MINUTES: int = 30

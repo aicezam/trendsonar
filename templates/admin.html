@@ -346,14 +346,14 @@
             fields: [
                 { key: "SILICONFLOW_BASE_URL", label: "Embedding Base URL", type: "text", wide: true },
                 { key: "SILICONFLOW_API_KEY", label: "Embedding API Key", type: "password", wide: true },
-                { key: "EMBEDDING_MODEL", label: "Embedding 模型", type: "text" },
+                { key: "EMBEDDING_MODEL", label: "Embedding 模型", type: "text", testKind: "embedding" },
                 { key: "MAIN_AI_BASE_URL", label: "主模型 Base URL", type: "text", wide: true },
                 { key: "MAIN_AI_API_KEY", label: "主模型 API Key", type: "password", wide: true },
-                { key: "MAIN_AI_MODEL", label: "主模型名称", type: "text" },
+                { key: "MAIN_AI_MODEL", label: "主模型名称", type: "text", testKind: "main" },
                 { key: "MAIN_AI_CONCURRENCY", label: "主模型并发", type: "number" },
                 { key: "BACKUP_AI_BASE_URL", label: "备用模型 Base URL", type: "text", wide: true },
                 { key: "BACKUP_AI_API_KEY", label: "备用模型 API Key", type: "password", wide: true },
-                { key: "BACKUP_AI_MODEL", label: "备用模型名称", type: "text" },
+                { key: "BACKUP_AI_MODEL", label: "备用模型名称", type: "text", testKind: "backup" },
                 { key: "BACKUP_AI_CONCURRENCY", label: "备用模型并发", type: "number" },
             ]
         },
@@ -368,6 +368,15 @@
                 { key: "CRAWLER_CONCURRENCY", label: "爬虫并发", type: "number" },
                 { key: "EMBEDDING_CONCURRENCY", label: "Embedding 并发", type: "number" },
                 { key: "LLM_CONCURRENCY", label: "LLM 总并发", type: "number" },
+            ]
+        },
+        {
+            title: "数据清理",
+            desc: "控制是否在全流程结束后自动删除低热度历史新闻。默认关闭，避免误删历史检索数据。",
+            fields: [
+                { key: "DATA_CLEANUP_ENABLED", label: "启用低热新闻自动清理", type: "boolean", wide: true },
+                { key: "DATA_CLEANUP_MIN_HEAT", label: "删除热度低于", type: "number", step: "0.1" },
+                { key: "DATA_CLEANUP_PROTECT_DAYS", label: "保护最近天数", type: "number" },
             ]
         },
         {
@@ -457,6 +466,9 @@
         CRAWLER_CONCURRENCY: "正文抓取和新闻源请求的全局并发上限。示例：5。",
         EMBEDDING_CONCURRENCY: "Embedding 请求全局并发上限。示例：5，避免向量服务限流。",
         LLM_CONCURRENCY: "所有 LLM 调用共享的总并发上限。示例：5，用于控制外部 API 压力。",
+        DATA_CLEANUP_ENABLED: "是否在全流程任务结束后自动删除低热度历史新闻。默认关闭，关闭时不会删除任何新闻。",
+        DATA_CLEANUP_MIN_HEAT: "启用清理后，删除热度低于该数值的新闻。示例：1。",
+        DATA_CLEANUP_PROTECT_DAYS: "启用清理后，最近 N 天内的新闻不会被自动删除。示例：30。",
         ANALYSIS_INPUT_MAX_LENGTH: "情感/分类分析时输入给模型的最大文本长度。示例：500。",
         SUMMARY_INPUT_MAX_LENGTH: "生成摘要时正文截断长度。示例：2000；设为 0 通常表示不额外截断。",
         SUMMARY_ORIGIN_MAX_LENGTH: "已有原始摘要参与生成时的截断长度。示例：300。",
@@ -518,6 +530,7 @@
 
     function parseConfigInputValue(field, raw) {
         if (field.type === "number") return Number(raw || 0);
+        if (field.type === "boolean") return String(raw) === "true";
         if (field.type === "list") return String(raw || "").split("\n").map((x) => x.trim()).filter(Boolean);
         return raw;
     }
@@ -542,9 +555,19 @@
         const value = getConfigValue(field.key);
         const id = "cfg_" + field.key.replace(/\./g, "_");
         const wide = field.wide ? " wide" : "";
+        const testButton = field.testKind
+            ? `<button type="button" id="cfgTestBtn_${field.testKind}" class="admin-btn config-test-btn" onclick="testAIModel('${field.testKind}')">测试</button>`
+            : "";
+        const testStatus = field.testKind
+            ? `<span id="cfgTestStatus_${field.testKind}" class="config-test-status" aria-live="polite"></span>`
+            : "";
         if (field.type === "select" || field.type === "route") {
             const options = field.type === "route" ? ["main", "backup"] : field.options;
             return `<label class="config-field${wide}">${escapeHtml(field.label)}<select id="${id}" class="admin-input" data-config-key="${field.key}" data-config-type="${field.type}">${options.map((opt) => `<option value="${opt}" ${String(value) === opt ? "selected" : ""}>${opt}</option>`).join("")}</select><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        if (field.type === "boolean") {
+            const boolValue = value === true || String(value).toLowerCase() === "true";
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<select id="${id}" class="admin-input" data-config-key="${field.key}" data-config-type="${field.type}"><option value="false" ${!boolValue ? "selected" : ""}>关闭</option><option value="true" ${boolValue ? "selected" : ""}>启用</option></select><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
         }
         if (field.type === "textarea") {
             return `<label class="config-field${wide}">${escapeHtml(field.label)}<textarea id="${id}" class="admin-textarea config-textarea" data-config-key="${field.key}" data-config-type="${field.type}">${escapeHtml(value)}</textarea><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
@@ -554,7 +577,9 @@
             return `<label class="config-field${wide}">${escapeHtml(field.label)}<textarea id="${id}" class="admin-textarea config-textarea small" data-config-key="${field.key}" data-config-type="${field.type}">${escapeHtml(text)}</textarea><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
         }
         const step = field.step ? ` step="${field.step}"` : "";
-        return `<label class="config-field${wide}">${escapeHtml(field.label)}<input id="${id}" class="admin-input" type="${field.type === "password" ? "password" : field.type}"${step} value="${escapeHtml(value)}" data-config-key="${field.key}" data-config-type="${field.type}"><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        const input = `<input id="${id}" class="admin-input" type="${field.type === "password" ? "password" : field.type}"${step} value="${escapeHtml(value)}" data-config-key="${field.key}" data-config-type="${field.type}">`;
+        const control = field.testKind ? `<div class="config-test-row">${input}${testButton}</div>` : input;
+        return `<label class="config-field${wide}">${escapeHtml(field.label)}${control}<span class="config-help">${escapeHtml(getConfigHelp(field))}</span>${testStatus}</label>`;
     }
 
     function collectConfigForm() {
@@ -569,6 +594,86 @@
         currentConfigText = JSON.stringify(configData, null, 2);
         setEditorValue(currentConfigText);
         return currentConfigText;
+    }
+
+    const AI_TEST_CONFIG = {
+        embedding: {
+            label: "Embedding",
+            baseKey: "SILICONFLOW_BASE_URL",
+            apiKey: "SILICONFLOW_API_KEY",
+            modelKey: "EMBEDDING_MODEL",
+        },
+        main: {
+            label: "主模型",
+            baseKey: "MAIN_AI_BASE_URL",
+            apiKey: "MAIN_AI_API_KEY",
+            modelKey: "MAIN_AI_MODEL",
+        },
+        backup: {
+            label: "备用模型",
+            baseKey: "BACKUP_AI_BASE_URL",
+            apiKey: "BACKUP_AI_API_KEY",
+            modelKey: "BACKUP_AI_MODEL",
+        },
+    };
+
+    function getConfigInputValue(key) {
+        const id = "cfg_" + key.replace(/\./g, "_");
+        const el = document.getElementById(id);
+        if (el) return String(el.value || "").trim();
+        return String(getConfigValue(key) || "").trim();
+    }
+
+    function setModelTestStatus(kind, message, cls = "") {
+        const statusEl = document.getElementById("cfgTestStatus_" + kind);
+        if (!statusEl) return;
+        statusEl.textContent = message || "";
+        statusEl.className = "config-test-status" + (cls ? (" " + cls) : "");
+    }
+
+    async function testAIModel(kind) {
+        const meta = AI_TEST_CONFIG[kind];
+        if (!meta) return;
+        const button = document.getElementById("cfgTestBtn_" + kind);
+        const payload = {
+            kind,
+            base_url: getConfigInputValue(meta.baseKey),
+            api_key: getConfigInputValue(meta.apiKey),
+            model: getConfigInputValue(meta.modelKey),
+        };
+        if (!payload.base_url || !payload.api_key || !payload.model) {
+            setModelTestStatus(kind, "请先填写 Base URL、API Key 和模型名称。", "error");
+            return;
+        }
+
+        if (button) {
+            button.disabled = true;
+            button.textContent = "测试中";
+        }
+        setModelTestStatus(kind, "正在测试服务连通性...", "");
+        try {
+            const resp = await fetch("/api/admin/ai/test", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const data = await resp.json().catch(() => ({}));
+            const elapsed = data.elapsed_ms ? `（${data.elapsed_ms}ms）` : "";
+            if (!resp.ok) {
+                setModelTestStatus(kind, data.detail || "测试失败", "error");
+            } else if (data.ok) {
+                setModelTestStatus(kind, (data.message || (meta.label + "服务可用")) + elapsed, "ok");
+            } else {
+                setModelTestStatus(kind, data.message || (meta.label + "服务不可用"), "error");
+            }
+        } catch (e) {
+            setModelTestStatus(kind, "测试请求失败: " + e.message, "error");
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = "测试";
+            }
+        }
     }
 
     function toggleAdvancedConfig() {

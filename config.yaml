@@ -21,24 +21,25 @@ WEIBO_COOKIE: "Example:JAHKSJDHKASDHKJ……"
 
 # ================= AI 模型配置 =================
 # --- Embedding & Rerank (SiliconFlow) ---
-# 用于计算向量相似度和重排序（推荐免费的 硅基流动的 BAAI/bge-m3）
+# 用于计算向量相似度和重排序（推荐免费的 硅基流动的 BAAI/bge-large-zh-v1.5）
 # 注册硅基流动：https://cloud.siliconflow.cn/i/fUoGwjZb
 SILICONFLOW_API_KEY: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 SILICONFLOW_BASE_URL: https://api.siliconflow.cn/v1
-EMBEDDING_MODEL: BAAI/bge-m3
+EMBEDDING_MODEL: BAAI/bge-large-zh-v1.5
 
 # --- 主力生成模型 ---
-# 用于生成新闻摘要 (推荐免费的智谱 glm-4-flash)
+# 用于生成新闻摘要 (推荐免费的 硅基流动的 THUDM/GLM-4-9B-0414)
+# 注册硅基流动：https://cloud.siliconflow.cn/i/fUoGwjZb
 MAIN_AI_API_KEY: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-MAIN_AI_BASE_URL: https://open.bigmodel.cn/api/paas/v4
-MAIN_AI_MODEL: glm-4-flash
+MAIN_AI_BASE_URL: https://api.siliconflow.cn/v1
+MAIN_AI_MODEL: THUDM/GLM-4-9B-0414
 MAIN_AI_CONCURRENCY: 10  # 最大并发请求数，根据模型能力调整
 
 # --- 备用生成模型 ---
-# 当主力模型失败时自动切换，聚类去重优先使用此模型（推荐deepseek）
+# 当主力模型失败时自动切换，聚类去重优先使用此模型（可以找点便宜的，比如 deepseek，如果用免费的也可以，但是专题和报告的效果差很多）
 # BACKUP_AI_API_KEY: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-# BACKUP_AI_BASE_URL: https://api.xiaomimimo.com/v1
-# BACKUP_AI_MODEL: mimo-v2-flash
+# BACKUP_AI_BASE_URL: https://api.deepseek.com
+# BACKUP_AI_MODEL: deepseek-v4-flash
 # BACKUP_AI_CONCURRENCY: 10  # 最大并发请求数，根据模型能力调整
 
 BACKUP_AI_API_KEY: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
@@ -93,6 +94,14 @@ AUTO_SUMMARY_TOP_N: 30
 AUTO_ANALYSIS_TOP_N: 200
 # 分析批次大小 (建议 10-50)，受AI模型的上下文长度和性能限制，建议根据模型能力调整
 ANALYSIS_BATCH_SIZE: 20
+
+# ================= 数据清理配置 =================
+# 是否自动删除低热度历史新闻。默认关闭，避免影响历史检索和报表分析
+DATA_CLEANUP_ENABLED: false
+# 启用清理后，删除热度低于该数值的新闻
+DATA_CLEANUP_MIN_HEAT: 1.0
+# 启用清理后，最近 N 天内的新闻不会被自动删除
+DATA_CLEANUP_PROTECT_DAYS: 3
 
 # ================= Token 优化配置 =================
 # 情感分析/分类时，截取的最大文本长度（标题 + 正文前 N 字）

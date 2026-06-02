@@ -6,25 +6,26 @@
 - `get_report_history`: 获取报表历史
 """
 
-from collections import Counter, defaultdict
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta
 from itertools import combinations
-from typing import Optional, List
+from typing import Any, Optional, List
 import hashlib
 import json
+import time as perf_time
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import Text, cast, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import verify_admin_access
-from app.api.endpoints.news import _semantic_news_search
 from app.core.database import get_db
 from app.models.news import News
 from app.services.report_service import report_service
 from app.services.task_manager import task_manager
-from app.utils.news_query import build_news_query_filters, serialize_news_item
+from app.utils.news_query import build_news_query_filters
+from app.utils.tools import normalize_regions_to_countries
 
 router = APIRouter(prefix="/api/report", tags=["report"])
 
@@ -34,10 +35,14 @@ def _valid_report_term(value: str) -> bool:
     return bool(text and text.lower() not in {"无内容", "分析失败", "暂无关键词", "其他", "其它", "null", "none"})
 
 
-def _news_terms(news: News, limit: int = 12) -> list[str]:
+def _news_terms(news: Any, limit: int = 12) -> list[str]:
     terms: list[str] = []
     seen: set[str] = set()
-    for item in (news.keywords or []) + (news.entities or []):
+    if isinstance(news, dict):
+        raw_terms = (news.get("keywords") or []) + (news.get("entities") or [])
+    else:
+        raw_terms = (news.keywords or []) + (news.entities or [])
+    for item in raw_terms:
         if not isinstance(item, str) or not _valid_report_term(item):
             continue
         value = item.strip()
@@ -58,6 +63,61 @@ def _label_sentiment(label: str) -> str:
     if text == "负面":
         return "negative"
     return "neutral"
+
+
+def _term_match_conditions(query: str):
+    like = f"%{query}%"
+    return or_(
+        News.title.ilike(like),
+        News.summary.ilike(like),
+        cast(News.keywords, Text).ilike(like),
+        cast(News.entities, Text).ilike(like),
+    )
+
+
+def _score_term_news(item: Any, query: str) -> float:
+    def get_value(name: str, default: Any = None) -> Any:
+        if isinstance(item, dict):
+            return item.get(name, default)
+        return getattr(item, name, default)
+
+    lowered = query.lower()
+    score = 0.0
+    title = (get_value("title", "") or "").lower()
+    summary = (get_value("summary", "") or "").lower()
+    terms = [
+        t.strip().lower()
+        for t in (get_value("keywords", []) or []) + (get_value("entities", []) or [])
+        if isinstance(t, str) and t.strip()
+    ]
+    if lowered in terms:
+        score += 5.0
+    if any(lowered in term for term in terms):
+        score += 2.0
+    if lowered in title:
+        score += 1.5
+    if lowered in summary:
+        score += 0.5
+    score += min(float(get_value("heat_score", 0.0) or 0.0) / 1000, 1.0)
+    return score
+
+
+def _serialize_term_news_row(item: dict[str, Any]) -> dict[str, Any]:
+    publish_date = item.get("publish_date")
+    return {
+        "id": item.get("id"),
+        "title": item.get("title"),
+        "url": item.get("url"),
+        "source": item.get("source"),
+        "heat": item.get("heat_score"),
+        "time": publish_date.isoformat() if publish_date else None,
+        "summary": item.get("summary"),
+        "sources": item.get("sources"),
+        "category": item.get("category"),
+        "region": normalize_regions_to_countries(item.get("region")),
+        "sentiment_label": item.get("sentiment_label"),
+        "sentiment_score": item.get("sentiment_score"),
+    }
 
 
 @router.get("/recent")
@@ -178,58 +238,124 @@ async def get_report_term_analysis(
     category: Optional[str] = None,
     region: Optional[str] = None,
     source: Optional[str] = None,
+    range: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     query = (term or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="term is required")
+    range_key = (range or "year").strip().lower()
+    if not start_date and not end_date and range_key != "all":
+        now = datetime.now()
+        if range_key == "year":
+            start_date = (now - timedelta(days=365)).strftime("%Y-%m-%d")
+        else:
+            start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
 
-    stmt = build_news_query_filters(
-        select(News),
+    term_condition = _term_match_conditions(query)
+    elapsed_start = perf_time.perf_counter()
+
+    stats_stmt = build_news_query_filters(
+        select(
+            func.count(),
+            func.coalesce(func.sum(News.heat_score), 0.0),
+            func.avg(News.sentiment_score),
+        ),
         date="all",
         start_date=start_date,
         end_date=end_date,
         category=category,
         region=region,
         source=source,
-    )
-    scored, total, elapsed_ms = await _semantic_news_search(
-        db,
-        stmt,
-        query,
-        offset=0,
-        limit=30,
-        candidate_limit=2000,
-        min_score=0.2,
-        text_terms=[query],
-    )
-    news_list = [item for _, item in scored]
+    ).where(term_condition)
+    total, total_heat, avg_sentiment = (await db.execute(stats_stmt)).one()
 
-    related_news = [serialize_news_item(item) for item in news_list[:10]]
-    dates: list[str] = []
-    daily: dict[str, dict[str, float | int]] = defaultdict(lambda: {"heat": 0.0, "count": 0, "sentiment_sum": 0.0, "sentiment_count": 0})
+    day_expr = func.date(News.publish_date)
+    trend_stmt = build_news_query_filters(
+        select(
+            day_expr.label("day"),
+            func.count().label("count"),
+            func.coalesce(func.sum(News.heat_score), 0.0).label("heat"),
+            func.avg(News.sentiment_score).label("avg_sentiment"),
+        ),
+        date="all",
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+    ).where(term_condition).group_by(day_expr).order_by(day_expr)
+    trend_rows = (await db.execute(trend_stmt)).all()
+
+    sentiment_stmt = build_news_query_filters(
+        select(News.sentiment_label, func.count()),
+        date="all",
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+    ).where(term_condition).group_by(News.sentiment_label)
     sentiment_counts: Counter[str] = Counter()
+    for label, count in (await db.execute(sentiment_stmt)).all():
+        sentiment_counts[_label_sentiment(label)] += int(count)
+
+    sample_stmt = build_news_query_filters(
+        select(
+            News.id,
+            News.title,
+            News.url,
+            News.source,
+            News.heat_score,
+            News.publish_date,
+            News.summary,
+            News.sources,
+            News.category,
+            News.region,
+            News.sentiment_label,
+            News.sentiment_score,
+            News.keywords,
+            News.entities,
+        ),
+        date="all",
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+    ).where(term_condition).order_by(desc(News.heat_score), desc(News.publish_date)).limit(2000)
+    sample_rows = [dict(row) for row in (await db.execute(sample_stmt)).mappings().all()]
+    sample_rows.sort(
+        key=lambda item: (
+            _score_term_news(item, query),
+            float(item.get("heat_score") or 0.0),
+            item.get("publish_date") or datetime.min,
+        ),
+        reverse=True,
+    )
+
+    related_news = [_serialize_term_news_row(item) for item in sample_rows[:10]]
     keyword_counter: Counter[str] = Counter()
     pair_counter: Counter[tuple[str, str]] = Counter()
 
-    for item in news_list:
-        day = (item.publish_date or datetime.now()).date().isoformat()
-        dates.append(day)
-        bucket = daily[day]
-        bucket["count"] = int(bucket["count"]) + 1
-        bucket["heat"] = float(bucket["heat"]) + float(item.heat_score or 0.0)
-        if item.sentiment_score is not None:
-            bucket["sentiment_sum"] = float(bucket["sentiment_sum"]) + float(item.sentiment_score)
-            bucket["sentiment_count"] = int(bucket["sentiment_count"]) + 1
-        sentiment_counts[_label_sentiment(item.sentiment_label)] += 1
-
+    for item in sample_rows:
         terms = _news_terms(item)
         for kw in terms:
             keyword_counter[kw] += 1
         for left, right in combinations(sorted(set(terms), key=str.lower)[:8], 2):
             pair_counter[(left, right)] += 1
 
-    labels = sorted(set(dates))
+    labels = [str(day) for day, _count, _heat, _avg_sentiment in trend_rows if day]
+    daily = {
+        str(day): {
+            "count": int(count or 0),
+            "heat": float(heat or 0.0),
+            "avg_sentiment": float(avg or 0.0) if avg is not None else None,
+        }
+        for day, count, heat, avg in trend_rows
+        if day
+    }
     trend = {
         "dates": labels,
         "heat": [round(float(daily[label]["heat"]), 2) for label in labels],
@@ -243,8 +369,8 @@ async def get_report_term_analysis(
                 "type": "line",
                 "smooth": True,
                 "data": [
-                    round(float(daily[label]["sentiment_sum"]) / max(1, int(daily[label]["sentiment_count"])), 2)
-                    if int(daily[label]["sentiment_count"]) else None
+                    round(float(daily[label]["avg_sentiment"]), 2)
+                    if daily[label]["avg_sentiment"] is not None else None
                     for label in labels
                 ],
             }
@@ -264,15 +390,11 @@ async def get_report_term_analysis(
         "term": query,
         "summary": {
             "related_count": total,
-            "returned_count": len(news_list),
-            "total_heat": round(sum(float(item.heat_score or 0.0) for item in news_list), 2),
-            "avg_sentiment": round(
-                sum(float(item.sentiment_score or 0.0) for item in news_list if item.sentiment_score is not None)
-                / max(1, len([item for item in news_list if item.sentiment_score is not None])),
-                2,
-            ),
+            "returned_count": len(sample_rows),
+            "total_heat": round(float(total_heat or 0.0), 2),
+            "avg_sentiment": round(float(avg_sentiment or 0.0), 2),
             "sentiment_counts": dict(sentiment_counts),
-            "elapsed_ms": round(elapsed_ms, 1),
+            "elapsed_ms": round((perf_time.perf_counter() - elapsed_start) * 1000, 1),
         },
         "related_news": related_news,
         "trend": trend,

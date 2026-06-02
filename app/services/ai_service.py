@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 import logging
+from time import monotonic
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import aiohttp
@@ -51,6 +52,22 @@ class AIService:
 
         self.main_sem = asyncio.Semaphore(settings.MAIN_AI_CONCURRENCY)
         self.backup_sem = asyncio.Semaphore(settings.BACKUP_AI_CONCURRENCY)
+        self._last_embedding_error_signature = ""
+        self._last_embedding_error_at = 0.0
+        self._suppressed_embedding_errors = 0
+
+    def _log_embedding_error(self, message: str, *, status: int | None = None, body: str = "") -> None:
+        signature = f"{status}:{body[:160]}"
+        now = monotonic()
+        if signature == self._last_embedding_error_signature and now - self._last_embedding_error_at < 60:
+            self._suppressed_embedding_errors += 1
+            return
+        if self._suppressed_embedding_errors:
+            logger.warning(f"向量 API 同类错误已抑制 {self._suppressed_embedding_errors} 次")
+            self._suppressed_embedding_errors = 0
+        self._last_embedding_error_signature = signature
+        self._last_embedding_error_at = now
+        logger.error(message)
 
     def reload_config(self) -> None:
         """
@@ -1029,7 +1046,7 @@ class AIService:
             return []
         if not self._has_embedding():
             return [[] for _ in texts]
-        cleaned_texts = [t.replace("\n", " ").strip()[:1000] for t in texts]
+        cleaned_texts = [str(t or "").replace("\n", " ").strip()[:1000] for t in texts]
 
         url = f"{settings.SILICONFLOW_BASE_URL.rstrip('/')}/embeddings"
         headers = {
@@ -1037,11 +1054,17 @@ class AIService:
             "Content-Type": "application/json",
         }
 
-        all_embeddings: List[List[float]] = []
+        all_embeddings: List[List[float]] = [[] for _ in cleaned_texts]
+        indexed_texts = [(idx, text) for idx, text in enumerate(cleaned_texts) if text]
+        if not indexed_texts:
+            return all_embeddings
+
         batch_size = 20
 
-        for i in range(0, len(cleaned_texts), batch_size):
-            batch = cleaned_texts[i : i + batch_size]
+        for i in range(0, len(indexed_texts), batch_size):
+            batch_items = indexed_texts[i : i + batch_size]
+            batch_indices = [idx for idx, _ in batch_items]
+            batch = [text for _, text in batch_items]
             payload = {
                 "model": settings.EMBEDDING_MODEL,
                 "input": batch,
@@ -1052,22 +1075,51 @@ class AIService:
                     async with aiohttp.ClientSession() as session:
                         async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
                             if resp.status == 200:
-                                data = await resp.json()
-                                batch_res = sorted(data["data"], key=lambda x: x["index"])
-                                return [x["embedding"] for x in batch_res]
+                                data = await resp.json(content_type=None)
+                                rows = data.get("data") if isinstance(data, dict) else None
+                                if not isinstance(rows, list):
+                                    self._log_embedding_error(
+                                        f"❌ 向量 API 响应格式异常: status=200, model={settings.EMBEDDING_MODEL}, "
+                                        f"batch={len(batch)}, body={json.dumps(data, ensure_ascii=False)[:500]}",
+                                        status=200,
+                                        body=json.dumps(data, ensure_ascii=False),
+                                    )
+                                    return [[] for _ in batch]
+                                batch_res = sorted(rows, key=lambda x: x.get("index", 0))
+                                embeddings = []
+                                for item in batch_res:
+                                    emb = item.get("embedding") if isinstance(item, dict) else None
+                                    embeddings.append(emb if isinstance(emb, list) else [])
+                                if len(embeddings) != len(batch):
+                                    self._log_embedding_error(
+                                        f"❌ 向量 API 返回数量异常: expected={len(batch)}, got={len(embeddings)}, "
+                                        f"model={settings.EMBEDDING_MODEL}",
+                                        status=200,
+                                        body=f"count:{len(embeddings)}",
+                                    )
+                                return embeddings[:len(batch)] + [[] for _ in range(max(0, len(batch) - len(embeddings)))]
                             if resp.status == 401:
                                 error_text = await resp.text()
                                 logger.error(f"❌ 向量 API 认证失败 (401): {error_text}")
                                 raise AIConfigurationError("Embedding API Key 无效")
-                            logger.error(f"❌ 向量 API 错误: {await resp.text()}")
+                            error_text = await resp.text()
+                            self._log_embedding_error(
+                                f"❌ 向量 API 错误: status={resp.status}, model={settings.EMBEDDING_MODEL}, "
+                                f"batch={len(batch)}, input_chars={sum(len(x) for x in batch)}, body={error_text[:500]}",
+                                status=resp.status,
+                                body=error_text,
+                            )
                             return [[] for _ in batch]
 
-                all_embeddings.extend(await concurrency_service.run_embedding(do_embedding_request))
+                batch_embeddings = await concurrency_service.run_embedding(do_embedding_request)
+                for idx, emb in zip(batch_indices, batch_embeddings):
+                    all_embeddings[idx] = emb
             except AIConfigurationError:
                 raise
             except Exception as e:
                 logger.error(f"❌ 向量网络错误: {e}")
-                all_embeddings.extend([[] for _ in batch])
+                for idx in batch_indices:
+                    all_embeddings[idx] = []
         return all_embeddings
 
     async def verify_cluster_batch(self, pairs: List[Dict[str, str]]) -> List[bool]:

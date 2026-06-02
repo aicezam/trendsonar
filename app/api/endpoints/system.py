@@ -21,12 +21,13 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import settings, verify_admin_access
 from app.core.database import get_db
+from app.core.exceptions import AIConfigurationError
 from app.core.config import get_missing_config_keys, BASE_DIR
 from app.core.logger import clear_cached_logs, get_cached_log_text, logger
 from app.models.news import News
@@ -41,6 +42,117 @@ from app.utils.tools import parse_query_time_range
 router = APIRouter(prefix="/api", tags=["system"])
 
 _LOG_FILE_RE = re.compile(r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\.log$")
+
+_REGION_TERMS = [
+    "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江", "上海", "江苏", "浙江", "安徽",
+    "福建", "江西", "山东", "河南", "湖北", "湖南", "广东", "广西", "海南", "重庆", "四川", "贵州",
+    "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆", "香港", "澳门", "台湾",
+]
+
+
+def _split_chat_search_terms(query: str) -> list[str]:
+    stop_words = {
+        "我", "你", "他", "她", "它", "我们", "你们", "他们", "希望", "帮我", "搜集", "总结", "提供",
+        "新闻", "链接", "简报", "形式", "可以", "各种", "最近", "一周", "近一周", "官媒", "权威",
+        "板块", "按照", "具体", "要求", "第一", "第二", "第三", "第四", "浏览器", "搜索", "复制",
+    }
+    values: list[str] = [term for term in _REGION_TERMS if term in (query or "")]
+    for token in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", query or ""):
+        token = token.strip()
+        if token in stop_words:
+            continue
+        if token not in values:
+            values.append(token)
+        if len(values) >= 8:
+            break
+    return values
+
+
+def _matches_chat_term(news: News, term: str) -> bool:
+    lowered = term.lower()
+    return any(
+        lowered in (value or "").lower()
+        for value in [news.title, news.summary, news.source, news.region, news.category]
+    )
+
+
+def _chat_text_score(news: News, terms: list[str]) -> float:
+    text_parts = [
+        news.title or "",
+        news.summary or "",
+        news.source or "",
+        news.region or "",
+        news.category or "",
+    ]
+    text = " ".join(text_parts).lower()
+    score = 0.0
+    for term in terms:
+        lowered = term.lower()
+        if lowered in (news.title or "").lower():
+            score += 3.0
+        if lowered in (news.summary or "").lower():
+            score += 1.0
+        if lowered in (news.region or "").lower() or lowered in (news.source or "").lower():
+            score += 1.5
+        if lowered in text:
+            score += 0.5
+    score += min(float(news.heat_score or 0.0) / 100, 1.0)
+    return score
+
+
+async def _build_chat_text_context(db: AsyncSession, query: str, start_date: datetime | None, end_date: datetime | None) -> str:
+    terms = _split_chat_search_terms(query)
+    if not terms:
+        return ""
+
+    stmt = select(News).options(defer(News.content), defer(News.embedding))
+    if start_date:
+        stmt = stmt.where(News.publish_date >= start_date)
+    if end_date:
+        stmt = stmt.where(News.publish_date < end_date)
+    if not start_date and not end_date:
+        stmt = stmt.where(News.publish_date >= datetime.now() - timedelta(days=7))
+
+    conditions = []
+    for term in terms:
+        like = f"%{term}%"
+        conditions.extend(
+            [
+                News.title.ilike(like),
+                News.summary.ilike(like),
+                News.source.ilike(like),
+                News.region.ilike(like),
+                News.category.ilike(like),
+            ]
+        )
+    stmt = stmt.where(or_(*conditions)).order_by(desc(News.heat_score), desc(News.publish_date)).limit(200)
+    result = await db.execute(stmt)
+    news_items = result.scalars().all()
+
+    if not news_items:
+        return ""
+
+    scored_items = [(_chat_text_score(item, terms), item) for item in news_items]
+    scored_items = [(score, item) for score, item in scored_items if score > 0]
+    region_terms = [term for term in terms if term in _REGION_TERMS]
+    if region_terms:
+        region_scored = [
+            (score, item)
+            for score, item in scored_items
+            if any(_matches_chat_term(item, term) for term in region_terms)
+        ]
+        if region_scored:
+            scored_items = region_scored
+    scored_items.sort(key=lambda x: (x[0], x[1].heat_score or 0.0, x[1].publish_date or datetime.min), reverse=True)
+    news_items = [item for _, item in scored_items[:30]]
+
+    lines = []
+    for i, n in enumerate(news_items, start=1):
+        lines.append(
+            f"{i}. [{n.title}] (来源:{n.source}, 时间:{n.publish_date}, 热度:{n.heat_score}, 链接:{n.url})\n摘要: {n.summary or ''}"
+        )
+    logger.info(f"/api/chat 文本检索兜底完成: terms={terms}, context={len(news_items)}")
+    return "\n\n".join(lines)
 
 
 @router.post("/admin/reanalyze_all_categories")
@@ -84,6 +196,13 @@ async def api_analyze_all_sentiment():
 
 class UpdateConfigPayload(BaseModel):
     yaml_text: str
+
+
+class TestAIModelPayload(BaseModel):
+    kind: str
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
 
 
 class UpdateSourcesPayload(BaseModel):
@@ -187,6 +306,150 @@ def _source_key(source: dict) -> str:
     return str(source.get("address") or source.get("name") or "").strip()
 
 
+def _redact_ai_test_message(message: object, secrets: list[str] | None = None) -> str:
+    text = str(message or "")
+    for secret in secrets or []:
+        value = str(secret or "").strip()
+        if value:
+            text = text.replace(value, "***")
+    return text[:800]
+
+
+def _validate_ai_test_payload(payload: TestAIModelPayload) -> tuple[str, str, str, str, list[str]]:
+    kind = str(payload.kind or "").strip().lower()
+    base_url = str(payload.base_url or "").strip()
+    api_key = str(payload.api_key or "").strip()
+    model = str(payload.model or "").strip()
+    missing = []
+    if not base_url:
+        missing.append("Base URL")
+    if not api_key:
+        missing.append("API Key")
+    if not model:
+        missing.append("模型名称")
+    return kind, base_url, api_key, model, missing
+
+
+async def _test_embedding_config(base_url: str, api_key: str, model: str) -> dict:
+    import aiohttp
+
+    started = perf_time.perf_counter()
+    url = f"{base_url.rstrip('/')}/embeddings"
+    payload = {
+        "model": model,
+        "input": ["TrendSonar embedding connectivity test"],
+        "encoding_format": "float",
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, headers=headers, json=payload) as resp:
+                body = await resp.text()
+                elapsed_ms = round((perf_time.perf_counter() - started) * 1000, 1)
+                if resp.status != 200:
+                    return {
+                        "ok": False,
+                        "kind": "embedding",
+                        "status_code": resp.status,
+                        "elapsed_ms": elapsed_ms,
+                        "message": f"HTTP {resp.status}: {_redact_ai_test_message(body, [api_key])}",
+                    }
+                try:
+                    data = json.loads(body)
+                except Exception as e:
+                    return {
+                        "ok": False,
+                        "kind": "embedding",
+                        "status_code": resp.status,
+                        "elapsed_ms": elapsed_ms,
+                        "message": f"响应不是有效 JSON: {_redact_ai_test_message(e, [api_key])}",
+                    }
+                rows = data.get("data") if isinstance(data, dict) else None
+                first = rows[0] if isinstance(rows, list) and rows else {}
+                embedding = first.get("embedding") if isinstance(first, dict) else None
+                if isinstance(embedding, list) and embedding:
+                    return {
+                        "ok": True,
+                        "kind": "embedding",
+                        "status_code": resp.status,
+                        "elapsed_ms": elapsed_ms,
+                        "dimension": len(embedding),
+                        "message": f"Embedding 服务可用，向量维度 {len(embedding)}",
+                    }
+                return {
+                    "ok": False,
+                    "kind": "embedding",
+                    "status_code": resp.status,
+                    "elapsed_ms": elapsed_ms,
+                    "message": "响应中没有有效 embedding 数据",
+                }
+    except Exception as e:
+        elapsed_ms = round((perf_time.perf_counter() - started) * 1000, 1)
+        return {
+            "ok": False,
+            "kind": "embedding",
+            "elapsed_ms": elapsed_ms,
+            "message": _redact_ai_test_message(e, [api_key]),
+        }
+
+
+async def _test_chat_model_config(kind: str, base_url: str, api_key: str, model: str) -> dict:
+    from openai import AsyncOpenAI
+
+    started = perf_time.perf_counter()
+    label = "主模型" if kind == "main" else "备用模型"
+    try:
+        async with AsyncOpenAI(api_key=api_key, base_url=base_url) as client:
+            extra_body = {}
+            if "modelscope" in str(client.base_url).lower():
+                extra_body["enable_thinking"] = False
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是 TrendSonar 的连通性测试。请只返回 OK。"},
+                    {"role": "user", "content": "请回复 OK"},
+                ],
+                timeout=30,
+                extra_body=extra_body if extra_body else None,
+            )
+        elapsed_ms = round((perf_time.perf_counter() - started) * 1000, 1)
+        content = ""
+        try:
+            content = response.choices[0].message.content or ""
+        except Exception:
+            content = ""
+        if content.strip():
+            preview = content.strip().replace("\n", " ")[:80]
+            return {
+                "ok": True,
+                "kind": kind,
+                "elapsed_ms": elapsed_ms,
+                "message": f"{label}服务可用，返回: {preview}",
+            }
+        return {
+            "ok": False,
+            "kind": kind,
+            "elapsed_ms": elapsed_ms,
+            "message": f"{label}响应为空",
+        }
+    except Exception as e:
+        elapsed_ms = round((perf_time.perf_counter() - started) * 1000, 1)
+        status_code = getattr(e, "status_code", None)
+        body = getattr(e, "body", None)
+        raw_message = body if body else e
+        return {
+            "ok": False,
+            "kind": kind,
+            "status_code": status_code,
+            "elapsed_ms": elapsed_ms,
+            "message": _redact_ai_test_message(raw_message, [api_key]),
+        }
+
+
 def _get_logs_dir() -> Path:
     return BASE_DIR / "logs"
 
@@ -218,6 +481,36 @@ async def api_update_admin_config(payload: UpdateConfigPayload, request: Request
         raise HTTPException(status_code=400, detail=str(e))
     schedule_restart()
     return {"ok": True, "restarting": True}
+
+
+@router.post("/admin/ai/test")
+async def api_test_ai_model(payload: TestAIModelPayload, request: Request):
+    """
+    输入:
+    - `payload`: 模型类型、Base URL、API Key 与模型名称
+
+    输出:
+    - 连通性测试结果、耗时和简短错误原因
+
+    作用:
+    - 管理端在保存配置前测试 Embedding、主模型或备用模型服务是否可用
+    """
+
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+
+    kind, base_url, api_key, model, missing = _validate_ai_test_payload(payload)
+    if kind not in {"embedding", "main", "backup"}:
+        return {"ok": False, "kind": kind, "message": "未知的模型测试类型"}
+    if missing:
+        return {"ok": False, "kind": kind, "message": "缺少配置: " + "、".join(missing)}
+
+    if kind == "embedding":
+        result = await _test_embedding_config(base_url, api_key, model)
+    else:
+        result = await _test_chat_model_config(kind, base_url, api_key, model)
+    result["model"] = model
+    return result
 
 
 @router.get("/admin/logs")
@@ -357,13 +650,17 @@ async def chat_api(
     """
 
     logger.info(f"收到聊天请求: query={query}, stream={stream}, use_backup={use_backup}")
-    q_emb_list = await ai_service.get_embeddings([query])
-    q_vec = np.array(q_emb_list[0]) if q_emb_list and q_emb_list[0] else None
+    try:
+        q_emb_list = await ai_service.get_embeddings([query])
+        q_vec = np.array(q_emb_list[0]) if q_emb_list and q_emb_list[0] else None
+    except AIConfigurationError as e:
+        logger.warning(f"/api/chat 向量检索不可用，改用文本检索: {e}")
+        q_vec = None
 
     context_text = ""
+    start_date, end_date = parse_query_time_range(query)
     if q_vec is not None:
         rag_start = perf_time.perf_counter()
-        start_date, end_date = parse_query_time_range(query)
 
         # 优化：RAG 只需要 embedding 和摘要，不需要加载正文
         stmt = select(News).options(defer(News.content)).where(News.embedding.is_not(None))
@@ -417,6 +714,8 @@ async def chat_api(
         # 显式清理 RAG 中间变量，释放内存
         del candidates, all_scored, top_news
         gc.collect()
+    else:
+        context_text = await _build_chat_text_context(db, query, start_date, end_date)
 
     if not context_text:
         context_text = "未找到相关新闻。"

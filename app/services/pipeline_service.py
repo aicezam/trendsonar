@@ -439,13 +439,20 @@ async def cleanup_old_data() -> None:
     - 清理过期且低热度的数据，控制数据库体量
     """
 
-    logger.info("🧹 开始清理过期数据...")
+    enabled = bool(getattr(settings, "DATA_CLEANUP_ENABLED", False))
+    if not enabled:
+        logger.info("⏩ 数据清理已关闭，跳过低热新闻自动删除")
+        return
+
+    min_heat = float(getattr(settings, "DATA_CLEANUP_MIN_HEAT", 1.0) or 0.0)
+    protect_days = max(0, int(getattr(settings, "DATA_CLEANUP_PROTECT_DAYS", 3) or 0))
+    logger.info(f"🧹 开始清理低热新闻: protect_days={protect_days}, min_heat={min_heat}")
     async with AsyncSessionLocal() as db:
-        deadline = datetime.now() - timedelta(days=3)
-        stmt = delete(News).where(News.publish_date < deadline, News.heat_score < 1.0)
+        deadline = datetime.now() - timedelta(days=protect_days)
+        stmt = delete(News).where(News.publish_date < deadline, News.heat_score < min_heat)
         result = await db.execute(stmt)
         await db.commit()
-        logger.info(f"🗑️ 已删除 {result.rowcount} 条过期低热度数据")
+        logger.info(f"🗑️ 已删除 {result.rowcount} 条低热新闻数据")
 
 
 async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = True) -> None:

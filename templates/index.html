@@ -192,6 +192,7 @@
             list: [],
             page: 1,
             pageSize: 20,
+            searchPageSize: 10,
             loading: false,
             hasMore: true,
             isGenerating: false, // Global lock for manual summary generation
@@ -202,6 +203,7 @@
                 region: '', // Added region filter
                 sortBy: 'heat', // 'heat' | 'date'
                 dateOption: 'today', // 'today', '24h', '3d', '7d', 'week', 'month', 'custom', 'other'
+                dateTouched: false,
                 startDate: new Date().toISOString().split('T')[0],
                 endDate: new Date().toISOString().split('T')[0]
             },
@@ -476,11 +478,17 @@
             }
 
             // Search
+            const applyKeywordSearch = (value) => {
+                state.filter.q = String(value || '').trim();
+                if (state.filter.q && !state.filter.dateTouched) {
+                    setTimeOption('all', { auto: true, skipFetch: true });
+                }
+                els.mobileTopSearchInput.value = state.filter.q;
+                els.desktopSearch.value = state.filter.q;
+            };
             const onSearch = (e) => {
                 if (e.key === 'Enter') {
-                    state.filter.q = e.target.value;
-                    els.mobileTopSearchInput.value = state.filter.q;
-                    els.desktopSearch.value = state.filter.q;
+                    applyKeywordSearch(e.target.value);
                     fetchNews(true);
                 }
             };
@@ -488,13 +496,13 @@
             els.desktopSearch.onkeyup = onSearch;
             
             els.mobileTopSearchBtn.onclick = () => {
-                state.filter.q = els.mobileTopSearchInput.value;
-                els.desktopSearch.value = state.filter.q;
+                applyKeywordSearch(els.mobileTopSearchInput.value);
                 fetchNews(true);
             };
 
             // Date Range
             const onDateChange = (e, type) => {
+                state.filter.dateTouched = true;
                 const val = e.target.value;
                 if (type === 'start') state.filter.startDate = val;
                 else state.filter.endDate = val;
@@ -532,8 +540,7 @@
 
             // Mobile Apply
             els.applyMobileFilter.onclick = () => {
-                state.filter.q = els.mobileTopSearchInput.value;
-                els.desktopSearch.value = state.filter.q;
+                applyKeywordSearch(els.mobileTopSearchInput.value);
                 els.mobileMenu.classList.remove('show');
                 fetchNews(true);
             };
@@ -972,7 +979,10 @@
             return state.filter.dateOption; // Returns '24h', '3d' etc.
         }
 
-        function setTimeOption(val) {
+        function setTimeOption(val, options = {}) {
+            if (!options.auto) {
+                state.filter.dateTouched = true;
+            }
             state.filter.dateOption = val;
             
             // Show/Hide date ranges based on selection
@@ -997,7 +1007,7 @@
             els.desktopEndDate.value = state.filter.endDate;
 
             updateUIState();
-            if (!isMobile() && val !== 'other') fetchNews(true);
+            if (!options.skipFetch && !isMobile() && val !== 'other') fetchNews(true);
         }
 
         // renderFilterOptions is replaced by renderTimeOptions called in init
@@ -1107,6 +1117,7 @@
             const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
             try {
+                const effectivePageSize = state.filter.q ? state.searchPageSize : state.pageSize;
                 const params = new URLSearchParams({
                     q: state.filter.q,
                     category: (state.filter.category === 'all') ? '' : state.filter.category,
@@ -1114,7 +1125,7 @@
                     source: (state.filter.source === 'all') ? '' : state.filter.source,
                     sort_by: state.filter.sortBy,
                     page: state.page,
-                    page_size: state.pageSize,
+                    page_size: effectivePageSize,
                     date: getEffectiveDate()
                 });
                 
@@ -1130,7 +1141,7 @@
                 if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
                 const data = await res.json();
                 
-                if (data.data.length < state.pageSize) {
+                if (data.data.length < effectivePageSize) {
                     state.hasMore = false;
                     els.loading.textContent = '- 到底了 -';
                 } else {
