@@ -29,7 +29,7 @@ class ConcurrencyService:
 
     def __init__(self) -> None:
         settings = get_settings()
-        crawler_limit = max(1, getattr(settings, "CRAWLER_CONCURRENCY", 5))
+        crawler_limit = max(1, getattr(settings, "CRAWLER_CONCURRENCY", 2))
         embedding_limit = max(1, getattr(settings, "EMBEDDING_CONCURRENCY", 5))
         llm_limit = max(1, getattr(settings, "LLM_CONCURRENCY", 5))
         self.crawler_sem = asyncio.Semaphore(crawler_limit)

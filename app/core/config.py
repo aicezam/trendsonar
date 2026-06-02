@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     BACKUP_AI_MODEL: Optional[str] = None
     BACKUP_AI_CONCURRENCY: int = 10
 
-    CRAWLER_CONCURRENCY: int = 5
+    CRAWLER_CONCURRENCY: int = 2
     EMBEDDING_CONCURRENCY: int = 5
     LLM_CONCURRENCY: int = 5
 

@@ -7,13 +7,16 @@
 
 import asyncio
 import email.utils
+import inspect
 import json
 import logging
 import contextlib
 import io
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -31,6 +34,77 @@ from app.utils.tools import clean_html_tags
 
 settings = get_settings()
 logger = setup_logger("CrawlerService")
+
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+ARTICLE_SELECTORS = (
+    "article",
+    "main",
+    "[role='main']",
+    ".article",
+    ".article-content",
+    ".article_content",
+    ".post-content",
+    ".post_content",
+    ".entry-content",
+    ".content",
+    ".main-content",
+    ".news-content",
+    ".rich_media_content",
+    "#article",
+    "#content",
+)
+
+CONTENT_DROP_SELECTORS = (
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "canvas",
+    "iframe",
+    "form",
+    "input",
+    "button",
+    "nav",
+    "header",
+    "footer",
+    "aside",
+    "menu",
+    ".nav",
+    ".navbar",
+    ".footer",
+    ".header",
+    ".sidebar",
+    ".advertisement",
+    ".ads",
+    ".share",
+    ".related",
+    ".recommend",
+    ".comment",
+)
+
+CRAWL4AI_EXCLUDED_TAGS = [
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "canvas",
+    "iframe",
+    "form",
+    "input",
+    "button",
+    "nav",
+    "header",
+    "footer",
+    "aside",
+]
+
+MAX_LIGHT_HTML_BYTES = 2 * 1024 * 1024
+MIN_CONTENT_LENGTH = 50
 
 
 class CrawlerService:
@@ -58,6 +132,162 @@ class CrawlerService:
         """
 
         self.sources_file = "news_sources.json"
+
+    def _default_headers(self, **overrides: str) -> Dict[str, str]:
+        headers = dict(DEFAULT_HEADERS)
+        headers.update({k: v for k, v in overrides.items() if v is not None})
+        return headers
+
+    def _decode_response_body(self, body: bytes, content_type: str = "") -> str:
+        charset_match = re.search(r"charset=([\w.-]+)", content_type or "", flags=re.I)
+        encodings = []
+        if charset_match:
+            encodings.append(charset_match.group(1))
+        encodings.extend(["utf-8", "gb18030"])
+
+        for encoding in encodings:
+            try:
+                return body.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+        return body.decode("utf-8", errors="replace")
+
+    def _normalize_content_text(
+        self,
+        text: str,
+        max_length: int = 60000,
+        min_length: int = MIN_CONTENT_LENGTH,
+    ) -> Optional[str]:
+        cleaned = clean_html_tags(text)
+        cleaned = re.sub(r"(\S)\s+([，。！？；：、）】》])", r"\1\2", cleaned)
+        cleaned = re.sub(r"([（【《])\s+(\S)", r"\1\2", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        if len(cleaned) < min_length:
+            return None
+        return cleaned[:max_length]
+
+    def _extract_article_text(self, html: str) -> Optional[str]:
+        soup = BeautifulSoup(html, "html.parser")
+
+        for selector in CONTENT_DROP_SELECTORS:
+            for tag in soup.select(selector):
+                tag.decompose()
+
+        candidates = []
+        seen = set()
+        for selector in ARTICLE_SELECTORS:
+            for node in soup.select(selector):
+                node_id = id(node)
+                if node_id in seen:
+                    continue
+                seen.add(node_id)
+                text = node.get_text(separator="\n", strip=True)
+                text_len = len(clean_html_tags(text))
+                if text_len >= MIN_CONTENT_LENGTH:
+                    candidates.append((text_len, text))
+
+        if not candidates and soup.body:
+            text = soup.body.get_text(separator="\n", strip=True)
+            text_len = len(clean_html_tags(text))
+            if text_len >= MIN_CONTENT_LENGTH:
+                candidates.append((text_len, text))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return self._normalize_content_text(candidates[0][1])
+
+    async def crawl_content_light(self, target_url: str) -> Optional[str]:
+        """
+        以 HTTP + HTML 解析方式优先抓正文，避免大多数静态新闻页启动浏览器。
+        """
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(headers=self._default_headers(), timeout=timeout) as session:
+                async with session.get(target_url, allow_redirects=True) as resp:
+                    if resp.status != 200:
+                        return None
+
+                    content_type = resp.headers.get("Content-Type", "")
+                    if content_type and not any(t in content_type.lower() for t in ("html", "xml", "text")):
+                        return None
+
+                    body = await resp.content.read(MAX_LIGHT_HTML_BYTES + 1)
+                    if len(body) > MAX_LIGHT_HTML_BYTES:
+                        logger.debug(f"   ⚠️ [轻量抓取] 页面过大，回退浏览器: {target_url}")
+                        return None
+
+                    html = self._decode_response_body(body, content_type)
+                    return self._extract_article_text(html)
+        except Exception as e:
+            logger.debug(f"   ⚠️ [轻量抓取] 失败，回退浏览器: {target_url} ({e})")
+            return None
+
+    def _make_browser_config(self):
+        from crawl4ai import BrowserConfig
+
+        log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
+        is_verbose = log_level == logging.DEBUG
+        return self._build_supported_config(
+            BrowserConfig,
+            {
+                "headless": True,
+                "verbose": is_verbose,
+                "text_mode": True,
+                "light_mode": True,
+            },
+        )
+
+    def _make_run_config(self):
+        from crawl4ai import CacheMode, CrawlerRunConfig
+
+        log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
+        is_verbose = log_level == logging.DEBUG
+        return self._build_supported_config(
+            CrawlerRunConfig,
+            {
+                "cache_mode": CacheMode.BYPASS,
+                "verbose": is_verbose,
+                "only_text": True,
+                "excluded_tags": CRAWL4AI_EXCLUDED_TAGS,
+                "remove_forms": True,
+                "exclude_external_images": True,
+                "exclude_all_images": True,
+                "exclude_external_links": True,
+                "exclude_social_media_links": True,
+                "wait_until": "domcontentloaded",
+                "page_timeout": 30000,
+                "delay_before_return_html": 0,
+                "scan_full_page": False,
+                "wait_for_images": False,
+                "screenshot": False,
+                "pdf": False,
+            },
+        )
+
+    def _extract_crawl4ai_markdown(self, result) -> Optional[str]:
+        if not result or not result.markdown:
+            return None
+        if hasattr(result.markdown, "raw_markdown"):
+            return self._normalize_content_text(result.markdown.raw_markdown)
+        return self._normalize_content_text(str(result.markdown))
+
+    def _build_supported_config(self, config_cls, values: Dict[str, Any]):
+        """
+        Crawl4AI 配置项在不同版本间会变化，只传当前构造器支持的参数。
+        """
+        try:
+            signature = inspect.signature(config_cls)
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in signature.parameters.values()
+            )
+            if not accepts_kwargs:
+                values = {k: v for k, v in values.items() if k in signature.parameters}
+        except (TypeError, ValueError):
+            pass
+        return config_cls(**values)
 
     def _get_sources_path_candidates(self) -> List[Path]:
         """
@@ -468,59 +698,75 @@ class CrawlerService:
             await db.commit()
             logger.info(f"📥 入库新增 {count} 条")
 
-    async def _refresh_weibo_cookie(self) -> Optional[str]:
-        """
-        自动刷新微博访客 Cookie
-        """
-        logger.info("🔄 正在尝试自动刷新微博 Cookie...")
+    def _is_weibo_url(self, url: str) -> bool:
+        host = urlparse(url).netloc.lower()
+        return any(domain in host for domain in ("weibo.com", "weibo.cn"))
+
+    def _parse_cookie_header(self, cookie_str: str) -> Dict[str, str]:
+        cookies: Dict[str, str] = {}
+        for part in (cookie_str or "").split(";"):
+            if "=" not in part:
+                continue
+            name, value = part.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if name:
+                cookies[name] = value
+        return cookies
+
+    def _format_cookie_header(self, cookies: Dict[str, str]) -> str:
+        return "; ".join(f"{name}={value}" for name, value in cookies.items() if name and value)
+
+    def _save_weibo_cookie(self, cookie_str: str) -> None:
+        from app.core.config import CONFIG_PATH
+
+        raw_text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
+        cookie_line = f"WEIBO_COOKIE: {json.dumps(cookie_str, ensure_ascii=False)}"
+
+        if raw_text.lstrip().startswith("{"):
+            data = json.loads(raw_text or "{}")
+            data["WEIBO_COOKIE"] = cookie_str
+            CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return
+
+        if re.search(r"(?m)^WEIBO_COOKIE\s*:", raw_text):
+            raw_text = re.sub(r"(?m)^WEIBO_COOKIE\s*:.*$", cookie_line, raw_text, count=1)
+        else:
+            raw_text = raw_text.rstrip() + "\n\n" + cookie_line + "\n"
+        CONFIG_PATH.write_text(raw_text, encoding="utf-8")
+
+    def _merge_and_save_weibo_cookies(self, response_cookies) -> None:
+        current_cookie = (settings.WEIBO_COOKIE or "").strip()
+        if not current_cookie or current_cookie.startswith("Example:"):
+            return
+
+        merged = self._parse_cookie_header(current_cookie)
+        changed = False
+        for cookie in response_cookies.values():
+            name = getattr(cookie, "key", None)
+            value = getattr(cookie, "value", None)
+            if not name or not value:
+                continue
+            if merged.get(name) != value:
+                merged[name] = value
+                changed = True
+
+        if not changed:
+            return
+
+        new_cookie = self._format_cookie_header(merged)
+        if not new_cookie:
+            return
+
         try:
-            from playwright.async_api import async_playwright
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                )
-                page = await context.new_page()
-                
-                # 访问微博搜索页面，触发访客认证
-                try:
-                    await page.goto("https://s.weibo.com/weibo?q=Python", timeout=30000)
-                    await page.wait_for_load_state("networkidle")
-                except Exception as e:
-                    logger.warning(f"页面加载超时或出错，尝试直接获取Cookie: {e}")
-
-                cookies = await context.cookies()
-                await browser.close()
-                
-                # 提取并拼接 Cookie
-                cookie_list = [f"{c['name']}={c['value']}" for c in cookies]
-                cookie_str = "; ".join(cookie_list)
-                
-                if "SUB=" in cookie_str:
-                    logger.info("✅ 微博 Cookie 刷新成功")
-                    # 更新内存中的配置
-                    settings.WEIBO_COOKIE = cookie_str
-
-                    # 尝试持久化到 config.yaml
-                    try:
-                        from app.utils.config_io import load_yaml_dict, dump_yaml_text, save_yaml_text
-                        from app.core.config import CONFIG_PATH
-                        
-                        config_data = load_yaml_dict(CONFIG_PATH)
-                        config_data["WEIBO_COOKIE"] = cookie_str
-                        save_yaml_text(CONFIG_PATH, dump_yaml_text(config_data))
-                        logger.info("💾 微博 Cookie 已保存到 config.yaml")
-                    except Exception as e:
-                        logger.error(f"❌ 保存 Cookie 到配置文件失败: {e}")
-
-                    return cookie_str
-                else:
-                    logger.warning("⚠️ 微博 Cookie 刷新失败: 未找到 SUB 字段")
-                    return None
-                    
+            self._save_weibo_cookie(new_cookie)
+            settings.WEIBO_COOKIE = new_cookie
+            logger.info("💾 [微博抓取] 已根据成功响应更新 WEIBO_COOKIE")
         except Exception as e:
-            logger.error(f"❌ 微博 Cookie 刷新异常: {e}")
-            return None
+            logger.warning(f"   ⚠️ [微博抓取] 更新 WEIBO_COOKIE 失败: {e}")
+
+    async def crawl_weibo_content(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
+        return await self.crawl_weibo_simple(session, url)
 
     async def crawl_weibo_simple(self, session: aiohttp.ClientSession, url: str, retry: bool = True) -> Optional[str]:
         """
@@ -536,28 +782,34 @@ class CrawlerService:
         - 以轻量方式抓取微博内容，避免重型渲染带来的开销
         """
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Cookie": settings.WEIBO_COOKIE,
-        }
+        cookie = (settings.WEIBO_COOKIE or "").strip()
+        if not cookie or cookie.startswith("Example:"):
+            logger.warning("   ⚠️ [微博抓取] 未配置有效 WEIBO_COOKIE，请在管理页填写登录后的完整 Cookie")
+            return None
+
+        headers = self._default_headers(
+            Accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            Cookie=cookie,
+        )
 
         logger.debug(f"   🔍 [微博抓取] 正在抓取: {url}")
         try:
             async with session.get(url, headers=headers, timeout=30) as resp:
+                final_url = str(resp.url)
                 if resp.status != 200:
                     logger.error(f"   ❌ [微博抓取] HTTP {resp.status}")
                     return None
 
+                if "passport.weibo.com" in final_url or "/newlogin" in final_url:
+                    logger.warning("   ⚠️ [微博抓取] 跳转到微博登录入口，请更新 WEIBO_COOKIE")
+                    return None
+
                 content_bytes = await resp.read()
-                try:
-                    html = content_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    try:
-                        html = content_bytes.decode("gb18030")
-                    except UnicodeDecodeError:
-                        html = content_bytes.decode("utf-8", errors="replace")
+                html = self._decode_response_body(content_bytes, resp.headers.get("Content-Type", ""))
+
+                if "Sina Visitor System" in html or "访问受限" in html:
+                    logger.warning("   ⚠️ [微博抓取] 触发访客/访问限制页面，请更新 WEIBO_COOKIE")
+                    return None
 
                 soup = BeautifulSoup(html, "html.parser")
 
@@ -571,19 +823,13 @@ class CrawlerService:
                         content_list.append(text)
 
                 if not content_list:
-                    logger.warning("   ⚠️ [微博抓取] 未找到微博卡片，尝试提取全文")
+                    logger.warning("   ⚠️ [微博抓取] 未找到微博卡片，请检查 WEIBO_COOKIE 是否有效")
                     body_text = soup.body.get_text(separator="\n", strip=True) if soup.body else ""
-                    if "Sina Visitor System" in body_text or "访问受限" in body_text:
-                        logger.error("   ❌ [微博抓取] 触发反爬验证")
-                        
-                        if retry:
-                            new_cookie = await self._refresh_weibo_cookie()
-                            if new_cookie:
-                                return await self.crawl_weibo_simple(session, url, retry=False)
+                    if body_text:
+                        logger.debug(f"   ⚠️ [微博抓取] 无卡片页面文本长度: {len(body_text)}")
+                    return None
 
-                        return None
-                    return body_text[:5000]
-
+                self._merge_and_save_weibo_cookies(resp.cookies)
                 logger.debug(f"   ✅ [微博抓取] 抓取到 {len(content_list)} 条微博")
                 return "\n\n".join(content_list)
 
@@ -604,12 +850,9 @@ class CrawlerService:
         - 创建并管理爬虫实例的生命周期，支持批量复用
         """
         try:
-            from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+            from crawl4ai import AsyncWebCrawler
 
-            log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
-            is_verbose = log_level == logging.DEBUG
-            
-            browser_conf = BrowserConfig(headless=True, verbose=is_verbose)
+            browser_conf = self._make_browser_config()
             
             async with AsyncWebCrawler(config=browser_conf) as crawler:
                 yield crawler
@@ -636,31 +879,24 @@ class CrawlerService:
         async def do_crawl() -> Optional[str]:
             logger.debug(f"抓取新闻 (复用实例): {target_url}")
 
-            if "weibo.com" in target_url or "weibo.cn" in target_url:
+            if self._is_weibo_url(target_url):
                 try:
                     async with aiohttp.ClientSession() as session:
-                        return await self.crawl_weibo_simple(session, target_url)
+                        return await self.crawl_weibo_content(session, target_url)
                 except Exception as e:
                     logger.error(f"❌ 微博抓取失败: {e}")
                     return None
 
+            light_content = await self.crawl_content_light(target_url)
+            if light_content:
+                return light_content
+
             try:
-                from crawl4ai import CacheMode, CrawlerRunConfig
-
-                log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
-                is_verbose = log_level == logging.DEBUG
-
-                run_conf = CrawlerRunConfig(
-                    cache_mode=CacheMode.BYPASS,
-                    verbose=is_verbose
-                )
+                run_conf = self._make_run_config()
 
                 result = await crawler.arun(url=target_url, config=run_conf)
 
-                if result and result.markdown:
-                    if hasattr(result.markdown, "raw_markdown"):
-                        return clean_html_tags(result.markdown.raw_markdown)
-                    return clean_html_tags(str(result.markdown))
+                return self._extract_crawl4ai_markdown(result)
 
             except Exception as e:
                 logger.error(f"❌ 抓取失败: {e}")
@@ -682,33 +918,28 @@ class CrawlerService:
         async def do_crawl() -> Optional[str]:
             logger.debug(f"抓取新闻: {target_url}")
 
-            if "weibo.com" in target_url or "weibo.cn" in target_url:
+            if self._is_weibo_url(target_url):
                 try:
                     async with aiohttp.ClientSession() as session:
-                        return await self.crawl_weibo_simple(session, target_url)
+                        return await self.crawl_weibo_content(session, target_url)
                 except Exception as e:
                     logger.error(f"❌ 微博抓取失败: {e}")
                     return None
 
-            try:
-                from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+            light_content = await self.crawl_content_light(target_url)
+            if light_content:
+                return light_content
 
-                log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
-                is_verbose = log_level == logging.DEBUG
-                
-                browser_conf = BrowserConfig(headless=True, verbose=is_verbose)
-                run_conf = CrawlerRunConfig(
-                    cache_mode=CacheMode.BYPASS,
-                    verbose=is_verbose
-                )
+            try:
+                from crawl4ai import AsyncWebCrawler
+
+                browser_conf = self._make_browser_config()
+                run_conf = self._make_run_config()
 
                 async with AsyncWebCrawler(config=browser_conf) as crawler:
                     result = await crawler.arun(url=target_url, config=run_conf)
 
-                if result and result.markdown:
-                    if hasattr(result.markdown, "raw_markdown"):
-                        return clean_html_tags(result.markdown.raw_markdown)
-                    return clean_html_tags(str(result.markdown))
+                return self._extract_crawl4ai_markdown(result)
 
             except Exception as e:
                 logger.error(f"❌ 抓取失败: {e}")

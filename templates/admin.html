@@ -342,7 +342,7 @@
         },
         {
             title: "模型与向量",
-            desc: "主力模型、备用模型和 Embedding 服务配置。",
+            descHtml: '主力模型、备用模型和 Embedding 服务配置。注册硅基流动，有免费的模型：<a href="https://cloud.siliconflow.cn/i/fUoGwjZb" target="_blank" rel="noopener noreferrer">https://cloud.siliconflow.cn/i/fUoGwjZb</a> ',
             fields: [
                 { key: "SILICONFLOW_BASE_URL", label: "Embedding Base URL", type: "text", wide: true },
                 { key: "SILICONFLOW_API_KEY", label: "Embedding API Key", type: "password", wide: true },
@@ -365,7 +365,6 @@
                 { key: "AUTO_SUMMARY_TOP_N", label: "自动摘要 Top N", type: "number" },
                 { key: "AUTO_ANALYSIS_TOP_N", label: "自动分析 Top N", type: "number" },
                 { key: "ANALYSIS_BATCH_SIZE", label: "分析批次大小", type: "number" },
-                { key: "CRAWLER_CONCURRENCY", label: "爬虫并发", type: "number" },
                 { key: "EMBEDDING_CONCURRENCY", label: "Embedding 并发", type: "number" },
                 { key: "LLM_CONCURRENCY", label: "LLM 总并发", type: "number" },
             ]
@@ -436,8 +435,9 @@
         },
         {
             title: "爬虫配置",
-            desc: "微博 Cookie 等抓取配置。",
+            desc: "正文抓取并发与微博 Cookie 等抓取配置。",
             fields: [
+                { key: "CRAWLER_CONCURRENCY", label: "爬虫并发", type: "number" },
                 { key: "WEIBO_COOKIE", label: "微博 Cookie", type: "textarea", wide: true },
             ]
         },
@@ -463,7 +463,7 @@
         AUTO_SUMMARY_TOP_N: "每轮自动为热度最高的多少条新闻生成摘要。示例：30。",
         AUTO_ANALYSIS_TOP_N: "每轮自动深度分析的新闻数量上限。示例：500，数据量大时可调低。",
         ANALYSIS_BATCH_SIZE: "批量分析每批处理数量。过大可能超出模型上下文，建议 10-50。",
-        CRAWLER_CONCURRENCY: "正文抓取和新闻源请求的全局并发上限。示例：5。",
+        CRAWLER_CONCURRENCY: "正文抓取和新闻源请求的全局并发上限。正文抓取会启动/复用浏览器，内存敏感时建议 1-2。",
         EMBEDDING_CONCURRENCY: "Embedding 请求全局并发上限。示例：5，避免向量服务限流。",
         LLM_CONCURRENCY: "所有 LLM 调用共享的总并发上限。示例：5，用于控制外部 API 压力。",
         DATA_CLEANUP_ENABLED: "是否在全流程任务结束后自动删除低热度历史新闻。默认关闭，关闭时不会删除任何新闻。",
@@ -500,7 +500,7 @@
         "AI_ROUTE.CHAT": "选择管理端问答助手使用的模型节点。示例：main。",
         NEWS_CATEGORIES: "新闻分类列表，每行一个。示例：财经商业、科技科学、社会民生。",
         IGNORED_DOMAINS: "忽略域名列表，每行一个。命中的链接不会抓取或入库。示例：twitter.com。",
-        WEIBO_COOKIE: "微博登录 Cookie，用于抓取微博详情。请从浏览器复制完整 Cookie，失效后需要更新。",
+        WEIBO_COOKIE: "微博登录后的完整 Cookie，用于抓取微博搜索/详情正文；系统不会主动生成 Cookie，成功抓取后会合并响应 Set-Cookie 做续期。",
     };
 
     function getConfigHelp(field) {
@@ -542,7 +542,7 @@
             <div class="config-section-card">
                 <div class="config-section-head">
                     <h4>${escapeHtml(section.title)}</h4>
-                    <p>${escapeHtml(section.desc)}</p>
+                    <p>${section.descHtml || escapeHtml(section.desc)}</p>
                 </div>
                 <div class="config-fields-grid">
                     ${section.fields.map((field) => renderConfigField(field)).join("")}

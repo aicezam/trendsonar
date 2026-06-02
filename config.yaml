@@ -19,6 +19,9 @@ DATABASE_URL: sqlite+aiosqlite:///data/trendsonar.db
 # 从浏览器复制完整的 Cookie 字符串，包含所有必要的会话信息，如果抓取微博详情内容失效，请更新
 WEIBO_COOKIE: "Example:JAHKSJDHKASDHKJ……"
 
+# 浏览器正文抓取并发。正文抓取会启动/复用 Chromium，建议保持 1-2 以控制内存峰值
+CRAWLER_CONCURRENCY: 2
+
 # ================= AI 模型配置 =================
 # --- Embedding & Rerank (SiliconFlow) ---
 # 用于计算向量相似度和重排序（推荐免费的 硅基流动的 BAAI/bge-large-zh-v1.5）

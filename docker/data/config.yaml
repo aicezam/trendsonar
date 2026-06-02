@@ -87,6 +87,8 @@ CLUSTERING_THRESHOLD: 0.72
 CLUSTERING_TIME_WINDOW_HOURS: 18
 # 自动任务调度间隔 (分钟)
 SCHEDULE_INTERVAL_MINUTES: 30
+# 浏览器正文抓取并发。正文抓取会启动/复用 Chromium，建议保持 1-2 以控制内存峰值
+CRAWLER_CONCURRENCY: 2
 # 自动摘要 Top N (为每日热度最高的 N 条新闻生成摘要)
 AUTO_SUMMARY_TOP_N: 30
 # 自动深度分析 Top N (为每日热度最高的 N 条新闻自动分类、情感分析)
