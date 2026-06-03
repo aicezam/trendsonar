@@ -1056,6 +1056,7 @@
             state.list.forEach((item, index) => {
                 const card = document.createElement('div');
                 card.className = 'news-card';
+                card.style.setProperty('--card-index', String(index));
                 
                 const timeStr = new Date(item.time).toLocaleString('zh-CN', {month:'numeric', day:'numeric', hour:'numeric', minute:'numeric'});
                 const hasRelated = item.sources && item.sources.length > 1;
@@ -1067,7 +1068,6 @@
 
                 card.innerHTML = `
                     <div class="card-body">
-                        <div class="rank">${index + 1}</div>
                         <div class="content">
                             <div class="news-head">
                                 <a href="${item.url}" target="_blank" class="news-title">${item.title}</a>
@@ -1302,7 +1302,7 @@
             const setDisabled = (btn) => {
                 btn.disabled = state.isGenerating;
                 // 视觉反馈由 CSS :disabled 选择器处理 btn-regen
-                // 对于 btn-link（新建），我们可能需要内联样式或类
+                // 对于 btn-link（新建），这里通过内联样式提供禁用状态
                 if (state.isGenerating) btn.style.opacity = '0.5';
                 else btn.style.opacity = '1';
                 btn.style.cursor = state.isGenerating ? 'not-allowed' : 'pointer';

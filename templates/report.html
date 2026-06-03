@@ -14,6 +14,10 @@
 <div class="container">
     <!-- Filter Section -->
     <div class="filter-section">
+        <div class="report-hero-copy">
+            <div class="report-kicker">AI Report</div>
+            <div class="report-lead">输入关键词或直接生成全网报告，快速查看趋势、情感、来源分布和热点新闻列表。</div>
+        </div>
         <div class="search-bar-wrapper">
             <div class="input-group">
                 <span class="input-icon">🔍</span>
@@ -2202,6 +2206,7 @@
         newsList.forEach((news, index) => {
             const card = document.createElement('div');
             card.className = 'news-card';
+            card.style.setProperty('--card-index', String(index));
             
             // Determine sentiment class
             const sentiment = (news.sentiment_label || news.sentiment || '中立').trim();
@@ -2210,9 +2215,6 @@
             if (sentiment === '正面') sentimentClass = 'sent-pos';
             else if (sentiment === '负面') sentimentClass = 'sent-neg';
 
-            // Rank
-            const rank = news.rank || (index + 1);
-            
             const heat = typeof news.heat === 'number' ? news.heat.toFixed(1) : news.heat;
             
             // Format time if available
@@ -2226,7 +2228,6 @@
 
             card.innerHTML = `
                 <div class="card-body">
-                    <div class="rank">${rank}</div>
                     <div class="content">
                         <div class="news-head">
                             <a href="${news.url}" target="_blank" class="news-title">${news.title}</a>
