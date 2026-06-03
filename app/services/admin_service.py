@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import hmac
 import os
@@ -161,6 +162,84 @@ def load_config_yaml_text() -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _fsync_parent_dir(file_path: Path) -> None:
+    """
+    输入:
+    - `file_path`: 已写入文件路径
+
+    输出:
+    - 无
+
+    作用:
+    - 在 POSIX 系统上同步父目录元数据，提高配置保存后的落盘可靠性。
+    """
+
+    if os.name != "posix":
+        return
+    try:
+        dir_fd = os.open(str(file_path.parent), os.O_RDONLY)
+    except Exception:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _write_text_synced(file_path: Path, text: str) -> None:
+    """
+    输入:
+    - `file_path`: 目标文件
+    - `text`: 待写入文本
+
+    输出:
+    - 无
+
+    作用:
+    - 原地写入并同步文件内容，兼容 Docker 单文件 bind mount 场景。
+    """
+
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with file_path.open("w", encoding="utf-8", newline="") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    _fsync_parent_dir(file_path)
+
+
+def _replace_or_write_text(file_path: Path, tmp_path: Path, text: str) -> None:
+    """
+    输入:
+    - `file_path`: 最终配置文件路径
+    - `tmp_path`: 临时文件路径
+    - `text`: 配置文本
+
+    输出:
+    - 无
+
+    作用:
+    - 优先使用原子替换；当目标是 Docker bind mount 文件导致替换失败时，降级为原地写入。
+    """
+
+    with tmp_path.open("w", encoding="utf-8", newline="") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+
+    try:
+        os.replace(tmp_path, file_path)
+        _fsync_parent_dir(file_path)
+    except OSError as exc:
+        if exc.errno not in {errno.EBUSY, errno.EXDEV, errno.EPERM, errno.EACCES}:
+            raise
+        # Docker 单文件挂载时，目标文件可能是挂载点，不能被 rename 覆盖。
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        _write_text_synced(file_path, text)
+
+
 def save_config_yaml_text(yaml_text: str) -> None:
     normalized_text = yaml_text or ""
     data = yaml.safe_load(normalized_text)
@@ -173,24 +252,20 @@ def save_config_yaml_text(yaml_text: str) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = CONFIG_PATH.with_name(f".{CONFIG_PATH.name}.{os.getpid()}.{time.time_ns()}.tmp")
     backup_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
+    backup_text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None
 
     try:
-        with tmp_path.open("w", encoding="utf-8", newline="") as f:
-            f.write(normalized_text)
-            f.flush()
-            os.fsync(f.fileno())
-
-        if CONFIG_PATH.exists():
+        if backup_text is not None:
             shutil.copy2(CONFIG_PATH, backup_path)
-        os.replace(tmp_path, CONFIG_PATH)
+        _replace_or_write_text(CONFIG_PATH, tmp_path, normalized_text)
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
-        if not CONFIG_PATH.exists() and backup_path.exists():
+        if backup_text is not None:
             try:
-                os.replace(backup_path, CONFIG_PATH)
+                _write_text_synced(CONFIG_PATH, backup_text)
             except Exception:
                 pass
         raise

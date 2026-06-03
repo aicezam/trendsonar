@@ -5,6 +5,7 @@ venv/
 config_local.py
 .trae/
 .test/
+tests/
 scripts/
 logs/
 trendsonar.db

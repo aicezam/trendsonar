@@ -17,6 +17,7 @@
         <div class="meta">
             <span id="startTag"></span>
             <span id="updatedTag"></span>
+            <span id="heatTag" class="tag-heat"></span>
         </div>
         <div id="summaryBox" class="card topic-summary hidden">
             <div class="card-title">事件概览</div>
@@ -25,19 +26,19 @@
     </div>
 
     <div id="grid" class="grid hidden">
-        <div class="card">
-            <div class="card-head">
-                <div class="card-title">时间轴</div>
-                <button id="sortBtn" class="btn-mini" type="button" onclick="toggleSort()">切换倒序</button>
-            </div>
-            <div id="timeline" class="timeline"></div>
-        </div>
-        <div class="card">
+        <div class="card topic-record-card">
             <div class="card-head">
                 <div class="card-title">专题综述</div>
                 <button id="regenBtn" class="btn-mini" type="button" onclick="regenerateOverview()">重新生成</button>
             </div>
             <div id="record" class="text"></div>
+        </div>
+        <div class="card topic-timeline-card">
+            <div class="card-head">
+                <div class="card-title">时间轴</div>
+                <button id="sortBtn" class="btn-mini" type="button" onclick="toggleSort()">切换倒序</button>
+            </div>
+            <div id="timeline" class="timeline"></div>
         </div>
     </div>
 
@@ -178,6 +179,7 @@
             if (k === "class") node.className = v;
             else if (k === "text") node.textContent = v;
             else if (k === "html") node.innerHTML = v;
+            else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.substring(2).toLowerCase(), v);
             else node.setAttribute(k, v);
         }
         for (const c of children) node.appendChild(c);
@@ -229,9 +231,86 @@
         }
     }
 
+    function setTimelineRefreshStatus(itemEl, text, tone = "") {
+        if (!itemEl) return;
+        let statusEl = itemEl.querySelector(".tl-refresh-status");
+        if (!statusEl) {
+            statusEl = el("div", { class: "tl-refresh-status" });
+            const contentEl = itemEl.querySelector(".tl-content");
+            if (contentEl) itemEl.insertBefore(statusEl, contentEl);
+            else itemEl.appendChild(statusEl);
+        }
+        statusEl.textContent = text || "";
+        statusEl.className = `tl-refresh-status${tone ? " " + tone : ""}`;
+        statusEl.style.display = text ? "block" : "none";
+        if (tone === "ok") {
+            window.setTimeout(() => {
+                statusEl.style.display = "none";
+            }, 2200);
+        }
+    }
+
+    async function readTimelineRefreshError(resp) {
+        try {
+            const data = await resp.json();
+            return data.detail || data.message || "刷新失败";
+        } catch (e) {
+            return "刷新失败";
+        }
+    }
+
+    async function refreshTimelineItem(itemId, btn) {
+        const itemEl = btn ? btn.closest(".tl-item") : null;
+        if (!itemId) {
+            setTimelineRefreshStatus(itemEl, "这个节点缺少 ID，无法刷新。", "error");
+            return;
+        }
+        if (btn.disabled) return;
+        const originalTitle = btn.title;
+        btn.disabled = true;
+        btn.classList.add("loading");
+        btn.title = "正在刷新摘要...";
+        setTimelineRefreshStatus(itemEl, "正在刷新摘要，可能需要几十秒...", "loading");
+        try {
+            const resp = await fetch(`/api/topics/${TOPIC_ID}/timeline/${itemId}/refresh_summary`, { method: "POST" });
+            if (!resp.ok) throw new Error(await readTimelineRefreshError(resp));
+            const data = await resp.json();
+            const updated = data.item || {};
+            const target = currentTimeline.find(item => Number(item.id) === Number(itemId));
+            if (target) {
+                target.content = updated.content || target.content;
+                target.time = updated.time || target.time;
+                target.sources = updated.sources || target.sources;
+            }
+            const contentEl = itemEl ? itemEl.querySelector(".tl-content") : null;
+            if (contentEl) contentEl.textContent = updated.content || "";
+            setTimelineRefreshStatus(itemEl, "摘要已刷新。", "ok");
+        } catch (e) {
+            setTimelineRefreshStatus(itemEl, `刷新失败：${e.message}`, "error");
+        } finally {
+            btn.disabled = false;
+            btn.classList.remove("loading");
+            btn.title = originalTitle || "刷新节点摘要";
+        }
+    }
+
     function renderTimelineItem(it) {
         const item = el("div", { class: "tl-item" });
-        item.appendChild(el("div", { class: "tl-time", text: fmtTime(it.time) }));
+        const itemHead = el("div", { class: "tl-item-head" });
+        itemHead.appendChild(el("div", { class: "tl-time", text: fmtTime(it.time) }));
+        const refreshBtn = el("button", {
+            class: "tl-refresh-btn",
+            type: "button",
+            title: "刷新节点摘要",
+            "aria-label": "刷新节点摘要",
+            onClick: (e) => {
+                e.stopPropagation();
+                refreshTimelineItem(it.id, e.currentTarget);
+            }
+        });
+        refreshBtn.innerHTML = `<span aria-hidden="true">↻</span>`;
+        itemHead.appendChild(refreshBtn);
+        item.appendChild(itemHead);
         item.appendChild(el("div", { class: "tl-content", text: it.content || "" }));
 
         if (it.sources && it.sources.length > 0) {
@@ -308,6 +387,7 @@
             document.getElementById("topicName").textContent = topic.name || "未命名专题";
             document.getElementById("startTag").textContent = `发布时间 ${fmtTime(topic.start_time)}`;
             document.getElementById("updatedTag").textContent = `更新时间 ${fmtTime(topic.updated_time)}`;
+            document.getElementById("heatTag").textContent = `热度 ${Number(topic.heat_score || 0).toFixed(1)}`;
 
             const summary = (topic.summary || "").trim();
             if (summary) {

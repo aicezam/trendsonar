@@ -405,6 +405,20 @@
                 { key: "TOPIC_SCHEDULE_INTERVAL_HOURS", label: "专题定时间隔(小时)", type: "number" },
                 { key: "TOPIC_NEWS_MIN_HEAT", label: "最低新闻热度", type: "number", step: "0.1" },
                 { key: "TOPIC_QUALITY_LEVEL", label: "专题质量等级", type: "number" },
+                { key: "TOPIC_DISCOVERY_MAX_NEWS_FOR_CLUSTER", label: "程序聚类新闻上限", type: "number" },
+                { key: "TOPIC_DISCOVERY_MAX_CLUSTERS", label: "候选簇送审上限", type: "number" },
+                { key: "TOPIC_DISCOVERY_AI_BATCH_SIZE", label: "AI 审核批次大小", type: "number" },
+                { key: "TOPIC_CLUSTER_MIN_SCORE", label: "候选最低分", type: "number", step: "1" },
+                { key: "TOPIC_CLUSTER_SIM_THRESHOLD", label: "常规聚类相似度", type: "number", step: "0.01" },
+                { key: "TOPIC_CLUSTER_STRONG_SIM_THRESHOLD", label: "强聚类相似度", type: "number", step: "0.01" },
+                { key: "TOPIC_CLUSTER_MAX_DAYS_SPAN", label: "聚类最大跨度(天)", type: "number" },
+                { key: "TOPIC_EVIDENCE_MAX_TITLES", label: "证据标题数", type: "number" },
+                { key: "TOPIC_EVIDENCE_MAX_CHARS", label: "证据文本字符上限", type: "number" },
+                { key: "TOPIC_TIMELINE_MAX_EVENTS_PER_DAY", label: "每日时间轴节点上限", type: "number" },
+                { key: "TOPIC_OVERVIEW_MAX_NEWS", label: "综述素材新闻数", type: "number" },
+                { key: "TOPIC_CREATE_MAX_PER_RUN", label: "每轮新建专题上限", type: "number" },
+                { key: "TOPIC_MIN_SOURCE_COUNT", label: "最低来源数", type: "number" },
+                { key: "TOPIC_EXISTING_MERGE_HINT_THRESHOLD", label: "合并提示相似度", type: "number", step: "0.01" },
             ]
         },
         {
@@ -442,6 +456,35 @@
             ]
         },
     ];
+
+    const CONFIG_FIELD_DEFAULTS = {
+        TOPIC_DISCOVERY_MAX_NEWS_FOR_CLUSTER: 800,
+        TOPIC_DISCOVERY_MAX_CLUSTERS: 30,
+        TOPIC_DISCOVERY_AI_BATCH_SIZE: 15,
+        TOPIC_CLUSTER_MIN_SCORE: 55,
+        TOPIC_CLUSTER_SIM_THRESHOLD: 0.62,
+        TOPIC_CLUSTER_STRONG_SIM_THRESHOLD: 0.78,
+        TOPIC_CLUSTER_MAX_DAYS_SPAN: 7,
+        TOPIC_EVIDENCE_MAX_TITLES: 6,
+        TOPIC_EVIDENCE_MAX_CHARS: 900,
+        TOPIC_TIMELINE_MAX_EVENTS_PER_DAY: 4,
+        TOPIC_OVERVIEW_MAX_NEWS: 30,
+        TOPIC_CREATE_MAX_PER_RUN: 5,
+        TOPIC_MIN_SOURCE_COUNT: 2,
+        TOPIC_EXISTING_MERGE_HINT_THRESHOLD: 0.68,
+        "AI_ROUTE.SUMMARY": "main",
+        "AI_ROUTE.SENTIMENT": "backup",
+        "AI_ROUTE.KEYWORDS": "backup",
+        "AI_ROUTE.CLUSTERING": "backup",
+        "AI_ROUTE.TOPIC_NAME": "backup",
+        "AI_ROUTE.TOPIC_EVAL": "backup",
+        "AI_ROUTE.TOPIC_MATCH": "backup",
+        "AI_ROUTE.TOPIC_TIMELINE": "backup",
+        "AI_ROUTE.TOPIC_OVERVIEW": "backup",
+        "AI_ROUTE.TOPIC_INITIAL_SUMMARY": "main",
+        "AI_ROUTE.REPORT": "backup",
+        "AI_ROUTE.CHAT": "backup",
+    };
 
     const CONFIG_FIELD_HELP = {
         APP_NAME: "用于页面标题和系统标识。示例：TrendSonar。",
@@ -486,6 +529,20 @@
         TOPIC_SCHEDULE_INTERVAL_HOURS: "专题定时刷新间隔，单位小时。示例：6。",
         TOPIC_NEWS_MIN_HEAT: "进入专题候选的最低新闻热度。示例：1.0。",
         TOPIC_QUALITY_LEVEL: "专题质量过滤等级，数值越高越严格。示例：2。",
+        TOPIC_DISCOVERY_MAX_NEWS_FOR_CLUSTER: "每轮进入程序聚类的最高热度新闻数量。越大召回越全但计算更慢，示例：800。",
+        TOPIC_DISCOVERY_MAX_CLUSTERS: "每轮最多送 AI 审核的候选事件簇数量。控制专题审核 token 消耗，示例：30。",
+        TOPIC_DISCOVERY_AI_BATCH_SIZE: "候选事件簇批量审核大小。越大单次 prompt 越长，示例：15。",
+        TOPIC_CLUSTER_MIN_SCORE: "程序聚类候选进入 AI 审核的最低分。越高越保守，示例：55。",
+        TOPIC_CLUSTER_SIM_THRESHOLD: "常规语义合并阈值，范围 0-1。越高越不容易合并，示例：0.62。",
+        TOPIC_CLUSTER_STRONG_SIM_THRESHOLD: "强语义合并阈值，范围 0-1。达到该值后仍需实体/动作支撑，示例：0.78。",
+        TOPIC_CLUSTER_MAX_DAYS_SPAN: "同一事件簇允许跨越的最大天数。示例：7。",
+        TOPIC_EVIDENCE_MAX_TITLES: "单个候选证据包最多保留多少条代表标题。示例：6。",
+        TOPIC_EVIDENCE_MAX_CHARS: "单个候选证据包事实摘要最大字符数。越小越省 token，示例：900。",
+        TOPIC_TIMELINE_MAX_EVENTS_PER_DAY: "每天最多保留多少个时间轴节点。示例：4。",
+        TOPIC_OVERVIEW_MAX_NEWS: "生成专题综述时最多使用多少条真实新闻素材。示例：30。",
+        TOPIC_CREATE_MAX_PER_RUN: "每轮自动刷新最多新建多少个专题。用于防止一次性生成过多专题，示例：5。",
+        TOPIC_MIN_SOURCE_COUNT: "自动生成专题要求的最少来源数。示例：2。",
+        TOPIC_EXISTING_MERGE_HINT_THRESHOLD: "候选簇提示合并现有专题的相似度阈值，示例：0.68。",
         "AI_ROUTE.SUMMARY": "选择摘要生成使用 main 或 backup。main 通常速度快，backup 可用于更稳定模型。",
         "AI_ROUTE.SENTIMENT": "选择情感和分类分析使用的模型节点。示例：main。",
         "AI_ROUTE.KEYWORDS": "选择关键词和实体提取使用的模型节点。示例：main。",
@@ -526,6 +583,15 @@
             cur = cur[part];
         }
         cur[parts[parts.length - 1]] = value;
+    }
+
+    function applyConfigDefaults() {
+        Object.entries(CONFIG_FIELD_DEFAULTS).forEach(([key, value]) => {
+            const current = getConfigValue(key);
+            if (current === "" || current === null || current === undefined) {
+                setConfigValue(key, value);
+            }
+        });
     }
 
     function parseConfigInputValue(field, raw) {
@@ -745,6 +811,7 @@
         const data = await resp.json();
         currentConfigText = data.yaml || "";
         configData = data.config || {};
+        applyConfigDefaults();
         setEditorValue(JSON.stringify(configData, null, 2));
         renderConfigForm();
         setAppNameFromConfig();

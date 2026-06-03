@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from collections import defaultdict
 import numpy as np
-from sqlalchemy import desc, select, func
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -20,6 +20,7 @@ from app.models.news import News
 from app.models.topic import Topic, TopicTimelineItem
 from app.services.ai_service import AIService
 from app.services.crawler_service import crawler_service
+from app.services.topic_discovery_service import TopicDiscoveryService
 from app.utils.tools import clean_html_tags
 
 settings = get_settings()
@@ -27,8 +28,9 @@ logger = setup_logger("TopicService")
 
 
 class TopicService:
-    def __init__(self, ai: AIService) -> None:
+    def __init__(self, ai: AIService, discovery: Optional[TopicDiscoveryService] = None) -> None:
         self.ai = ai
+        self.discovery = discovery or TopicDiscoveryService()
 
     @staticmethod
     def _cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -42,69 +44,200 @@ class TopicService:
             return 0.0
         return float(np.dot(va, vb) / (na * nb))
 
-    def _find_candidate_news_by_vector(
+    async def _load_used_news_ids(self, db: AsyncSession, active_only: bool = False) -> Set[int]:
+        """
+        输入:
+        - `db`: 数据库会话
+        - `active_only`: 是否只统计活跃专题下的时间轴新闻
+
+        输出:
+        - 已归类新闻 ID 集合
+
+        作用:
+        - 统一解析 timeline 的主新闻和 sources，避免重复创建或被孤儿记录误伤。
+        """
+
+        used_stmt = select(TopicTimelineItem.news_id, TopicTimelineItem.sources)
+        if active_only:
+            used_stmt = used_stmt.join(Topic, Topic.id == TopicTimelineItem.topic_id).where(Topic.status == "active")
+        used_res = await db.execute(used_stmt)
+
+        used_ids: Set[int] = set()
+        for nid, srcs in used_res:
+            if nid:
+                used_ids.add(int(nid))
+            if srcs and isinstance(srcs, list):
+                for src in srcs:
+                    if isinstance(src, dict) and "id" in src:
+                        try:
+                            used_ids.add(int(src["id"]))
+                        except (ValueError, TypeError):
+                            pass
+        return used_ids
+
+    async def _build_follow_keyword_vecs(self) -> List[List[float]]:
+        """
+        输入:
+        - 无，读取运行时关注关键词配置
+
+        输出:
+        - 关注关键词向量列表
+
+        作用:
+        - 在新专题发现中继续支持关注范围过滤，减少无关专题。
+        """
+
+        follow_keywords = settings.FOLLOW_KEYWORDS
+        if not follow_keywords:
+            return []
+        kw_list = [k.strip() for k in follow_keywords.split(",") if k.strip()]
+        if not kw_list:
+            return []
+        logger.info(f"🔍 [Topic Filter] 启用关键词过滤: {kw_list}")
+        kw_embs = await self.ai.get_embeddings(kw_list)
+        return [vec for vec in kw_embs if vec]
+
+    async def _build_topic_overview_materials(
         self,
-        t_vec: List[float],
-        news_pool: List[News],
-        pool_vecs: Dict[int, List[float]],
-        used_ids: Set[int],
-        top_k: int = 10,
-        threshold: float = 0.35
-    ) -> List[Tuple[News, float]]:
+        db: AsyncSession,
+        topic_id: int,
+        fresh_news: List[News],
+        limit: int,
+    ) -> List[Dict[str, str]]:
         """
-        根据向量相似度查找候选新闻 (不执行 DB 操作，不进行 AI 二次核验)
+        输入:
+        - `db`: 数据库会话
+        - `topic_id`: 专题 ID
+        - `fresh_news`: 本次新增或确认的新闻
+        - `limit`: 最大素材数量
+
+        输出:
+        - 供专题综述使用的新闻素材列表
+
+        作用:
+        - 优先使用真实新闻标题和摘要，而不是只用时间轴节点二次概括。
         """
-        candidates = []
-        for n in news_pool:
-            if n.id in used_ids:
-                continue
-            n_vec = pool_vecs.get(n.id)
-            if not n_vec:
-                continue
-            
-            sim = self._cosine_similarity(t_vec, n_vec)
-            if sim > threshold:
-                candidates.append((n, sim))
-        
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        return candidates[:top_k]
+
+        news_map: Dict[int, News] = {int(n.id): n for n in fresh_news if n and n.id}
+        all_items_stmt = (
+            select(TopicTimelineItem)
+            .where(TopicTimelineItem.topic_id == topic_id)
+            .order_by(desc(TopicTimelineItem.event_time))
+            .limit(max(limit * 3, limit))
+        )
+        all_items = (await db.execute(all_items_stmt)).scalars().all()
+
+        news_ids: Set[int] = set(news_map.keys())
+        for it in all_items:
+            if it.news_id:
+                news_ids.add(int(it.news_id))
+            if it.sources:
+                for source in it.sources:
+                    if isinstance(source, dict) and source.get("id"):
+                        try:
+                            news_ids.add(int(source["id"]))
+                        except (TypeError, ValueError):
+                            pass
+
+        missing_ids = [nid for nid in news_ids if nid not in news_map]
+        if missing_ids:
+            news_stmt = select(News).where(News.id.in_(missing_ids))
+            for news in (await db.execute(news_stmt)).scalars().all():
+                news_map[int(news.id)] = news
+
+        sorted_news = sorted(
+            news_map.values(),
+            key=lambda n: (float(n.heat_score or 0), n.publish_date or datetime.min),
+            reverse=True,
+        )
+        materials: List[Dict[str, str]] = []
+        for news in sorted_news[:limit]:
+            content = (news.summary or news.content or "").replace("\n", " ").strip()
+            materials.append(
+                {
+                    "title": str(news.title or "")[:160],
+                    "content": content[:500],
+                }
+            )
+        return materials
+
+    def _fallback_topic_name(self, evidence: Dict[str, Any]) -> str:
+        """
+        输入:
+        - 候选事件证据包
+
+        输出:
+        - 兜底专题名称
+
+        作用:
+        - 当 AI 审核未给出名称时，基于证据生成保守名称。
+        """
+
+        entities = evidence.get("entities") or []
+        keywords = evidence.get("keywords") or []
+        title_list = evidence.get("representative_titles") or []
+        if entities and keywords:
+            return f"{entities[0]}{keywords[0]}进展"[:30]
+        if title_list:
+            return str(title_list[0])[:30]
+        return "热点事件进展"
+
+    def _sort_topic_candidates_for_review(self, candidates: List[Any]) -> None:
+        """
+        输入:
+        - `candidates`: 程序聚类得到的候选专题事件簇列表
+
+        输出:
+        - 无，原地排序
+
+        作用:
+        - 送 AI 审核前再次按质量分 60%、热度 30%、新闻数 10% 排序，过滤后仍保持同一策略。
+        """
+
+        sorter = getattr(self.discovery, "sort_candidates", None)
+        if callable(sorter):
+            sorter(candidates)
+            return
+
+        candidates.sort(
+            key=lambda candidate: (
+                float((getattr(candidate, "evidence", {}) or {}).get("score", getattr(candidate, "score", 0.0)) or 0.0),
+                float((getattr(candidate, "evidence", {}) or {}).get("total_heat", getattr(candidate, "total_heat", 0.0)) or 0.0),
+                int((getattr(candidate, "evidence", {}) or {}).get("news_count", len(getattr(candidate, "features", []) or [])) or 0),
+            ),
+            reverse=True,
+        )
 
     async def refresh_topics(self) -> None:
         """
         专题追踪逻辑：
         1. 找出未归类的新闻（N天内）。
-        2. 聚合标题让 AI 提炼专题。
-        3. 对提炼的专题进行向量匹配+AI核验。
-        4. 只有新闻数 > 3 的专题才创建。
-        5. 补全详情。
+        2. 由程序预聚类形成候选事件簇。
+        3. 只把少量证据包交给 AI 审核 create/merge/reject。
+        4. 通过审核后再创建或更新专题。
         """
         if not (settings.DATABASE_URL or "").strip():
             return
 
+        await self._refresh_topics_by_discovery()
+
+    async def _refresh_topics_by_discovery(self) -> None:
+        """
+        输入:
+        - 无
+
+        输出:
+        - 无
+
+        作用:
+        - 新版自动专题发现流程：程序聚类先筛选候选事件，AI 只审核压缩证据包。
+        """
+
         async with AsyncSessionLocal() as db:
-            # 1. 获取已归类的新闻ID集合
-            # 同时获取 news_id 和 sources 中的 ID
-            used_stmt = select(TopicTimelineItem.news_id, TopicTimelineItem.sources)
-            used_res = await db.execute(used_stmt)
-            
-            used_ids = set()
-            for nid, srcs in used_res:
-                if nid:
-                    used_ids.add(nid)
-                if srcs and isinstance(srcs, list):
-                    for src in srcs:
-                        if isinstance(src, dict) and "id" in src:
-                            try:
-                                used_ids.add(int(src["id"]))
-                            except (ValueError, TypeError):
-                                pass
-            
-            # 2. 获取候选新闻池（N天内，未归类）
-            days = settings.TOPIC_LOOKBACK_DAYS
-            start_date = datetime.now() - timedelta(days=days)
-            
-            # 先查所有符合条件的新闻，用于后续向量匹配
-            # 限制数量防止内存爆炸，比如取最近 2000 条
+            active_topics = (await db.execute(select(Topic).where(Topic.status == "active"))).scalars().all()
+            used_ids = await self._load_used_news_ids(db, active_only=True)
+
+            start_date = datetime.now() - timedelta(days=settings.TOPIC_LOOKBACK_DAYS)
             pool_stmt = (
                 select(News)
                 .where(News.publish_date >= start_date)
@@ -113,225 +246,135 @@ class TopicService:
                 .limit(settings.TOPIC_RECALL_POOL_SIZE)
             )
             news_pool = (await db.execute(pool_stmt)).scalars().all()
-            
             if not news_pool:
                 logger.info("📭 没有待处理的新闻，跳过专题生成")
                 return
-                
-            logger.info(f"📊 待处理新闻池大小: {len(news_pool)}")
-            
-            # 确保池中新闻有向量（批量处理）
-            pool_vecs = await self._ensure_news_embeddings_batch(db, news_pool)
 
-            # 3. 准备 AI 提炼的种子标题（Top 300）
-            # news_pool 已经是按 heat_score 排序的
-            # 过滤掉低热度新闻
             min_heat = settings.TOPIC_NEWS_MIN_HEAT
-            seed_news = [n for n in news_pool if (n.heat_score or 0) >= min_heat][:settings.TOPIC_AGGREGATION_TOP_N]
-            
-            if not seed_news:
+            news_pool = [n for n in news_pool if float(n.heat_score or 0) >= min_heat]
+            if not news_pool:
                 logger.info(f"📭 经热度过滤(>{min_heat})后，无符合条件的新闻，跳过专题生成")
                 return
 
-            # 格式化标题，带上热度信息
-            seed_titles = [f"[热度:{float(n.heat_score or 0):.1f}] {(n.title or '').strip()}" for n in seed_news if (n.title or "").strip()]
-            
-            # 4. AI 提炼专题
-            proposed_topics = await self.ai.propose_topics_from_titles(seed_titles)
-            if not proposed_topics:
-                logger.info("⚠️ AI 未提炼出任何专题")
-                proposed_topics = []
-
-            # 获取现有的 Active 专题，用于查重和延伸判断
-            active_topics_stmt = select(Topic).where(Topic.status == "active")
-            active_topics = (await db.execute(active_topics_stmt)).scalars().all()
-
-            # 4.1 优化：跳过基于初始描述的初步过滤
-            # 理由：初始描述是 AI 基于标题生成的，可能存在幻觉。与其浪费 Token 评估幻觉，
-            # 不如直接通过向量搜索看是否有真实新闻支撑。如果向量搜不到，自然会被后续逻辑淘汰。
-            # existing_topics_data = [...] # 移至需要时再构建
-            
-            # 确保现有专题有向量
+            logger.info(f"📊 待处理新闻池大小: {len(news_pool)}")
+            pool_vecs = await self._ensure_news_embeddings_batch(db, news_pool)
             active_topic_vecs = await self._ensure_topic_embeddings(db, active_topics)
 
-            # 5. 处理每个提炼出的专题
+            candidates = self.discovery.build_candidates(news_pool, pool_vecs, active_topic_vecs)
+            keyword_vecs = await self._build_follow_keyword_vecs()
+            if keyword_vecs:
+                before_count = len(candidates)
+                candidates = [
+                    candidate for candidate in candidates
+                    if candidate.centroid and max(self._cosine_similarity(candidate.centroid, kw_vec) for kw_vec in keyword_vecs) >= settings.FOLLOW_KEYWORDS_THRESHOLD
+                ]
+                logger.info(f"🔍 [Topic Filter] 关注关键词过滤: {before_count} -> {len(candidates)}")
+
+            if not candidates:
+                logger.info("📭 程序聚类未发现满足门槛的候选专题")
+                return
+
+            self._sort_topic_candidates_for_review(candidates)
+            logger.info(f"🧩 程序聚类生成候选专题事件簇: {len(candidates)} 个")
+            evidence_list = [candidate.evidence for candidate in candidates]
+            candidate_by_id = {candidate.cluster_id: candidate for candidate in candidates}
+            candidate_order = {candidate.cluster_id: index for index, candidate in enumerate(candidates)}
+            active_by_id = {int(t.id): t for t in active_topics}
+            existing_topics_data = [
+                {"id": t.id, "name": t.name, "summary": (t.summary or "")[:300]}
+                for t in active_topics
+            ]
+            decisions = await self.ai.evaluate_topic_candidates(evidence_list, existing_topics_data)
+            if not decisions:
+                logger.info("📭 AI 未放行任何候选专题")
+                return
+
             new_topics_created = 0
             updated_topics_count = 0
-            
-            # 记录本轮已处理（创建或更新）的专题ID
-            processed_topic_ids = set()
-
-            # 准备关注关键词向量 (如果有配置)
-            follow_keywords = settings.FOLLOW_KEYWORDS
-            keyword_vecs = []
-            if follow_keywords:
-                kw_list = [k.strip() for k in follow_keywords.split(",") if k.strip()]
-                if kw_list:
-                    logger.info(f"🔍 [Topic Filter] 启用关键词过滤: {kw_list}")
-                    kw_embs = await self.ai.get_embeddings(kw_list)
-                    keyword_vecs = [v for v in kw_embs if v]
-            
-            # === Phase 1: 处理 AI 提炼的潜在专题 ===
-            for p_topic in proposed_topics:
-                t_name = p_topic.get("name", "")
-                t_desc = p_topic.get("description", "") # 初始描述
-                
-                if not t_name:
-                    continue
-                    
-                logger.info(f"🔍 [Phase 1] 正在评估提炼专题: {t_name}")
-                
-                # 计算该潜在专题的向量
-                t_txt = f"{t_name} {t_desc}"
-                t_embs = await self.ai.get_embeddings([t_txt])
-                t_vec = t_embs[0] if t_embs and t_embs[0] else []
-                
-                if not t_vec:
-                    logger.warning(f"   ⚠️ 无法生成向量: {t_name}")
-                    continue
-
-                # 5.0 关键词过滤
-                if keyword_vecs:
-                    max_sim = max([self._cosine_similarity(t_vec, kv) for kv in keyword_vecs]) if keyword_vecs else 0
-                    if max_sim < settings.FOLLOW_KEYWORDS_THRESHOLD:
-                        logger.info(f"   ⏩ 专题 '{t_name}' 与关注关键词相关度不足 ({max_sim:.2f} < {settings.FOLLOW_KEYWORDS_THRESHOLD})，跳过")
-                        continue
-                
-                # --- 新增步骤：基于向量预先查找关联新闻，并生成真实摘要 ---
-                # 1. 预查找候选新闻 (Vector Search Only)
-                pre_candidates = self._find_candidate_news_by_vector(
-                    t_vec, news_pool, pool_vecs, used_ids, top_k=10, threshold=0.35
+            processed_news_ids: Set[int] = set()
+            decisions.sort(
+                key=lambda item: candidate_order.get(
+                    str(item.get("cluster_id") or ""),
+                    len(candidate_order),
                 )
-                
-                # 如果候选新闻太少，说明可能是幻觉或无实证的专题，直接跳过
-                if len(pre_candidates) < 2:
-                    logger.info(f"   ⏩ 专题 '{t_name}' 预查找候选新闻不足 ({len(pre_candidates)} < 2)，跳过")
+            )
+
+            for decision in decisions:
+                cluster_id = str(decision.get("cluster_id") or "")
+                candidate = candidate_by_id.get(cluster_id)
+                if not candidate:
                     continue
-                
-                # 2. 生成真实摘要 (Initial Summary Generation)
-                logger.info(f"   📝 正在为专题 '{t_name}' 生成基于事实的初始摘要 (Sample: {len(pre_candidates)})...")
-                overview_materials = [{"title": n.title, "content": n.summary or ""} for n, _ in pre_candidates]
-                
-                # 使用新的轻量级摘要生成 (默认 main 模型)
-                generated_summary = await self.ai.generate_topic_initial_summary(t_name, overview_materials)
-                if generated_summary:
-                    generated_summary = generated_summary.replace("```", "").strip()
-                
-                # 使用生成的摘要替换初始描述 (如果生成失败则沿用初始描述)
-                final_desc = generated_summary if generated_summary else t_desc
-                logger.info(f"   📝 生成摘要: {final_desc[:50]}...")
-                
-                # 3. 二次质量审核 (Quality Audit with Real Summary)
-                # 复用 batch_evaluate 但只传一个
-                # 构建 existing_topics_data 供参考 (Lazy build)
-                existing_topics_data = [
-                    {"name": t.name, "description": (t.summary or "")[:100]} 
-                    for t in active_topics
+
+                action = str(decision.get("decision") or "reject").lower()
+                if action == "reject":
+                    logger.info(f"   ❌ [候选拒绝] {cluster_id}: {decision.get('reason') or '无理由'}")
+                    continue
+
+                confirmed_news = [
+                    n for n in candidate.news_items
+                    if int(n.id) not in used_ids and int(n.id) not in processed_news_ids
                 ]
-                
-                audit_list = [{"name": t_name, "description": final_desc}]
-                valid_topics = await self.ai.batch_evaluate_topic_quality(audit_list, existing_topics=existing_topics_data)
-                
-                if not valid_topics:
-                    logger.info(f"   ❌ 专题 '{t_name}' 在基于真实摘要的二次审核中未通过，跳过")
+                if not confirmed_news:
+                    logger.info(f"   ⏩ [候选跳过] {cluster_id}: 新闻已在本轮或历史专题中使用")
                     continue
-                
-                # ----------------------------------------------------
 
-                # 5.1 检查是否与现有专题重复 (使用新的 final_desc)
                 existing_topic_obj = None
+                if action == "merge":
+                    existing_id = decision.get("existing_topic_id") or candidate.existing_topic_id
+                    existing_topic_obj = active_by_id.get(int(existing_id)) if existing_id else None
+                    if not existing_topic_obj:
+                        logger.info(f"   ⏩ [合并跳过] {cluster_id}: 未找到可合并的现有专题")
+                        continue
+                    t_name = existing_topic_obj.name
+                    t_desc = str(decision.get("summary") or existing_topic_obj.summary or t_name)
+                elif action == "create":
+                    if new_topics_created >= settings.TOPIC_CREATE_MAX_PER_RUN:
+                        logger.info(f"   ⏩ [创建上限] 本轮已创建 {new_topics_created} 个专题，跳过剩余候选")
+                        continue
+                    t_name = str(decision.get("name") or "").strip() or self._fallback_topic_name(candidate.evidence)
+                    t_desc = str(decision.get("summary") or "").strip() or candidate.evidence.get("fact_brief") or t_name
+                else:
+                    continue
 
-                for existing_t, existing_vec in active_topic_vecs:
-                    sim = self._cosine_similarity(t_vec, existing_vec)
-                    # 降低阈值至 0.6 以捕捉更多潜在重复，然后交给 AI 细判
-                    if sim > 0.6: 
-                        logger.info(f"   🔄 与现有专题 '{existing_t.name}' 相似 (sim={sim:.2f})，正在进行 AI 二次核验...")
-                        
-                        # 优化：限制传入 AI 的文本长度
-                        is_duplicate, reason = await self.ai.check_topic_duplicate(
-                            t_name, 
-                            final_desc[:1000], 
-                            existing_t.name, 
-                            (existing_t.summary or "")[:1000]
-                        )
-                        
-                        if is_duplicate:
-                            logger.info(f"   ✅ AI 确认重复 (理由: {reason})，将合并到现有专题: {existing_t.name}")
-                            existing_topic_obj = existing_t
-                            processed_topic_ids.add(existing_t.id)
-                            break
-                        else:
-                            logger.info(f"   ❌ AI 判定为不同事件 (理由: {reason})")
-                
-                # 执行匹配和更新 (传递 final_desc 作为 summary)
+                t_vec = candidate.centroid
+                if not t_vec:
+                    emb_text = f"{t_name} {t_desc}"[:1000]
+                    t_embs = await self.ai.get_embeddings([emb_text])
+                    t_vec = t_embs[0] if t_embs and t_embs[0] else []
+
+                logger.info(f"🔍 [候选通过] {cluster_id} -> {action}: {t_name}")
                 result_topic = await self._match_and_update_topic(
-                    db, t_name, final_desc, t_vec, existing_topic_obj, 
-                    news_pool, pool_vecs, used_ids,
-                    initial_summary=generated_summary
+                    db,
+                    t_name,
+                    t_desc,
+                    t_vec,
+                    existing_topic_obj,
+                    confirmed_news,
+                    pool_vecs,
+                    used_ids,
+                    initial_summary=None if existing_topic_obj else t_desc,
+                    confirmed_news_override=confirmed_news,
                 )
-                
+
                 if result_topic:
-                    # 如果是新创建的专题，且没有现成的 record，可以将 initial summary 先存入 record，
-                    # 或者保持 record 为空等待后续生成 Overview。
-                    # 这里为了数据完整性，暂且将 summary 存入 record，避免为空。
-                    if not existing_topic_obj and not result_topic.record and generated_summary:
-                         result_topic.record = generated_summary
-                         db.add(result_topic)
-                         await db.flush()
-                    
+                    for n in confirmed_news:
+                        processed_news_ids.add(int(n.id))
+                        used_ids.add(int(n.id))
                     if existing_topic_obj:
                         updated_topics_count += 1
                     else:
                         new_topics_created += 1
-                        # 新专题加入 active_topic_vecs 以供后续（虽然本轮 Phase 1 不会再回头，但为了逻辑完整）
+                        active_by_id[int(result_topic.id)] = result_topic
                         active_topic_vecs.append((result_topic, t_vec))
-                        processed_topic_ids.add(result_topic.id)
-
-            # === Phase 2: 扫描其余现有专题 ===
-            logger.info("🔍 [Phase 2] 扫描其余现有专题，寻找潜在更新...")
-            
-            # 规则：对于最近 N 天内更新过的活跃专题，尝试从高热度新闻池中寻找匹配更新
-            check_cutoff_date = datetime.now() - timedelta(days=settings.TOPIC_UPDATE_LOOKBACK_DAYS)
-            
-            for existing_t, existing_vec in active_topic_vecs:
-                if existing_t.id in processed_topic_ids:
-                    continue
-
-                # 检查专题更新时间，如果太久没更新（且不是本次新创建的），则跳过以节省资源
-                if existing_t.updated_time and existing_t.updated_time < check_cutoff_date:
-                    continue
-                
-                # 使用现有专题的信息进行匹配
-                # 注意：现有专题没有 t_desc 变量，使用 summary 或 name
-                logger.info(f"   Evaluating existing topic: {existing_t.name}")
-                
-                result_topic = await self._match_and_update_topic(
-                    db, 
-                    existing_t.name, 
-                    existing_t.summary or existing_t.name, 
-                    existing_vec, 
-                    existing_t, 
-                    news_pool, 
-                    pool_vecs, 
-                    used_ids
-                )
-                
-                if result_topic:
-                    updated_topics_count += 1
-                    processed_topic_ids.add(result_topic.id)
 
             logger.info(f"✅ 专题刷新完成，新建 {new_topics_created} 个，更新 {updated_topics_count} 个")
 
-            # 显式清理大对象，帮助 GC 回收
-            logger.info("🧹 [TopicService] 正在执行资源释放与内存清理...")
-            if 'news_pool' in locals(): del news_pool
-            if 'pool_vecs' in locals(): del pool_vecs
-            if 'active_topics' in locals(): del active_topics
-            if 'active_topic_vecs' in locals(): del active_topic_vecs
-            
             import gc
+            del news_pool
+            del pool_vecs
+            del active_topics
+            del active_topic_vecs
             gc.collect()
-            logger.info("✅ [TopicService] 内存清理完成")
             
     async def run_topic_scan_in_background(self, topic_id: int, include_used: bool = False):
         """
@@ -551,6 +594,101 @@ class TopicService:
             
         return overview_text
 
+    async def regenerate_timeline_item_summary_action(
+        self,
+        db: AsyncSession,
+        topic_id: int,
+        item_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        输入:
+        - `db`: 数据库会话
+        - `topic_id`: 专题 ID
+        - `item_id`: 时间轴节点 ID
+
+        输出:
+        - 重新生成后的节点数据；节点不存在或生成失败返回 None
+
+        作用:
+        - 基于时间轴节点关联的新闻，局部刷新该节点摘要并写回数据库。
+        """
+
+        topic = (await db.execute(select(Topic).where(Topic.id == topic_id))).scalar_one_or_none()
+        if not topic:
+            return None
+
+        item = (
+            await db.execute(
+                select(TopicTimelineItem).where(
+                    TopicTimelineItem.id == item_id,
+                    TopicTimelineItem.topic_id == topic_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not item:
+            return None
+
+        news_ids: Set[int] = set()
+        if item.news_id:
+            news_ids.add(int(item.news_id))
+        if isinstance(item.sources, list):
+            for source in item.sources:
+                if not isinstance(source, dict) or not source.get("id"):
+                    continue
+                try:
+                    news_ids.add(int(source["id"]))
+                except (TypeError, ValueError):
+                    continue
+
+        if not news_ids:
+            return None
+
+        news_list = (
+            await db.execute(
+                select(News)
+                .where(News.id.in_(list(news_ids)))
+                .order_by(desc(News.heat_score), desc(News.publish_date))
+            )
+        ).scalars().all()
+        if not news_list:
+            return None
+
+        news_payload = [
+            {
+                "id": news.id,
+                "title": news.title,
+                "source": news.source,
+                "summary": news.summary or (news.content or "")[:500],
+                "content": news.content or "",
+            }
+            for news in news_list
+        ]
+        event_time = item.event_time.isoformat() if item.event_time else ""
+        new_content = await self.ai.regenerate_timeline_item_summary(
+            topic_name=topic.name,
+            event_time=event_time,
+            current_content=item.content or "",
+            news_items=news_payload,
+        )
+        if not new_content:
+            return None
+
+        item.content = new_content
+        db.add(item)
+        await db.commit()
+        await db.refresh(item)
+
+        return {
+            "id": item.id,
+            "time": item.event_time.isoformat() if item.event_time else None,
+            "content": item.content,
+            "news_id": item.news_id,
+            "news_title": item.news_title,
+            "source_name": item.source_name,
+            "source_url": item.source_url,
+            "sources": item.sources,
+        }
+
     async def _match_and_update_topic(
         self,
         db: AsyncSession,
@@ -562,83 +700,89 @@ class TopicService:
         pool_vecs: Dict[int, List[float]],
         used_ids: Set[int],
         match_threshold: float = settings.TOPIC_MATCH_THRESHOLD,
-        initial_summary: Optional[str] = None
+        initial_summary: Optional[str] = None,
+        confirmed_news_override: Optional[List[News]] = None
     ) -> Optional[Topic]:
         """
         核心逻辑：根据专题信息（名称、描述、向量），在 news_pool 中寻找匹配新闻，
         经 AI 核验后，创建新专题或更新旧专题。
         """
         is_duplicate = (existing_topic_obj is not None)
-        
-        # 1. 向量初筛候选新闻
-        candidates = []
-        max_sim_found = 0.0
-        
-        for n in news_pool:
-            # 跳过已经在当前轮次处理过的新闻
-            if n.id in used_ids:
-                continue
-                
-            n_vec = pool_vecs.get(n.id)
-            if not n_vec:
-                continue
-            
-            # 计算相似度
-            sim = self._cosine_similarity(t_vec, n_vec)
-            if sim > max_sim_found:
-                max_sim_found = sim
-            
-            if sim > match_threshold: # 初筛阈值
-                candidates.append((n, sim))
-        
-        # 按相似度排序
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        # 取前 20 个给 AI 核验
-        candidates = candidates[:settings.TOPIC_MATCH_MAX_CANDIDATES]
-        
-        # 优化：如果是旧专题更新，过滤掉发布时间超过 24 小时的新闻
-        # 避免将几天前的旧新闻作为“新动态”更新进去
-        if is_duplicate:
-            cutoff_time = datetime.now() - timedelta(hours=24)
-            original_count = len(candidates)
-            candidates = [c for c in candidates if c[0].publish_date and c[0].publish_date >= cutoff_time]
-            
-            if len(candidates) < original_count:
-                logger.info(f"   🧹 [旧专题] 过滤了 {original_count - len(candidates)} 条过旧新闻 (< {cutoff_time.strftime('%m-%d %H:%M')})")
-            
-            if not candidates:
-                logger.info(f"   ⏩ [旧专题] 无近期候选新闻，跳过")
-                return None
-        
-        # 如果是新专题，且候选不足，则跳过；如果是合并旧专题，候选不足也无妨（只是本次没更新）
-        if not is_duplicate and len(candidates) <= settings.TOPIC_MIN_NEWS_COUNT:
-            logger.info(f"   ⚠️ [新专题] 初筛候选新闻不足 ({len(candidates)} <= {settings.TOPIC_MIN_NEWS_COUNT} / MaxSim: {max_sim_found:.3f})，跳过")
-            return None
-        
-        if is_duplicate and not candidates:
-            logger.info(f"   ⚠️ [旧专题合并] 无候选新闻 (MaxSim: {max_sim_found:.3f} / Threshold: {match_threshold})，跳过")
-            return None
 
-        # 2. AI 批量核验
-        verify_tasks = []
-        for n, sim in candidates:
-            verify_tasks.append({
-                "topic_name": t_name,
-                "topic_summary": t_desc, # 这里用 summary 字段传递 description
-                "news_title": n.title,
-                "news_summary": n.summary or (n.content or "")[:200] or ""
-            })
-        
-        verified_results = await self.ai.verify_topic_match_batch(verify_tasks)
-        
-        confirmed_news = []
-        for idx, (is_match, reason) in enumerate(verified_results):
-            if is_match:
-                logger.info(f"   ✅ [Match] {candidates[idx][0].title[:30]}... (Reason: {reason})")
-                confirmed_news.append(candidates[idx][0])
-            else:
-                # 可选: 详细模式下记录不匹配信息
-                logger.info(f"   ❌ [Mismatch] {candidates[idx][0].title[:30]}... (Reason: {reason})")
+        if confirmed_news_override is not None:
+            # 自动发现流程已经通过程序聚类和候选簇审核，避免再次逐条消耗 AI token。
+            confirmed_news = [n for n in confirmed_news_override if int(n.id) not in used_ids]
+            max_sim_found = 1.0
+        else:
+            # 1. 向量初筛候选新闻
+            candidates = []
+            max_sim_found = 0.0
+            
+            for n in news_pool:
+                # 跳过已经在当前轮次处理过的新闻
+                if n.id in used_ids:
+                    continue
+                    
+                n_vec = pool_vecs.get(n.id)
+                if not n_vec:
+                    continue
+                
+                # 计算相似度
+                sim = self._cosine_similarity(t_vec, n_vec)
+                if sim > max_sim_found:
+                    max_sim_found = sim
+                
+                if sim > match_threshold: # 初筛阈值
+                    candidates.append((n, sim))
+            
+            # 按相似度排序
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            # 取前 20 个给 AI 核验
+            candidates = candidates[:settings.TOPIC_MATCH_MAX_CANDIDATES]
+            
+            # 优化：如果是旧专题更新，过滤掉发布时间超过 24 小时的新闻
+            # 避免将几天前的旧新闻作为“新动态”更新进去
+            if is_duplicate:
+                cutoff_time = datetime.now() - timedelta(hours=24)
+                original_count = len(candidates)
+                candidates = [c for c in candidates if c[0].publish_date and c[0].publish_date >= cutoff_time]
+                
+                if len(candidates) < original_count:
+                    logger.info(f"   🧹 [旧专题] 过滤了 {original_count - len(candidates)} 条过旧新闻 (< {cutoff_time.strftime('%m-%d %H:%M')})")
+                
+                if not candidates:
+                    logger.info(f"   ⏩ [旧专题] 无近期候选新闻，跳过")
+                    return None
+            
+            # 如果是新专题，且候选不足，则跳过；如果是合并旧专题，候选不足也无妨（只是本次没更新）
+            if not is_duplicate and len(candidates) <= settings.TOPIC_MIN_NEWS_COUNT:
+                logger.info(f"   ⚠️ [新专题] 初筛候选新闻不足 ({len(candidates)} <= {settings.TOPIC_MIN_NEWS_COUNT} / MaxSim: {max_sim_found:.3f})，跳过")
+                return None
+            
+            if is_duplicate and not candidates:
+                logger.info(f"   ⚠️ [旧专题合并] 无候选新闻 (MaxSim: {max_sim_found:.3f} / Threshold: {match_threshold})，跳过")
+                return None
+
+            # 2. AI 批量核验
+            verify_tasks = []
+            for n, sim in candidates:
+                verify_tasks.append({
+                    "topic_name": t_name,
+                    "topic_summary": t_desc, # 这里用 summary 字段传递 description
+                    "news_title": n.title,
+                    "news_summary": n.summary or (n.content or "")[:200] or ""
+                })
+            
+            verified_results = await self.ai.verify_topic_match_batch(verify_tasks)
+            
+            confirmed_news = []
+            for idx, (is_match, reason) in enumerate(verified_results):
+                if is_match:
+                    logger.info(f"   ✅ [Match] {candidates[idx][0].title[:30]}... (Reason: {reason})")
+                    confirmed_news.append(candidates[idx][0])
+                else:
+                    # 可选: 详细模式下记录不匹配信息
+                    logger.info(f"   ❌ [Mismatch] {candidates[idx][0].title[:30]}... (Reason: {reason})")
 
         # === 规则调整：对于已有专题，使用 Top N 热度新闻池进行更新 ===
         if is_duplicate:
@@ -656,7 +800,7 @@ class TopicService:
         # 检查热度指标：新专题的总新闻热度必须大于 20
         max_heat = max([float(n.heat_score or 0) for n in confirmed_news]) if confirmed_news else 0
         total_heat = sum(float(n.heat_score or 0) for n in confirmed_news)
-        if not is_duplicate and total_heat <= 20:
+        if confirmed_news_override is None and not is_duplicate and total_heat <= 20:
              logger.info(f"   ⚠️ [新专题] 总新闻热度不足 ({total_heat:.1f} <= 20)，跳过")
              return None
         
@@ -667,6 +811,7 @@ class TopicService:
         # 3. 创建或更新专题
         current_topic_id = None
         topic_obj_to_return = None
+        refresh_time = datetime.now()
 
         if is_duplicate:
             logger.info(f"   🔄 更新旧专题: {existing_topic_obj.name} (新增 {len(confirmed_news)} 条新闻)")
@@ -676,9 +821,8 @@ class TopicService:
             if max_heat > current_max:
                 existing_topic_obj.heat_score = max_heat
             
-            new_end_time = max([n.publish_date for n in confirmed_news if n.publish_date]) if confirmed_news else None
-            if new_end_time and (not existing_topic_obj.updated_time or new_end_time > existing_topic_obj.updated_time):
-                existing_topic_obj.updated_time = new_end_time
+            # 专题的更新时间表示系统最后一次写入/刷新时间，不再混用新闻发布时间。
+            existing_topic_obj.updated_time = refresh_time
             
             current_topic_id = existing_topic_obj.id
             topic_obj_to_return = existing_topic_obj
@@ -689,14 +833,12 @@ class TopicService:
             max_heat = max([float(n.heat_score or 0) for n in confirmed_news]) if confirmed_news else 0
             # 最早时间
             start_time = min([n.publish_date for n in confirmed_news if n.publish_date]) if confirmed_news else datetime.now()
-            # 最新时间
-            end_time = max([n.publish_date for n in confirmed_news if n.publish_date]) if confirmed_news else datetime.now()
 
             new_topic = Topic(
                 name=t_name,
                 summary=t_desc,
                 start_time=start_time,
-                updated_time=end_time,
+                updated_time=refresh_time,
                 heat_score=max_heat,
                 embedding=t_vec,
                 status="active"
@@ -716,10 +858,11 @@ class TopicService:
                         crawled = await crawler_service.crawl_content_with_instance(n.url, crawler)
                         if crawled and len(crawled) > 50:
                             n.content = crawled
-                            # 内容更新了，摘要最好也刷新一下，否则旧摘要可能不准
-                            fresh_summary = await self.ai.generate_summary(n.title, n.content, max_words=200)
-                            if fresh_summary:
-                                n.summary = fresh_summary
+                            # 仅在缺少摘要时补摘要，避免重复消耗主模型 token。
+                            if not (n.summary or "").strip():
+                                fresh_summary = await self.ai.generate_summary(n.title, n.content, max_words=200)
+                                if fresh_summary:
+                                    n.summary = fresh_summary
                             db.add(n)
                     except Exception as e:
                         logger.warning(f"   ⚠️ 补全详情失败: {e}")
@@ -737,6 +880,7 @@ class TopicService:
                 "summary": n.summary or (n.content or "")[:200],
                 "source": n.source,
                 "url": n.url,
+                "heat_score": float(n.heat_score or 0),
                 "publish_date": n.publish_date  # 为了精确时间添加
             })
         
@@ -789,6 +933,7 @@ class TopicService:
                         "summary": n.summary or (n.content or "")[:200],
                         "source": n.source,
                         "url": n.url,
+                        "heat_score": float(n.heat_score or 0),
                         "publish_date": n.publish_date
                     })
             else:
@@ -798,18 +943,21 @@ class TopicService:
             logger.info(f"   🔄 正在重生成 {d_str} 的时间轴 (基于 {len(final_news_list)} 条新闻)...")
             day_events = await self.ai.generate_daily_timeline_events(d_str, final_news_list, topic_name=current_topic_name)
             
-            # 硬性规则：每天最多保留 2 个节点
-            if day_events and len(day_events) > 2:
-                logger.info(f"   ⚠️ [Rule] AI 生成了 {len(day_events)} 个节点，强制截取前 2 个")
-                day_events = day_events[:2]
+            # 硬性规则：每天最多保留配置数量的节点
+            max_day_events = max(1, settings.TOPIC_TIMELINE_MAX_EVENTS_PER_DAY)
+            if day_events and len(day_events) > max_day_events:
+                logger.info(f"   ⚠️ [Rule] AI 生成了 {len(day_events)} 个节点，强制截取前 {max_day_events} 个")
+                day_events = day_events[:max_day_events]
 
             # 如果 AI 没有生成任何事件（失败或为空），则降级处理：选最重要的 1-2 条作为代表
             if not day_events:
                 logger.warning(f"   ⚠️ {d_str} AI 合成事件失败，降级为使用 Top 新闻")
-                # 按 publish_date 排序，取最新的
-                final_news_list.sort(key=lambda x: x.get("publish_date") or datetime.min, reverse=True)
-                # 简单取前 2 条
-                for n_item in final_news_list[:2]:
+                # 按热度和发布时间排序，取最有代表性的新闻
+                final_news_list.sort(
+                    key=lambda x: (float(x.get("heat_score") or 0), x.get("publish_date") or datetime.min),
+                    reverse=True,
+                )
+                for n_item in final_news_list[:max_day_events]:
                     day_events.append({
                         "content": n_item["summary"] or n_item["title"],
                         "source_ids": [n_item["id"]]
@@ -897,27 +1045,12 @@ class TopicService:
                 should_update_overview = False
         
         if should_update_overview:
-            # 获取该专题下所有关联的新闻（为了生成全面的综述）
-            # 限制数量，取热度最高的 50 条
-            all_items_stmt = (
-                select(TopicTimelineItem)
-                .where(TopicTimelineItem.topic_id == current_topic_id)
-                .order_by(desc(TopicTimelineItem.event_time))
-                .limit(50)
+            overview_materials = await self._build_topic_overview_materials(
+                db,
+                current_topic_id,
+                confirmed_news,
+                limit=settings.TOPIC_OVERVIEW_MAX_NEWS,
             )
-            all_items = (await db.execute(all_items_stmt)).scalars().all()
-            
-            # 收集用于生成综述的素材
-            overview_materials = []
-            for it in all_items:
-                # 优化：优先使用 summary 或 content 的截断版本
-                # TopicTimelineItem.content 通常是时间轴事件的描述，本身比较精简
-                # 但如果它包含很长的引用，还是限制一下为好
-                content_val = it.content or ""
-                overview_materials.append({
-                    "title": it.news_title,
-                    "content": content_val[:500] # 使用 timeline 的 AI 摘要作为素材，限制长度
-                })
             
             if overview_materials:
                 # 1. 生成多维度综述

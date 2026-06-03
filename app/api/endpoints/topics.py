@@ -7,7 +7,7 @@
 
 from collections import Counter, defaultdict
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy import desc, select, asc, func, or_
@@ -72,48 +72,50 @@ def _apply_topic_filters(
     date: str = "all",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    min_heat: Optional[float] = 30,
+    min_heat: Optional[float] = 0,
+    updated_expr: Optional[Any] = None,
 ):
+    updated_field = updated_expr if updated_expr is not None else Topic.updated_time
     now = datetime.now()
     if start_date or end_date:
         try:
             if start_date:
                 s_date = datetime.strptime(start_date, "%Y-%m-%d").date()
-                stmt = stmt.where(Topic.updated_time >= datetime.combine(s_date, time.min))
+                stmt = stmt.where(updated_field >= datetime.combine(s_date, time.min))
             if end_date:
                 e_date = datetime.strptime(end_date, "%Y-%m-%d").date()
-                stmt = stmt.where(Topic.updated_time <= datetime.combine(e_date, time.max))
+                stmt = stmt.where(updated_field <= datetime.combine(e_date, time.max))
         except ValueError:
             pass
     else:
         try:
             if date == "today":
-                stmt = stmt.where(Topic.updated_time >= datetime.combine(now.date(), time.min))
+                stmt = stmt.where(updated_field >= datetime.combine(now.date(), time.min))
             elif date == "24h":
-                stmt = stmt.where(Topic.updated_time >= now - timedelta(hours=24))
+                stmt = stmt.where(updated_field >= now - timedelta(hours=24))
             elif date == "3d":
-                stmt = stmt.where(Topic.updated_time >= now - timedelta(days=3))
+                stmt = stmt.where(updated_field >= now - timedelta(days=3))
             elif date == "7d":
-                stmt = stmt.where(Topic.updated_time >= now - timedelta(days=7))
+                stmt = stmt.where(updated_field >= now - timedelta(days=7))
             elif date == "week":
                 start = now - timedelta(days=now.weekday())
-                stmt = stmt.where(Topic.updated_time >= datetime.combine(start.date(), time.min))
+                stmt = stmt.where(updated_field >= datetime.combine(start.date(), time.min))
             elif date == "month":
-                stmt = stmt.where(Topic.updated_time >= datetime.combine(now.replace(day=1).date(), time.min))
+                stmt = stmt.where(updated_field >= datetime.combine(now.replace(day=1).date(), time.min))
             elif date == "year":
-                stmt = stmt.where(Topic.updated_time >= datetime(now.year, 1, 1))
+                stmt = stmt.where(updated_field >= datetime(now.year, 1, 1))
             elif date == "all":
                 pass
             elif date:
                 target_date = datetime.strptime(date, "%Y-%m-%d").date()
                 stmt = stmt.where(
-                    Topic.updated_time >= datetime.combine(target_date, time.min),
-                    Topic.updated_time <= datetime.combine(target_date, time.max),
+                    updated_field >= datetime.combine(target_date, time.min),
+                    updated_field <= datetime.combine(target_date, time.max),
                 )
         except ValueError:
             pass
 
-    if min_heat is not None:
+    if min_heat is not None and min_heat > 0:
         stmt = stmt.where(Topic.heat_score >= min_heat)
 
     return stmt
@@ -186,21 +188,21 @@ async def _topic_ids_by_news_filters(
     return matched_topic_ids
 
 
-def _order_topics(stmt, sort_by: str):
+def _order_topics(stmt, sort_by: str, updated_expr: Optional[Any] = None):
+    updated_field = updated_expr if updated_expr is not None else Topic.updated_time
     if sort_by == "heat":
-        return stmt.order_by(desc(Topic.heat_score), desc(Topic.updated_time))
-    if sort_by == "start":
-        return stmt.order_by(desc(Topic.start_time), desc(Topic.updated_time))
-    return stmt.order_by(desc(Topic.updated_time), desc(Topic.heat_score))
+        return stmt.order_by(desc(Topic.heat_score), desc(updated_field), desc(Topic.id))
+    return stmt.order_by(desc(updated_field), desc(Topic.heat_score), desc(Topic.id))
 
 
-def _serialize_topic(t: Topic) -> Dict:
+def _serialize_topic(t: Topic, effective_updated_time: Optional[datetime] = None) -> Dict:
+    updated_time = effective_updated_time or t.updated_time
     return {
         "id": t.id,
         "name": t.name,
         "summary": t.summary,
         "start_time": t.start_time.isoformat() if t.start_time else None,
-        "updated_time": t.updated_time.isoformat() if t.updated_time else None,
+        "updated_time": updated_time.isoformat() if updated_time else None,
         "heat_score": float(t.heat_score or 0.0),
     }
 
@@ -288,7 +290,7 @@ async def get_topics_list(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     sort_by: str = "updated",
-    min_heat: Optional[float] = 30,
+    min_heat: Optional[float] = 0,
     category: Optional[str] = None,
     source: Optional[str] = None,
     region: Optional[str] = None,
@@ -299,12 +301,24 @@ async def get_topics_list(
     offset = (page - 1) * size
     query_text = (q or "").strip()
 
+    activity_subq = (
+        select(
+            TopicTimelineItem.topic_id,
+            func.max(TopicTimelineItem.created_at).label("last_activity_time"),
+        )
+        .group_by(TopicTimelineItem.topic_id)
+        .subquery()
+    )
+    effective_updated_expr = func.coalesce(activity_subq.c.last_activity_time, Topic.updated_time)
     stmt = _apply_topic_filters(
-        select(Topic).where(Topic.status == "active"),
+        select(Topic, effective_updated_expr.label("effective_updated_time"))
+        .outerjoin(activity_subq, activity_subq.c.topic_id == Topic.id)
+        .where(Topic.status == "active"),
         date=date,
         start_date=start_date,
         end_date=end_date,
         min_heat=min_heat,
+        updated_expr=effective_updated_expr,
     )
 
     matched_topic_ids = await _topic_ids_by_news_filters(db, category=category, source=source, region=region)
@@ -314,8 +328,8 @@ async def get_topics_list(
         stmt = stmt.where(Topic.id.in_(matched_topic_ids))
 
     if query_text:
-        candidate_stmt = _order_topics(stmt, sort_by).limit(1000)
-        candidates = (await db.execute(candidate_stmt)).scalars().all()
+        candidate_stmt = _order_topics(stmt, sort_by, effective_updated_expr).limit(1000)
+        candidate_rows = (await db.execute(candidate_stmt)).all()
 
         try:
             q_emb_list = await ai_service.get_embeddings([query_text])
@@ -326,7 +340,7 @@ async def get_topics_list(
 
         scored_topics = []
         lowered_q = query_text.lower()
-        for topic in candidates:
+        for topic, effective_updated_time in candidate_rows:
             score = 0.0
             haystack = f"{topic.name or ''} {topic.summary or ''}".lower()
             if lowered_q in haystack:
@@ -334,26 +348,26 @@ async def get_topics_list(
             if q_vec and topic.embedding and len(topic.embedding) == len(q_vec):
                 score += topic_service._cosine_similarity(q_vec, list(topic.embedding))
             if score > 0.2:
-                scored_topics.append((score, topic))
+                scored_topics.append((score, topic, effective_updated_time))
 
         scored_topics.sort(
             key=lambda row: (
                 row[0],
                 float(row[1].heat_score or 0.0),
-                row[1].updated_time or datetime.min,
+                row[2] or row[1].updated_time or datetime.min,
             ),
             reverse=True,
         )
         total = len(scored_topics)
-        items = [topic for _, topic in scored_topics[offset : offset + size]]
+        items = [(topic, effective_updated_time) for _, topic, effective_updated_time in scored_topics[offset : offset + size]]
     else:
-        ordered_stmt = _order_topics(stmt, sort_by)
+        ordered_stmt = _order_topics(stmt, sort_by, effective_updated_expr)
         total = (await db.execute(select(func.count()).select_from(ordered_stmt.subquery()))).scalar_one()
-        items = (await db.execute(ordered_stmt.offset(offset).limit(size))).scalars().all()
+        items = (await db.execute(ordered_stmt.offset(offset).limit(size))).all()
     
     return {
         "total": total,
-        "items": [_serialize_topic(t) for t in items],
+        "items": [_serialize_topic(t, effective_updated_time) for t, effective_updated_time in items],
         "page": page,
         "size": size
     }
@@ -627,3 +641,28 @@ async def regenerate_topic_overview(topic_id: int, db: AsyncSession = Depends(ge
         raise HTTPException(status_code=404, detail="专题不存在或生成失败")
     
     return {"message": "专题综述生成成功", "record": new_record}
+
+
+@router.post("/topics/{topic_id}/timeline/{item_id}/refresh_summary")
+async def refresh_timeline_item_summary(
+    topic_id: int,
+    item_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> Dict:
+    """
+    输入:
+    - `topic_id`: 专题 ID
+    - `item_id`: 时间轴节点 ID
+
+    输出:
+    - 刷新后的时间轴节点
+
+    作用:
+    - 用户在专题详情页手动刷新单个时间轴节点摘要。
+    """
+
+    item = await topic_service.regenerate_timeline_item_summary_action(db, topic_id, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="时间轴节点不存在、无关联新闻或生成失败")
+
+    return {"message": "时间轴节点摘要刷新成功", "item": item}

@@ -109,21 +109,35 @@ class Settings(BaseSettings):
     TOPIC_SCHEDULE_INTERVAL_HOURS: int = 4
     TOPIC_NEWS_MIN_HEAT: float = 1.0  # 参与专题生成的最低新闻热度
     TOPIC_QUALITY_LEVEL: int = 3  # 专题质量审核等级 (1-5)
+    TOPIC_DISCOVERY_MAX_NEWS_FOR_CLUSTER: int = 800  # 每轮进入程序聚类的最高热度新闻数量
+    TOPIC_DISCOVERY_MAX_CLUSTERS: int = 30  # 每轮最多送 AI 审核的候选事件簇数量
+    TOPIC_DISCOVERY_AI_BATCH_SIZE: int = 15  # 候选事件簇批量审核大小
+    TOPIC_CLUSTER_MIN_SCORE: float = 55.0  # 程序聚类候选进入 AI 审核的最低分
+    TOPIC_CLUSTER_SIM_THRESHOLD: float = 0.62  # 常规语义合并阈值
+    TOPIC_CLUSTER_STRONG_SIM_THRESHOLD: float = 0.78  # 强语义合并阈值
+    TOPIC_CLUSTER_MAX_DAYS_SPAN: int = 7  # 同一事件簇允许的最大日期跨度
+    TOPIC_EVIDENCE_MAX_TITLES: int = 6  # 单个候选证据包最多保留标题数
+    TOPIC_EVIDENCE_MAX_CHARS: int = 900  # 单个候选证据包事实摘要最大字符数
+    TOPIC_TIMELINE_MAX_EVENTS_PER_DAY: int = 4  # 每天时间轴节点上限
+    TOPIC_OVERVIEW_MAX_NEWS: int = 30  # 专题综述最多使用的新闻素材数
+    TOPIC_CREATE_MAX_PER_RUN: int = 5  # 每轮最多新建专题数
+    TOPIC_MIN_SOURCE_COUNT: int = 2  # 自动生成专题要求的最少来源数
+    TOPIC_EXISTING_MERGE_HINT_THRESHOLD: float = 0.68  # 候选簇提示合并现有专题的相似度阈值
 
     # AI 路由配置
     AI_ROUTE: Dict[str, str] = {
         "SUMMARY": "main",
-        "SENTIMENT": "main",
-        "KEYWORDS": "main",
-        "CLUSTERING": "main",
-        "TOPIC_NAME": "main",
-        "TOPIC_EVAL": "main",
-        "TOPIC_MATCH": "main",
-        "TOPIC_TIMELINE": "main",
-        "TOPIC_OVERVIEW": "main",
+        "SENTIMENT": "backup",
+        "KEYWORDS": "backup",
+        "CLUSTERING": "backup",
+        "TOPIC_NAME": "backup",
+        "TOPIC_EVAL": "backup",
+        "TOPIC_MATCH": "backup",
+        "TOPIC_TIMELINE": "backup",
+        "TOPIC_OVERVIEW": "backup",
         "TOPIC_INITIAL_SUMMARY": "main",
-        "REPORT": "main",
-        "CHAT": "main"
+        "REPORT": "backup",
+        "CHAT": "backup"
     }
 
     model_config = SettingsConfigDict(

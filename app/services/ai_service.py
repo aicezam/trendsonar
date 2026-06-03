@@ -804,6 +804,116 @@ class AIService:
         return None
 
 
+    def _extract_json_array_text(self, text: str) -> str:
+        """
+        输入:
+        - `text`: 大模型返回文本
+
+        输出:
+        - 尽量提取出的 JSON 数组文本
+
+        作用:
+        - 兼容模型偶尔包裹 Markdown 或解释文字的情况。
+        """
+
+        clean = str(text or "").replace("```json", "").replace("```", "").strip()
+        start = clean.find("[")
+        end = clean.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            return clean[start : end + 1]
+        return clean
+
+    async def evaluate_topic_candidates(
+        self,
+        candidates: List[Dict[str, Any]],
+        existing_topics: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        输入:
+        - `candidates`: 程序聚类出的候选事件证据包
+        - `existing_topics`: 现有活跃专题列表
+
+        输出:
+        - 审核决策列表，包含 create/merge/reject
+
+        作用:
+        - 只让大模型审核高价值候选簇，避免从大量标题中自由生成专题。
+        """
+
+        if not candidates:
+            return []
+        if not (self._has_main_llm() or self._has_backup_llm()):
+            logger.warning("⚠️ 未配置 LLM，候选专题审核跳过")
+            return []
+
+        batch_size = max(1, getattr(settings, "TOPIC_DISCOVERY_AI_BATCH_SIZE", 15))
+        existing_topics = existing_topics or []
+        limited_existing = [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "summary": str(item.get("summary") or item.get("description") or "")[:180],
+            }
+            for item in existing_topics[:50]
+        ]
+        existing_topics_text = json.dumps(limited_existing, ensure_ascii=False, default=str)
+        # 该提示词不需要变量插值，直接读取原文可兼容已缓存的历史提示词。
+        system_prompt = prompt_manager.get_prompt("topic_candidate_evaluation").get("system_prompt", "")
+        prefer_backup = self._get_prefer_backup("TOPIC_EVAL")
+
+        decisions: List[Dict[str, Any]] = []
+        for start in range(0, len(candidates), batch_size):
+            batch = candidates[start : start + batch_size]
+            candidates_text = json.dumps(batch, ensure_ascii=False, default=str)
+            user_prompt = prompt_manager.get_user_prompt(
+                "topic_candidate_evaluation",
+                existing_topics_text=existing_topics_text,
+                candidates_text=candidates_text,
+            )
+            logger.info(f"🤖 审核候选专题事件簇: {len(batch)} 个")
+            res = await self._call_llm_with_routes(user_prompt, system_prompt, prefer_backup=prefer_backup)
+            if not res:
+                logger.warning("⚠️ 候选专题审核失败，本批次默认不放行")
+                continue
+
+            try:
+                results = json.loads(self._extract_json_array_text(res))
+            except AIConfigurationError:
+                raise
+            except Exception as e:
+                logger.error(f"❌ 候选专题审核解析失败: {e}\nRaw: {res}")
+                continue
+
+            if not isinstance(results, list):
+                logger.warning("⚠️ 候选专题审核返回结构不是数组，本批次跳过")
+                continue
+
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                cluster_id = str(item.get("cluster_id") or "").strip()
+                decision = str(item.get("decision") or "reject").strip().lower()
+                if decision not in {"create", "merge", "reject"}:
+                    decision = "reject"
+                existing_topic_id = item.get("existing_topic_id")
+                try:
+                    existing_topic_id = int(existing_topic_id) if existing_topic_id is not None else None
+                except (TypeError, ValueError):
+                    existing_topic_id = None
+                decisions.append(
+                    {
+                        "cluster_id": cluster_id,
+                        "decision": decision,
+                        "name": str(item.get("name") or "").strip()[:80],
+                        "summary": str(item.get("summary") or "").strip()[:600],
+                        "existing_topic_id": existing_topic_id,
+                        "reason": str(item.get("reason") or "").strip()[:300],
+                    }
+                )
+
+        return decisions
+
+
 
     async def verify_topic_match_batch(self, tasks: List[Dict[str, str]]) -> List[Tuple[bool, str]]:
         """
@@ -922,6 +1032,53 @@ class AIService:
         except Exception as e:
             logger.error(f"❌ 解析时间轴合成结果失败: {e}\nRaw: {res}")
             return []
+
+    async def regenerate_timeline_item_summary(
+        self,
+        topic_name: str,
+        event_time: str,
+        current_content: str,
+        news_items: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        """
+        输入:
+        - `topic_name`: 专题名称
+        - `event_time`: 时间轴节点时间
+        - `current_content`: 当前节点摘要
+        - `news_items`: 节点关联新闻，包含标题、摘要、来源等
+
+        输出:
+        - 新的时间轴节点摘要；生成失败返回 None
+
+        作用:
+        - 针对单个时间轴节点重新生成更清晰的摘要，供详情页局部刷新使用。
+        """
+
+        if not news_items:
+            return None
+
+        news_lines: List[str] = []
+        for idx, item in enumerate(news_items[:8], start=1):
+            title = str(item.get("title") or "").strip()
+            source = str(item.get("source") or "").strip()
+            summary = str(item.get("summary") or item.get("content") or "").replace("\n", " ").strip()
+            news_lines.append(f"{idx}. 标题：{title}\n来源：{source or '未知来源'}\n摘要：{summary[:260]}")
+
+        system_prompt = prompt_manager.get_system_prompt("topic_timeline_item_refresh")
+        user_prompt = prompt_manager.get_user_prompt(
+            "topic_timeline_item_refresh",
+            topic_name=topic_name,
+            event_time=event_time,
+            current_content=(current_content or "")[:600],
+            news_list="\n\n".join(news_lines),
+        )
+
+        prefer_backup = self._get_prefer_backup("TOPIC_TIMELINE")
+        res = await self._call_llm_with_routes(user_prompt, system_prompt, prefer_backup=prefer_backup)
+        if not res:
+            return None
+
+        return res.replace("```", "").strip().strip('"').strip()
 
     async def check_topic_duplicate(
         self,

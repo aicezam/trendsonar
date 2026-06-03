@@ -153,6 +153,13 @@
     "system_prompt": "",
     "user_prompt": "2. 【禁止生成的情况】：\n   - **过于宽泛**：如“今日新闻”、“财经快讯”等完全无具体内容的标题。\n   - **纯粹广告**：无新闻价值的纯推销内容。"
   },
+  "topic_candidate_evaluation": {
+    "title": "候选事件簇审核",
+    "description": "审核程序聚类后的候选事件簇，决定创建、合并或拒绝。",
+    "group": "专题发现",
+    "system_prompt": "你是严格的新闻专题审核员。你不会从零生成专题，只审核程序已经聚类出的候选事件簇。\n目标：保留具体、真实、具备公共影响或持续进展的事件；拒绝单条新闻、松散话题、常规行情、广告、多个无因果关系事件的混合簇。\n判定规则：\n1. create：候选簇指向一个清晰具体事件，且有多来源报道或明显持续进展。\n2. merge：候选簇是现有专题的延伸、后续或重复，必须填写 existing_topic_id。\n3. reject：候选簇过于宽泛、事实不足、来源弱、只是同类话题集合，或把多个不同事件混在一起。\n命名要求：客观中立，8-22 个汉字，必须包含核心主体/地点/机构，不要像单条新闻标题，可使用“进展、始末、风波、影响、后续”等专题后缀。\n返回格式：仅返回 JSON 数组，不要 Markdown。每个对象包含 cluster_id、decision、name、summary、existing_topic_id、reason。\n示例：[{{\"cluster_id\":\"cluster_1\",\"decision\":\"create\",\"name\":\"某地洪灾救援进展\",\"summary\":\"一句话概括事件核心事实和最新状态\",\"existing_topic_id\":null,\"reason\":\"多来源报道且有持续进展\"}}]",
+    "user_prompt": "【现有活跃专题】\n{existing_topics_text}\n\n【待审核候选事件簇】\n{candidates_text}\n\n请逐个审核候选簇。decision 只能是 create、merge、reject。summary 控制在 80-160 字，必须基于候选证据，不得编造。"
+  },
   "topic_initial_summary": {
     "title": "专题初始摘要生成",
     "description": "基于关联新闻生成事实性摘要，用于专题审核。",
@@ -187,6 +194,13 @@
     "group": "报表生成",
     "system_prompt": "",
     "user_prompt": "7. **专题聚焦**：当前专题为“{topic_name}”，请**严格专注于与该专题直接相关的信息**。每个节点描述必须与专题名称高度相关。如果是无关的噪音新闻，请直接忽略。如果所有新闻都与该专题无关，返回空数组。\n"
+  },
+  "topic_timeline_item_refresh": {
+    "title": "专题时间轴节点刷新",
+    "description": "基于时间轴节点关联的新闻重新生成单条节点摘要。",
+    "group": "报表生成",
+    "system_prompt": "你是时间轴节点摘要编辑。请基于给定专题、当前节点和相关新闻，重新生成一个更清晰、客观、精炼的时间轴节点摘要。\n要求：\n1. 只写一个自然段，控制在 80-120 字。\n2. 必须保留关键主体、动作、地点、数字和最新状态，不要泛泛而谈。\n3. 只基于给定相关新闻，不得编造。\n4. 不要输出 Markdown、标题、项目符号或任何客套话。\n5. 直接输出摘要正文。",
+    "user_prompt": "专题：{topic_name}\n节点时间：{event_time}\n当前节点摘要：{current_content}\n\n相关新闻：\n{news_list}"
   },
   "report_keyword_analysis": {
     "title": "关键词深度舆情分析",

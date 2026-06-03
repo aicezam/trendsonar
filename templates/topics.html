@@ -5,6 +5,28 @@
 
 {% block content %}
 <div class="app-container page-wrap">
+    <section class="topics-hero">
+        <div class="topics-hero-copy">
+            <div class="topics-kicker">Topic Radar</div>
+            <h1 class="page-title">专题雷达</h1>
+            <p class="hint">按更新时间追踪活跃专题，结合热度、时间和地区筛选，快速定位值得继续关注的事件脉络。</p>
+        </div>
+        <div class="topics-hero-panel" aria-label="专题概览">
+            <div class="topics-hero-metric">
+                <strong id="heroTotal">-</strong>
+                <span>匹配专题</span>
+            </div>
+            <div class="topics-hero-metric">
+                <strong id="heroLoaded">-</strong>
+                <span>当前展示</span>
+            </div>
+            <div class="topics-hero-metric">
+                <strong id="heroFilter">不限</strong>
+                <span>默认热度</span>
+            </div>
+        </div>
+    </section>
+
     <div id="mobileTopicFilter" class="topics-filter-overlay">
         <div class="topics-filter-panel">
             <div class="topics-filter-head">
@@ -25,10 +47,6 @@
                 <div id="mobileRegionContainer" class="ms-container full-width"></div>
             </div>
             <div class="topics-filter-section">
-                <div class="topics-filter-label">来源筛选</div>
-                <div id="mobileSourceContainer" class="ms-container full-width"></div>
-            </div>
-            <div class="topics-filter-section">
                 <div class="topics-filter-label">最低热度</div>
                 <select id="mobileHeatSelect" class="topics-select">
                     <option value="0">不限</option>
@@ -44,10 +62,12 @@
                 <div class="topics-segmented">
                     <button class="topics-filter-btn" data-sort="updated" id="mobileSortUpdated" type="button">按更新</button>
                     <button class="topics-filter-btn" data-sort="heat" id="mobileSortHeat" type="button">按热度</button>
-                    <button class="topics-filter-btn" data-sort="start" id="mobileSortStart" type="button">按开始</button>
                 </div>
             </div>
-            <button id="applyMobileFilter" class="topics-primary-btn" type="button">确认筛选</button>
+            <div class="topics-filter-actions">
+                <button id="resetMobileFilter" class="topics-ghost-btn" type="button">重置</button>
+                <button id="applyMobileFilter" class="topics-primary-btn" type="button">确认筛选</button>
+            </div>
         </div>
     </div>
     <div id="topicCategoryTabs" class="category-tabs-container topics-category-tabs"></div>
@@ -56,13 +76,13 @@
             <input type="text" id="mobileSearchInput" placeholder="搜索专题 (支持语义)...">
             <button id="mobileSearchBtn" type="button">搜索</button>
         </div>
+        <button id="refreshMobileTopicsBtn" class="topics-icon-btn" type="button" title="刷新列表">刷新</button>
         <button id="openMobileFilter" class="topics-more-btn" type="button">筛选</button>
     </div>
     <div class="topics-toolbar">
         <div class="topics-segmented">
             <button class="topics-filter-btn" data-sort="updated" id="desktopSortUpdated" type="button">按更新</button>
             <button class="topics-filter-btn" data-sort="heat" id="desktopSortHeat" type="button">按热度</button>
-            <button class="topics-filter-btn" data-sort="start" id="desktopSortStart" type="button">按开始</button>
         </div>
         <select id="desktopTimeSelect" class="topics-select"></select>
         <div id="desktopDateRange" class="topics-date-range" style="display:none;">
@@ -77,11 +97,12 @@
             <option value="50">50+</option>
             <option value="100">100+</option>
         </select>
-        <div id="desktopSourceSelect" class="ms-container"></div>
         <div class="topics-search-box">
             <input type="text" id="desktopSearchInput" placeholder="搜索专题 (支持模糊搜索与语义搜索)...">
         </div>
         <button id="openDesktopFilter" class="topics-more-btn" type="button">更多筛选</button>
+        <button id="resetToolbarFilter" class="topics-ghost-btn" type="button">重置</button>
+        <button id="refreshTopicsBtn" class="topics-icon-btn" type="button">刷新</button>
         <button id="addTopicBtn" class="topics-add-btn" style="display:none;">+ 手动创建专题</button>
     </div>
     <div id="desktopTopicFilter" class="desktop-drawer-overlay">
@@ -116,11 +137,11 @@
                 </div>
             </div>
             <div class="drawer-footer">
+                <button id="resetDesktopFilter" class="topics-ghost-btn" type="button">重置筛选</button>
                 <button id="applyDesktopFilter" class="topics-primary-btn" type="button">确认筛选</button>
             </div>
         </div>
     </div>
-    <div id="topicStats" class="topics-stats" style="display:none;"></div>
     <div id="loading" class="loading">加载中...</div>
     <div id="empty" class="empty" style="display:none;">暂无专题。请等待全流程任务运行后自动生成。</div>
     <div id="list" class="topic-list"></div>
@@ -150,9 +171,8 @@
             dateOption: "all",
             startDate: "",
             endDate: "",
-            minHeat: "30",
+            minHeat: "0",
             category: "all",
-            source: "",
             region: ""
         }
     };
@@ -165,6 +185,14 @@
         openMobileFilter: document.getElementById("openMobileFilter"),
         closeMobileFilter: document.getElementById("closeMobileFilter"),
         applyMobileFilter: document.getElementById("applyMobileFilter"),
+        resetMobileFilter: document.getElementById("resetMobileFilter"),
+        resetDesktopFilter: document.getElementById("resetDesktopFilter"),
+        resetToolbarFilter: document.getElementById("resetToolbarFilter"),
+        refreshTopicsBtn: document.getElementById("refreshTopicsBtn"),
+        refreshMobileTopicsBtn: document.getElementById("refreshMobileTopicsBtn"),
+        heroTotal: document.getElementById("heroTotal"),
+        heroLoaded: document.getElementById("heroLoaded"),
+        heroFilter: document.getElementById("heroFilter"),
         categoryTabs: document.getElementById("topicCategoryTabs"),
         mobileSearchInput: document.getElementById("mobileSearchInput"),
         mobileSearchBtn: document.getElementById("mobileSearchBtn"),
@@ -186,15 +214,11 @@
         drawerHeatSelect: document.getElementById("drawerHeatSelect"),
         mobileRegionContainer: document.getElementById("mobileRegionContainer"),
         desktopRegionSelect: document.getElementById("desktopRegionSelect"),
-        mobileSourceContainer: document.getElementById("mobileSourceContainer"),
-        desktopSourceSelect: document.getElementById("desktopSourceSelect"),
         sortBtns: {
             mobileUpdated: document.getElementById("mobileSortUpdated"),
             mobileHeat: document.getElementById("mobileSortHeat"),
-            mobileStart: document.getElementById("mobileSortStart"),
             desktopUpdated: document.getElementById("desktopSortUpdated"),
-            desktopHeat: document.getElementById("desktopSortHeat"),
-            desktopStart: document.getElementById("desktopSortStart")
+            desktopHeat: document.getElementById("desktopSortHeat")
         }
     };
 
@@ -230,6 +254,11 @@
         if (score >= 80) return "high";
         if (score >= 40) return "mid";
         return "low";
+    }
+
+    function heatLabel(value) {
+        const num = Number(value || 0);
+        return num > 0 ? `${num}+` : "不限";
     }
 
     function el(tag, attrs = {}, children = []) {
@@ -310,13 +339,17 @@
         updateTriggerText(trigger) {
             if (this.selected.size === 0) {
                 trigger.textContent = this.placeholder;
+                trigger.classList.remove("has-value");
             } else if (this.selected.size === 1) {
                 const val = Array.from(this.selected)[0];
                 const opt = this.options.find(item => item.value === val);
                 trigger.textContent = opt ? opt.label : val;
+                trigger.classList.add("has-value");
             } else {
                 trigger.textContent = `${this.placeholder} (${this.selected.size})`;
+                trigger.classList.add("has-value");
             }
+            trigger.title = trigger.textContent;
         }
 
         toggleDropdown() {
@@ -332,7 +365,7 @@
         }
     }
 
-    let msRegion, msMobileRegion, msSource, msMobileSource;
+    let msRegion, msMobileRegion;
 
     function isMobile() {
         return window.innerWidth <= 720;
@@ -340,6 +373,38 @@
 
     function getEffectiveDate() {
         return state.filter.dateOption === "other" ? "" : state.filter.dateOption;
+    }
+
+    function resetFilters() {
+        state.filter = {
+            q: "",
+            sortBy: "updated",
+            dateOption: "all",
+            startDate: "",
+            endDate: "",
+            minHeat: "0",
+            category: "all",
+            region: ""
+        };
+        els.mobileSearchInput.value = "";
+        els.desktopSearchInput.value = "";
+        if (msRegion) msRegion.updateSelected("");
+        if (msMobileRegion) msMobileRegion.updateSelected("");
+        syncFilterUI();
+        loadTopics(1);
+    }
+
+    function renderSkeletons(list) {
+        list.innerHTML = "";
+        for (let i = 0; i < 4; i += 1) {
+            const card = el("div", { class: "topic-card topic-card-skeleton" });
+            card.innerHTML = `
+                <div class="skeleton-line wide"></div>
+                <div class="skeleton-line mid"></div>
+                <div class="skeleton-line"></div>
+            `;
+            list.appendChild(card);
+        }
     }
 
     function syncFilterUI() {
@@ -359,9 +424,9 @@
         els.desktopEndDate.value = state.filter.endDate;
         els.drawerStartDate.value = state.filter.startDate;
         els.drawerEndDate.value = state.filter.endDate;
-        els.mobileHeatSelect.value = state.filter.minHeat || "30";
-        els.desktopHeatSelect.value = state.filter.minHeat || "30";
-        els.drawerHeatSelect.value = state.filter.minHeat || "30";
+        els.mobileHeatSelect.value = state.filter.minHeat || "0";
+        els.desktopHeatSelect.value = state.filter.minHeat || "0";
+        els.drawerHeatSelect.value = state.filter.minHeat || "0";
         if (els.drawerDateRange) els.drawerDateRange.style.display = showRange ? "flex" : "none";
 
         Object.values(els.sortBtns).forEach(btn => {
@@ -374,6 +439,7 @@
                 btn.classList.toggle("active", (btn.dataset.category === "all" && isAll) || btn.dataset.category === state.filter.category);
             });
         }
+        if (els.heroFilter) els.heroFilter.textContent = heatLabel(state.filter.minHeat);
     }
 
     function setTimeOption(value) {
@@ -457,27 +523,6 @@
         }
     }
 
-    async function fetchTopicSources() {
-        try {
-            const resp = await fetch("/api/sources", { cache: "no-store" });
-            if (!resp.ok) throw new Error(resp.status);
-            const list = await resp.json();
-            const options = list.map(s => ({ label: s, value: s }));
-            msSource = new MultiSelect(els.desktopSourceSelect, "全部来源", options, state.filter.source, (val) => {
-                state.filter.source = val;
-                if (msMobileSource) msMobileSource.updateSelected(val);
-                loadTopics(1);
-            });
-            msMobileSource = new MultiSelect(els.mobileSourceContainer, "全部来源", options, state.filter.source, (val) => {
-                state.filter.source = val;
-                if (msSource) msSource.updateSelected(val);
-            });
-        } catch (e) {
-            msSource = new MultiSelect(els.desktopSourceSelect, "加载失败", [], "", () => {});
-            msMobileSource = new MultiSelect(els.mobileSourceContainer, "加载失败", [], "", () => {});
-        }
-    }
-
     function bindFilterEvents() {
         els.openMobileFilter.onclick = () => els.mobileFilter.classList.add("show");
         els.closeMobileFilter.onclick = () => els.mobileFilter.classList.remove("show");
@@ -489,6 +534,17 @@
         els.desktopFilter.onclick = (e) => {
             if (e.target === els.desktopFilter) els.desktopFilter.classList.remove("show");
         };
+        els.resetMobileFilter.onclick = () => {
+            els.mobileFilter.classList.remove("show");
+            resetFilters();
+        };
+        els.resetDesktopFilter.onclick = () => {
+            els.desktopFilter.classList.remove("show");
+            resetFilters();
+        };
+        els.resetToolbarFilter.onclick = resetFilters;
+        els.refreshTopicsBtn.onclick = () => loadTopics(1);
+        els.refreshMobileTopicsBtn.onclick = () => loadTopics(1);
 
         const runSearch = (value) => {
             state.filter.q = (value || "").trim();
@@ -555,6 +611,12 @@
         document.addEventListener("click", (e) => {
             if (!e.target.closest(".ms-container")) {
                 document.querySelectorAll(".ms-dropdown.show").forEach(d => d.classList.remove("show"));
+            }
+        });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                els.mobileFilter.classList.remove("show");
+                els.desktopFilter.classList.remove("show");
             }
         });
     }
@@ -651,8 +713,16 @@
 
     function renderTopicCard(t) {
         const card = el("div", { class: "topic-card" });
+        card.tabIndex = 0;
+        card.setAttribute("role", "link");
         card.addEventListener("click", () => {
             window.location.href = `/topics/${t.id}`;
+        });
+        card.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                window.location.href = `/topics/${t.id}`;
+            }
         });
 
         const header = el("div", { class: "topic-card-head" });
@@ -663,8 +733,9 @@
         header.appendChild(nameWrap);
 
         const heat = Number(t.heat_score || 0);
+        const heatWidth = Math.max(6, Math.min(100, heat));
         const heatBadge = el("div", { class: `topic-heat ${heatTone(heat)}` });
-        heatBadge.innerHTML = `<span>热度</span><strong>${heat.toFixed(1)}</strong>`;
+        heatBadge.innerHTML = `<span>热度</span><strong>${heat.toFixed(1)}</strong><div class="topic-heat-bar"><i style="width:${heatWidth}%"></i></div>`;
         header.appendChild(heatBadge);
 
         if (IS_ADMIN) {
@@ -680,6 +751,7 @@
                 class: "topic-action-btn danger",
                 onClick: (e) => deleteTopic(e, t.id, t.name)
             }));
+            actions.addEventListener("keydown", (e) => e.stopPropagation());
             header.appendChild(actions);
         }
         card.appendChild(header);
@@ -690,19 +762,19 @@
         card.appendChild(meta);
 
         card.appendChild(el("div", { class: "topic-summary", text: t.summary || "暂无概览，等待更多相关新闻沉淀。" }));
+        const footer = el("div", { class: "topic-card-footer" });
+        footer.appendChild(el("span", { class: "topic-card-hint", text: "查看时间轴、综述与相关新闻" }));
+        footer.appendChild(el("span", { class: "topic-arrow", text: "→" }));
+        card.appendChild(footer);
         return card;
     }
 
     function renderStats(data) {
-        const stats = document.getElementById("topicStats");
         const total = Number(data.total || 0);
         const loaded = document.getElementById("list").children.length;
-        stats.innerHTML = `
-            <div><strong>${total}</strong><span>活跃专题</span></div>
-            <div><strong>${loaded}</strong><span>当前展示</span></div>
-            <div><strong>${fmtShortDate(new Date().toISOString())}</strong><span>今日日期</span></div>
-        `;
-        stats.style.display = "grid";
+        if (els.heroTotal) els.heroTotal.textContent = total;
+        if (els.heroLoaded) els.heroLoaded.textContent = loaded;
+        if (els.heroFilter) els.heroFilter.textContent = heatLabel(state.filter.minHeat);
     }
 
     async function loadTopics(page = 1) {
@@ -719,7 +791,7 @@
             loading.style.display = "block";
             empty.style.display = "none";
             empty.textContent = "暂无专题。请等待全流程任务运行后自动生成。";
-            list.innerHTML = "";
+            renderSkeletons(list);
             loadingMore.style.display = "none";
             noMoreData.style.display = "none";
             hasMore = true;
@@ -735,9 +807,8 @@
                 sort_by: state.filter.sortBy,
                 date: getEffectiveDate()
             });
-            params.append("min_heat", state.filter.minHeat || "30");
+            params.append("min_heat", state.filter.minHeat || "0");
             if (state.filter.category && state.filter.category !== "all") params.append("category", state.filter.category);
-            if (state.filter.source) params.append("source", state.filter.source);
             if (state.filter.region) params.append("region", state.filter.region);
             if (state.filter.dateOption === "other") {
                 if (state.filter.startDate) params.append("start_date", state.filter.startDate);
@@ -751,8 +822,9 @@
             if (page === 1) {
                 loading.style.display = "none";
                 if (!items.length) {
+                    list.innerHTML = "";
                     renderStats(data);
-                    empty.textContent = state.filter.q || Number(state.filter.minHeat || 0) > 0 || state.filter.dateOption !== "all" || state.filter.category !== "all" || state.filter.source || state.filter.region
+                    empty.textContent = state.filter.q || Number(state.filter.minHeat || 0) > 0 || state.filter.dateOption !== "all" || state.filter.category !== "all" || state.filter.region
                         ? "没有符合条件的专题。"
                         : "暂无专题。请等待全流程任务运行后自动生成。";
                     empty.style.display = "block";
@@ -763,6 +835,8 @@
             } else {
                 loadingMore.style.display = "none";
             }
+
+            if (page === 1) list.innerHTML = "";
 
             if (items.length < pageSize) {
                 hasMore = false;
@@ -797,7 +871,6 @@
     syncFilterUI();
     fetchTopicCategories();
     fetchTopicRegions();
-    fetchTopicSources();
 
     // Scroll listener
     window.addEventListener('scroll', () => {

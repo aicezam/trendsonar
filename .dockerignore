@@ -8,6 +8,7 @@ run.log
 venv/
 .trae/
 .test/
+tests/
 scripts/
 trendsonar.db
 trendsonar.db-wal
