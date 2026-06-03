@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from pathlib import Path
 import re
 from threading import Lock
-from typing import Deque, Optional
+from typing import Any, Deque, Optional
 
 from app.core.config import BASE_DIR, get_settings
 
@@ -24,6 +24,58 @@ _memory_handler: Optional[logging.Handler] = None
 _date_file_handler: Optional[logging.Handler] = None
 
 _LOG_FILE_RE = re.compile(r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\.log$")
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|password|passwd|pwd|token|secret|access[_-]?token|refresh[_-]?token)(\s*[:=]\s*)([^\s,;]+)"
+)
+_SENSITIVE_JSON_RE = re.compile(
+    r"(?i)([\"']?(?:api[_-]?key|authorization|cookie|password|passwd|pwd|token|secret|access[_-]?token|refresh[_-]?token)[\"']?\s*:\s*[\"'])(.*?)([\"'])"
+)
+_AUTH_HEADER_RE = re.compile(r"(?i)(authorization\s*[:=]\s*)Bearer\s+[^\s,;]+")
+_COOKIE_HEADER_RE = re.compile(r"(?i)(cookie\s*[:=]\s*)(.+)")
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9._~+/=-]{12,})")
+_LONG_SECRET_RE = re.compile(r"\b(sk-[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{32,})\b")
+
+
+def sanitize_log_text(value: Any, max_length: Optional[int] = None) -> str:
+    """
+    输入:
+    - `value`: 待写入日志的任意内容
+    - `max_length`: 可选最大长度
+
+    输出:
+    - 脱敏并按需截断后的文本
+
+    作用:
+    - 统一过滤日志中的 API Key、Cookie、密码、Token 与 Bearer 凭证
+    """
+
+    text = str(value)
+    text = _SENSITIVE_JSON_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
+    text = _AUTH_HEADER_RE.sub(lambda m: f"{m.group(1)}Bearer ***", text)
+    text = _COOKIE_HEADER_RE.sub(lambda m: f"{m.group(1)}***", text)
+    text = _SENSITIVE_KEY_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _BEARER_RE.sub("Bearer ***", text)
+    text = _LONG_SECRET_RE.sub("***", text)
+    if max_length is not None and max_length > 0 and len(text) > max_length:
+        text = text[:max_length] + "...(已截断)"
+    return text
+
+
+class _SensitiveDataFormatter(logging.Formatter):
+    """
+    输入:
+    - `record`: logging 日志记录
+
+    输出:
+    - 脱敏后的格式化日志
+
+    作用:
+    - 在所有 handler 输出前统一脱敏，避免敏感信息写入终端、文件和内存缓存
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        raw = super().format(record)
+        return sanitize_log_text(raw)
 
 
 def _resolve_level(level: str) -> int:
@@ -166,14 +218,15 @@ def configure_logging() -> None:
     except Exception:
         pass
     root = logging.getLogger()
+    formatter = _SensitiveDataFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     if not root.handlers:
         handler = logging.StreamHandler(sys.stdout)
         handler.setLevel(log_level)
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         handler.setFormatter(formatter)
         root.addHandler(handler)
     else:
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        for handler in root.handlers:
+            handler.setFormatter(formatter)
 
     root.setLevel(log_level)
 

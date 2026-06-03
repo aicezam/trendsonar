@@ -8,7 +8,7 @@
 import json
 import gc
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from sqlalchemy import delete, select
@@ -51,6 +51,8 @@ class ClusteringService:
         """
 
         self.ai = ai
+        self._source_weight_cache: Dict[str, float] = {}
+        self._source_weight_cache_loaded = False
 
     def calculate_cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """
@@ -90,6 +92,37 @@ class ClusteringService:
             BASE_DIR / "news_sources.json",
         ]
 
+    def _refresh_source_weight_cache(self) -> None:
+        """
+        输入:
+        - 无
+
+        输出:
+        - 无
+
+        作用:
+        - 每轮聚类开始前读取一次新闻源权重，避免合并循环中反复读取配置文件
+        """
+
+        weights: Dict[str, float] = {}
+        try:
+            for path in self._get_sources_path_candidates():
+                if not path.exists():
+                    continue
+                with path.open("r", encoding="utf-8") as f:
+                    sources: List[Dict[str, Any]] = json.load(f)
+                for src in sources:
+                    name = str(src.get("name") or "").strip()
+                    if not name:
+                        continue
+                    weights[name] = float(src.get("weight", 1.0))
+                break
+        except Exception as e:
+            logger.error(f"读取新闻源权重失败: {e}")
+
+        self._source_weight_cache = weights
+        self._source_weight_cache_loaded = True
+
     def _get_source_weight_by_name(self, source_name: str) -> float:
         """
         输入:
@@ -102,18 +135,9 @@ class ClusteringService:
         - 用新闻源配置的权重重算合并后的总热度
         """
 
-        try:
-            for path in self._get_sources_path_candidates():
-                if not path.exists():
-                    continue
-                with path.open("r", encoding="utf-8") as f:
-                    sources: List[Dict] = json.load(f)
-                for src in sources:
-                    if src.get("name") == source_name:
-                        return float(src.get("weight", 1.0))
-        except Exception as e:
-            logger.error(f"读取新闻源权重失败: {e}")
-        return 1.0
+        if not self._source_weight_cache_loaded:
+            self._refresh_source_weight_cache()
+        return float(self._source_weight_cache.get(source_name, 1.0))
 
     def _needs_summary_regeneration(self, summary: str) -> bool:
         """
@@ -123,6 +147,75 @@ class ClusteringService:
             return False
         # 简单判断是否包含 HTML 标签
         return "<" in summary and ">" in summary
+
+    def _build_similarity_candidates(
+        self,
+        pool: List[Dict[str, Any]],
+        failed_pairs: Set[Tuple[int, int]],
+    ) -> Tuple[Dict[int, List[Tuple[int, float]]], int]:
+        """
+        输入:
+        - `pool`: 带有新闻 ID 与向量的聚类池
+        - `failed_pairs`: 历史 AI 拒绝的新闻 ID 对
+
+        输出:
+        - 候选合并映射与被历史记录拦截的数量
+
+        作用:
+        - 使用 NumPy 批量计算归一化向量相似度，降低 Python 双重循环开销
+        """
+
+        candidates: Dict[int, List[Tuple[int, float]]] = {j: [] for j in range(len(pool))}
+        if len(pool) < 2:
+            return candidates, 0
+
+        id_to_index = {int(item["id"]): idx for idx, item in enumerate(pool)}
+        failed_index_pairs: Set[Tuple[int, int]] = set()
+        for id_a, id_b in failed_pairs:
+            idx_a = id_to_index.get(int(id_a))
+            idx_b = id_to_index.get(int(id_b))
+            if idx_a is None or idx_b is None:
+                continue
+            if idx_a > idx_b:
+                idx_a, idx_b = idx_b, idx_a
+            failed_index_pairs.add((idx_a, idx_b))
+
+        try:
+            vectors = np.asarray([item["vec"] for item in pool], dtype=np.float32)
+            if vectors.ndim != 2:
+                raise ValueError("新闻向量维度不一致")
+        except Exception as e:
+            logger.warning(f"向量矩阵构建失败，回退到逐对相似度计算: {e}")
+            skipped_count = 0
+            for i in range(len(pool)):
+                for j in range(i + 1, len(pool)):
+                    if (i, j) in failed_index_pairs:
+                        skipped_count += 1
+                        continue
+                    sim = self.calculate_cosine_similarity(pool[i]["vec"], pool[j]["vec"])
+                    if sim >= settings.CLUSTERING_THRESHOLD:
+                        candidates[j].append((i, sim))
+            return candidates, skipped_count
+
+        norms = np.linalg.norm(vectors, axis=1)
+        valid_mask = norms > 0
+        normalized = np.zeros_like(vectors, dtype=np.float32)
+        normalized[valid_mask] = vectors[valid_mask] / norms[valid_mask, None]
+
+        skipped_count = len(failed_index_pairs)
+        threshold = float(settings.CLUSTERING_THRESHOLD)
+        for i in range(len(pool) - 1):
+            if not valid_mask[i]:
+                continue
+            sims = normalized[i + 1 :] @ normalized[i]
+            matched_offsets = np.flatnonzero(sims >= threshold)
+            for offset in matched_offsets:
+                j = i + 1 + int(offset)
+                if (i, j) in failed_index_pairs:
+                    continue
+                candidates[j].append((i, float(sims[offset])))
+
+        return candidates, skipped_count
 
     async def execute_clustering(self) -> None:
         """
@@ -137,6 +230,7 @@ class ClusteringService:
         """
 
         logger.info("🧩 开始执行聚类任务...")
+        self._refresh_source_weight_cache()
         async with AsyncSessionLocal() as db:
             from datetime import datetime, timedelta
 
@@ -181,27 +275,10 @@ class ClusteringService:
 
             logger.info(f"   📊 聚类池大小: {len(pool)}")
 
-            candidates: Dict[int, List] = {j: [] for j in range(len(pool))}
             total_items = len(pool)
             logger.info(f"   🔍 开始预扫描 {total_items} 条数据...")
 
-            skipped_count = 0
-            for i in range(len(pool)):
-                if i > 0 and i % 500 == 0:
-                    logger.debug(f"      [预扫描] 已处理 {i}/{total_items} ...")
-                for j in range(i + 1, len(pool)):
-                    # 检查是否在历史拒绝列表中
-                    id_a, id_b = pool[i]["id"], pool[j]["id"]
-                    if id_a > id_b:
-                        id_a, id_b = id_b, id_a
-                    
-                    if (id_a, id_b) in failed_pairs:
-                        skipped_count += 1
-                        continue
-
-                    sim = self.calculate_cosine_similarity(pool[i]["vec"], pool[j]["vec"])
-                    if sim >= settings.CLUSTERING_THRESHOLD:
-                        candidates[j].append((i, sim))
+            candidates, skipped_count = self._build_similarity_candidates(pool, failed_pairs)
 
             total_candidates = sum(len(v) for v in candidates.values())
             processed_candidates = 0

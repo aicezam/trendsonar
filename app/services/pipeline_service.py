@@ -37,6 +37,86 @@ settings = get_settings()
 DATA_DIR = Path("data")
 STATE_FILE = DATA_DIR / "scheduler_state.json"
 
+
+async def _process_summary_news_item(news_id: int, index: int, total: int) -> bool:
+    """
+    输入:
+    - `news_id`: 待生成摘要的新闻 ID
+    - `index`: 当前进度序号
+    - `total`: 本轮总任务数
+
+    输出:
+    - 是否成功生成并保存 AI 摘要
+
+    作用:
+    - 使用独立数据库会话处理单条新闻，便于自动摘要任务受控并发执行
+    """
+
+    progress_str = f"({index}/{total})"
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(News).where(News.id == news_id))
+        news = result.scalar_one_or_none()
+        if news is None:
+            logger.warning(f"   {progress_str} ⚠️ 新闻不存在，跳过: id={news_id}")
+            return False
+        if news.is_ai_summary:
+            return False
+
+        try:
+            content = news.content
+            if not content or len(content) < 50:
+                logger.debug(f"   {progress_str} 🕸️ 补抓正文: {news.title}")
+                content = await crawler_service.crawl_content(news.url)
+                if content:
+                    news.content = content
+                    db.add(news)
+                    await db.commit()
+                else:
+                    logger.warning(f"   {progress_str} ❌ 无法获取正文，跳过: {news.title}")
+                    return False
+
+            logger.info(f"   {progress_str} 📝 生成摘要: {news.title}")
+            input_content = content
+            if news.summary:
+                input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
+
+            summary = await ai_service.generate_summary(news.title, input_content)
+            if not summary:
+                return False
+
+            news.summary = summary
+            news.is_ai_summary = True
+
+            try:
+                txt_to_embed = f"{news.title} {summary} {content[:1000]}"
+                embs = await ai_service.get_embeddings([txt_to_embed])
+                if embs and embs[0]:
+                    news.embedding = embs[0]
+            except Exception as e:
+                logger.error(f"   {progress_str} ⚠️ 向量更新失败: {e}")
+
+            if not news.keywords:
+                try:
+                    logger.debug(f"   {progress_str} 🧠 同步深度分析: {news.title}")
+                    res = await ai_service.analyze_sentiment(news.title, summary)
+                    if res:
+                        news.sentiment_score = res["score"]
+                        news.sentiment_label = res["label"]
+                        news.category = res.get("category", "其他")
+                        news.region = res.get("region", "其他")
+                        news.keywords = res.get("keywords", [])
+                        news.entities = res.get("entities", [])
+                except Exception as e:
+                    logger.error(f"   {progress_str} ⚠️ 同步分析失败: {e}")
+
+            db.add(news)
+            await db.commit()
+            return True
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"   {progress_str} ⚠️ 处理异常 ({news.title}): {e}")
+            return False
+
 def _read_rss_mb() -> float | None:
     if os.name != "posix":
         return None
@@ -210,79 +290,54 @@ async def auto_generate_summaries_top_n() -> None:
         today_start = datetime.combine(datetime.now().date(), time.min)
 
         stmt = (
-            select(News)
-            .options(defer(News.embedding))
+            select(News.id)
             .where(News.publish_date >= today_start)
+            .where(or_(News.is_ai_summary.is_(False), News.is_ai_summary.is_(None)))
             .order_by(desc(News.heat_score))
             .limit(top_n)
         )
         result = await db.execute(stmt)
-        top_news = result.scalars().all()
+        news_ids = result.scalars().all()
 
-        # 筛选出尚未经过 AI 摘要生成的新闻 (is_ai_summary == False)
-        # 注意：即便 news.summary 有值（RSS自带摘要），只要 is_ai_summary 为 False，也需要重新生成
-        news_to_process = [n for n in top_news if not n.is_ai_summary]
-        total_task = len(news_to_process)
-        logger.debug(f"   📋 需生成摘要: {total_task} 条")
+    total_task = len(news_ids)
+    logger.debug(f"   📋 需生成摘要: {total_task} 条")
+    if not news_ids:
+        logger.info("✅ 自动摘要完成，共处理 0 条")
+        return
 
-        count = 0
-        for idx, news in enumerate(news_to_process, 1):
-            progress_str = f"({idx}/{total_task})"
-            try:
-                content = news.content
-                if not content or len(content) < 50:
-                    logger.debug(f"   {progress_str} 🕷️ 补抓正文: {news.title}")
-                    content = await crawler_service.crawl_content(news.url)
-                    if content:
-                        news.content = content
-                        db.add(news)
-                        await db.commit()
-                    else:
-                        logger.warning(f"   {progress_str} ❌ 无法获取正文，跳过: {news.title}")
-                        continue
+    concurrency = max(1, min(int(getattr(settings, "LLM_CONCURRENCY", 5) or 5), total_task, 5))
+    sem = asyncio.Semaphore(concurrency)
 
-                if content:
-                    logger.info(f"   {progress_str} 📝 生成摘要: {news.title}")
-                    
-                    # 组合输入：如果有原始摘要（RSS），则一起提供给 AI
-                    input_content = content
-                    if news.summary:
-                        input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
+    async def run_one(news_id: int, index: int) -> bool:
+        """
+        输入:
+        - `news_id`: 待处理新闻 ID
+        - `index`: 当前进度
 
-                    summary = await ai_service.generate_summary(news.title, input_content)
-                    if summary:
-                        news.summary = summary
-                        news.is_ai_summary = True
+        输出:
+        - 单条处理是否成功
 
-                        try:
-                            txt_to_embed = f"{news.title} {summary} {content[:1000]}"
-                            embs = await ai_service.get_embeddings([txt_to_embed])
-                            if embs and embs[0]:
-                                news.embedding = embs[0]
-                        except Exception as e:
-                            logger.error(f"   {progress_str} ⚠️ 向量更新失败: {e}")
+        作用:
+        - 在摘要任务级别控制并发数量
+        """
 
-                        if not news.keywords:
-                            try:
-                                logger.debug(f"   {progress_str} 🧠 同步深度分析: {news.title}")
-                                res = await ai_service.analyze_sentiment(news.title, summary)
-                                if res:
-                                    news.sentiment_score = res["score"]
-                                    news.sentiment_label = res["label"]
-                                    news.category = res.get("category", "其他")
-                                    news.region = res.get("region", "其他")
-                                    news.keywords = res.get("keywords", [])
-                                    news.entities = res.get("entities", [])
-                            except Exception as e:
-                                logger.error(f"   {progress_str} ⚠️ 同步分析失败: {e}")
+        async with sem:
+            return await _process_summary_news_item(news_id, index, total_task)
 
-                        db.add(news)
-                        await db.commit()
-                        count += 1
-            except Exception as e:
-                logger.error(f"   {progress_str} ⚠️ 处理异常 ({news.title}): {e}")
+    results = await asyncio.gather(
+        *(run_one(news_id, idx) for idx, news_id in enumerate(news_ids, start=1)),
+        return_exceptions=True,
+    )
 
-        logger.info(f"✅ 自动摘要完成，共处理 {count} 条")
+    count = 0
+    for res in results:
+        if isinstance(res, Exception):
+            logger.error(f"   ⚠️ 摘要任务异常: {res}")
+            continue
+        if res:
+            count += 1
+
+    logger.info(f"✅ 自动摘要完成，共处理 {count} 条")
 
 
 async def auto_generate_summaries_categories_top_n() -> None:

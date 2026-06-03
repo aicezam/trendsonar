@@ -45,6 +45,7 @@ class ReportService:
     def __init__(self) -> None:
         self._chart_cache: Dict[Tuple[Any, ...], Tuple[float, Any]] = {}
         self._global_cache: Optional[Tuple[float, str, Dict[str, Any]]] = None
+        self._is_postgresql = (settings.DATABASE_URL or "").lower().startswith(("postgresql", "postgres"))
 
     def clear_local_cache(self) -> None:
         """
@@ -116,6 +117,93 @@ class ReportService:
                 pass
         return filters
 
+    async def _get_word_cloud_chart_data_python(
+        self,
+        filters: List[Any],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        输入:
+        - `filters`: SQLAlchemy 查询过滤条件
+
+        输出:
+        - 词云数据与参与聚合的行数
+
+        作用:
+        - 为 SQLite 等非 PostgreSQL 数据库提供关键词 Python 聚合路径
+        """
+
+        async with AsyncSessionLocal() as db:
+            stmt = select(News.keywords).select_from(News)
+            if filters:
+                stmt = stmt.where(and_(*filters))
+            stmt = stmt.order_by(desc(News.heat_score)).limit(5000)
+            result = await db.execute(stmt)
+            keywords_values = result.scalars().all()
+
+        all_keywords: List[str] = []
+        for kws in keywords_values:
+            if not kws or not isinstance(kws, list):
+                continue
+            valid_kws = [
+                k.strip()
+                for k in kws
+                if k
+                and isinstance(k, str)
+                and k.strip()
+                and k.strip().lower() not in {"无内容", "null", "空", "none", ""}
+            ]
+            all_keywords.extend(valid_kws)
+
+        word_counts = Counter(all_keywords)
+        return [{"name": k, "value": v} for k, v in word_counts.most_common(50)], len(keywords_values)
+
+    async def _get_sentiment_chart_data_python(
+        self,
+        filters: List[Any],
+    ) -> Tuple[Dict[str, Any], int]:
+        """
+        输入:
+        - `filters`: SQLAlchemy 查询过滤条件
+
+        输出:
+        - 情感图表数据与参与聚合的行数
+
+        作用:
+        - 为 SQLite 等非 PostgreSQL 数据库提供情感关键词 Python 聚合路径
+        """
+
+        async with AsyncSessionLocal() as db:
+            stmt = select(News.sentiment_label, News.keywords).select_from(News)
+            if filters:
+                stmt = stmt.where(and_(*filters))
+            stmt = stmt.order_by(desc(News.heat_score)).limit(5000)
+            result = await db.execute(stmt)
+            rows = result.all()
+
+        sentiment_counts = {"正面": 0, "中立": 0, "负面": 0}
+        negative_keywords: List[str] = []
+        for label, kws in rows:
+            label_str = label if label in sentiment_counts else "中立"
+            sentiment_counts[label_str] += 1
+            if label_str == "负面" and kws and isinstance(kws, list):
+                valid_kws = [
+                    k.strip()
+                    for k in kws
+                    if k
+                    and isinstance(k, str)
+                    and k.strip()
+                    and k.strip().lower() not in {"无内容", "null", "空", "none", ""}
+                ]
+                negative_keywords.extend(valid_kws)
+
+        sentiment_dist = [
+            {"name": "正面", "value": sentiment_counts["正面"]},
+            {"name": "中立", "value": sentiment_counts["中立"]},
+            {"name": "负面", "value": sentiment_counts["负面"]},
+        ]
+        neg_keywords = [k for k, _ in Counter(negative_keywords).most_common(10)]
+        return {"sentiment_dist": sentiment_dist, "neg_keywords": neg_keywords}, len(rows)
+
     async def _get_word_cloud_chart_data(
         self,
         keyword: str = "",
@@ -136,6 +224,15 @@ class ReportService:
             region=region,
             source=None,
         )
+
+        if not self._is_postgresql:
+            data, row_count = await self._get_word_cloud_chart_data_python(filters)
+            elapsed = monotonic() - t0
+            if elapsed > 0.5:
+                logger.info(
+                    f"图表数据(词云)慢查询: {elapsed:.2f}s | 行数={row_count} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
+                )
+            return data
 
         try:
             jsonb_keywords = case(
@@ -168,36 +265,11 @@ class ReportService:
                 )
             return data
         except Exception:
-            async with AsyncSessionLocal() as db:
-                stmt = select(News.keywords).select_from(News)
-                if filters:
-                    stmt = stmt.where(and_(*filters))
-                # 增加 limit 防止全量拉取导致 OOM，取热度最高的 5000 条
-                stmt = stmt.order_by(desc(News.heat_score)).limit(5000)
-                result = await db.execute(stmt)
-                keywords_values = result.scalars().all()
-
-            all_keywords: List[str] = []
-            for kws in keywords_values:
-                if not kws or not isinstance(kws, list):
-                    continue
-                valid_kws = [
-                    k.strip()
-                    for k in kws
-                    if k
-                    and isinstance(k, str)
-                    and k.strip()
-                    and k.strip().lower() not in {"无内容", "null", "空", "none", ""}
-                ]
-                all_keywords.extend(valid_kws)
-
-            word_counts = Counter(all_keywords)
-            data = [{"name": k, "value": v} for k, v in word_counts.most_common(50)]
-
+            data, row_count = await self._get_word_cloud_chart_data_python(filters)
             elapsed = monotonic() - t0
             if elapsed > 0.5:
                 logger.info(
-                    f"图表数据(词云)慢查询: {elapsed:.2f}s | 行数={len(keywords_values)} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
+                    f"图表数据(词云)慢查询: {elapsed:.2f}s | 行数={row_count} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
                 )
             return data
 
@@ -260,6 +332,15 @@ class ReportService:
             source=None,
         )
 
+        if not self._is_postgresql:
+            data, row_count = await self._get_sentiment_chart_data_python(filters)
+            elapsed = monotonic() - t0
+            if elapsed > 0.5:
+                logger.info(
+                    f"图表数据(情感)慢查询: {elapsed:.2f}s | 行数={row_count} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
+                )
+            return data
+
         label_expr = case(
             (News.sentiment_label.in_(["正面", "中立", "负面"]), News.sentiment_label),
             else_=literal("中立"),
@@ -304,44 +385,13 @@ class ReportService:
                 )
             return data
         except Exception:
-            async with AsyncSessionLocal() as db:
-                stmt = select(News.sentiment_label, News.keywords).select_from(News)
-                if filters:
-                    stmt = stmt.where(and_(*filters))
-                # 增加 limit 防止全量拉取导致 OOM，取热度最高的 5000 条
-                stmt = stmt.order_by(desc(News.heat_score)).limit(5000)
-                result = await db.execute(stmt)
-                rows = result.all()
-
-            sentiment_counts = {"正面": 0, "中立": 0, "负面": 0}
-            negative_keywords: List[str] = []
-            for label, kws in rows:
-                label_str = label if label in sentiment_counts else "中立"
-                sentiment_counts[label_str] += 1
-                if label_str == "负面" and kws and isinstance(kws, list):
-                    valid_kws = [
-                        k.strip()
-                        for k in kws
-                        if k
-                        and isinstance(k, str)
-                        and k.strip()
-                        and k.strip().lower() not in {"无内容", "null", "空", "none", ""}
-                    ]
-                    negative_keywords.extend(valid_kws)
-
-            sentiment_dist = [
-                {"name": "正面", "value": sentiment_counts["正面"]},
-                {"name": "中立", "value": sentiment_counts["中立"]},
-                {"name": "负面", "value": sentiment_counts["负面"]},
-            ]
-            neg_keywords = [k for k, _ in Counter(negative_keywords).most_common(10)]
-
+            data, row_count = await self._get_sentiment_chart_data_python(filters)
             elapsed = monotonic() - t0
             if elapsed > 0.5:
                 logger.info(
-                    f"图表数据(情感)慢查询: {elapsed:.2f}s | 行数={len(rows)} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
+                    f"图表数据(情感)慢查询: {elapsed:.2f}s | 行数={row_count} | 分类={category or ''} | 范围={start_date or ''}~{end_date or ''}"
                 )
-            return {"sentiment_dist": sentiment_dist, "neg_keywords": neg_keywords}
+            return data
 
     async def _get_list_chart_data(
         self,

@@ -22,9 +22,19 @@ from pydantic import BaseModel
 from app.api.api import api_router
 from app.api.deps import settings, templates
 from app.core.config import BASE_DIR, get_missing_config_keys
-from app.core.database import init_db
+from app.core.database import dispose_engine, init_db
 from app.core.logger import configure_logging, setup_logger
-from app.services.admin_service import create_admin_session_token, get_admin_cookie_name, is_admin_request, verify_admin_password
+from app.services.admin_service import (
+    clear_admin_login_failures,
+    create_admin_session_token,
+    get_admin_client_key,
+    get_admin_cookie_name,
+    is_admin_login_locked,
+    is_admin_request,
+    is_secure_cookie_request,
+    record_admin_login_failure,
+    verify_admin_password,
+)
 from app.services.pipeline_service import scheduled_task
 from app.services.topic_service import topic_service
 
@@ -67,7 +77,10 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(scheduled_task())
     else:
         lifespan_logger.warning("⚠️ 由于数据库初始化失败，定时任务已跳过启动。")
-    yield
+    try:
+        yield
+    finally:
+        await dispose_engine()
 
 
 configure_logging()
@@ -170,10 +183,16 @@ async def page_admin(request: Request):
 
 
 @app.post("/admin/login")
-async def admin_login(payload: AdminLoginPayload):
+async def admin_login(payload: AdminLoginPayload, request: Request):
+    client_key = get_admin_client_key(request)
+    if is_admin_login_locked(client_key):
+        return JSONResponse(status_code=429, content={"ok": False, "message": "登录失败次数过多，请稍后再试"})
+
     if not verify_admin_password(payload.password):
+        record_admin_login_failure(client_key)
         return JSONResponse(status_code=403, content={"ok": False, "message": "密码错误"})
 
+    clear_admin_login_failures(client_key)
     token = create_admin_session_token()
     resp = JSONResponse(content={"ok": True})
     resp.set_cookie(
@@ -181,6 +200,7 @@ async def admin_login(payload: AdminLoginPayload):
         value=token,
         httponly=True,
         samesite="lax",
+        secure=is_secure_cookie_request(request),
     )
     return resp
 

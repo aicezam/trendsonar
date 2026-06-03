@@ -29,11 +29,11 @@ from app.api.deps import settings, verify_admin_access
 from app.core.database import get_db
 from app.core.exceptions import AIConfigurationError
 from app.core.config import get_missing_config_keys, BASE_DIR
-from app.core.logger import clear_cached_logs, get_cached_log_text, logger
+from app.core.logger import clear_cached_logs, get_cached_log_text, logger, sanitize_log_text
 from app.models.news import News
 from app.schemas.system import AdminAuth
 from app.services.ai_service import ai_service
-from app.services.admin_service import is_admin_request, load_config_yaml_text, save_config_yaml_text, schedule_restart
+from app.services.admin_service import is_admin_request, load_config_yaml_text, save_config_yaml_text, schedule_restart, verify_admin_password
 from app.services.pipeline_service import background_analyze_all, reanalyze_all_categories, run_manual
 from app.services.source_health_service import source_health_service
 from app.services.task_manager import task_manager
@@ -168,7 +168,7 @@ async def api_reanalyze_all_categories(auth: AdminAuth):
     - 触发对全量新闻进行重新分析（情感/分类/关键词/实体）
     """
 
-    if auth.password != settings.ADMIN_PASSWORD:
+    if not verify_admin_password(auth.password):
         raise HTTPException(status_code=403, detail="密码错误")
     return await reanalyze_all_categories()
 
@@ -577,7 +577,7 @@ async def api_get_log_file(name: str, request: Request, tail_lines: int = 5000):
         with path.open("r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 total += 1
-                lines.append(line.rstrip("\n"))
+                lines.append(sanitize_log_text(line.rstrip("\n")))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"读取日志失败: {e}")
 
