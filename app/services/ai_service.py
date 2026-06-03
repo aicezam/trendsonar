@@ -9,21 +9,26 @@ import asyncio
 import json
 import re
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from time import monotonic
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Tuple
 
 import aiohttp
 from openai import AsyncOpenAI, APIStatusError, RateLimitError, APIConnectionError
 
 from app.core.config import get_settings
 from app.core.logger import setup_logger
-from app.core.exceptions import AIConfigurationError
+from app.core.exceptions import AIConfigurationError, AIServiceUnavailableError
 from app.core.prompts import prompt_manager
 from app.services.concurrency_service import concurrency_service
 from app.utils.tools import normalize_regions_to_countries
 
 settings = get_settings()
 logger = setup_logger("AIService")
+AI_TASK_RETRY_DELAYS = (30, 120, 300)
+_ai_task_retry_enabled: ContextVar[bool] = ContextVar("ai_task_retry_enabled", default=False)
+_ai_task_retry_label: ContextVar[str] = ContextVar("ai_task_retry_label", default="后台任务")
 
 
 class AIService:
@@ -68,6 +73,50 @@ class AIService:
         self._last_embedding_error_signature = signature
         self._last_embedding_error_at = now
         logger.error(message)
+
+    @contextmanager
+    def task_retry_scope(self, label: str = "后台任务") -> Iterator[None]:
+        """
+        输入:
+        - `label`: 当前后台任务名称，用于日志与错误信息
+
+        输出:
+        - 上下文管理器
+
+        作用:
+        - 在后台任务范围内启用 AI 不可用时的长退避重试，避免交互接口被长时间阻塞。
+        """
+
+        enabled_token = _ai_task_retry_enabled.set(True)
+        label_token = _ai_task_retry_label.set(label)
+        try:
+            yield
+        finally:
+            _ai_task_retry_label.reset(label_token)
+            _ai_task_retry_enabled.reset(enabled_token)
+
+    def _mark_llm_failure(
+        self,
+        failure_state: Optional[Dict[str, str]],
+        kind: str,
+        detail: str = "",
+    ) -> None:
+        """
+        输入:
+        - `failure_state`: 调用方传入的失败状态字典
+        - `kind`: 失败类型
+        - `detail`: 失败详情
+
+        输出:
+        - 无
+
+        作用:
+        - 让路由层区分 AI 不可用、空响应与请求被拒绝，避免误触发长退避。
+        """
+
+        if failure_state is not None:
+            failure_state["kind"] = kind
+            failure_state["detail"] = detail
 
     def reload_config(self) -> None:
         """
@@ -148,6 +197,7 @@ class AIService:
         prompt: str,
         system: str = "",
         semaphore: asyncio.Semaphore | None = None,
+        failure_state: Optional[Dict[str, str]] = None,
     ) -> Optional[str]:
         """
         输入:
@@ -156,12 +206,13 @@ class AIService:
         - `prompt`: 用户提示词
         - `system`: 系统提示词
         - `semaphore`: 并发控制（可选）
+        - `failure_state`: 可选失败状态容器
 
         输出:
         - 模型返回文本；失败返回 None
 
         作用:
-        - 统一封装 LLM 调用、并发控制与异常处理
+        - 统一封装 LLM 调用、并发控制与异常分类；长退避由路由层统一处理
         """
 
         try:
@@ -191,62 +242,54 @@ class AIService:
                     extra_body=extra_body if extra_body else None,
                 )
 
-            # 重试逻辑
-            max_retries = 4
-            for attempt in range(max_retries):
-                try:
-                    if semaphore:
-                        async with semaphore:
-                            response = await concurrency_service.run_llm(do_call)
-                    else:
+            try:
+                if semaphore:
+                    async with semaphore:
                         response = await concurrency_service.run_llm(do_call)
-                    
-                    content = response.choices[0].message.content
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(f"🟢 [LLM 响应] 模型: {model}\n内容: {content[:2000]}...")
-                    
-                    if not content:
-                         logger.warning(f"⚠️ AI 返回内容为空 ({model})")
-                         if attempt < max_retries - 1:
-                             logger.info(f"   🔄 空内容重试 ({attempt + 1}/{max_retries})...")
-                             await asyncio.sleep(1)
-                             continue
-                         return None
+                else:
+                    response = await concurrency_service.run_llm(do_call)
 
-                    return content
-                
-                except (RateLimitError, APIConnectionError) as e:
-                    if attempt == max_retries - 1:
-                        raise e
-                    wait_time = 2 * (attempt + 1)
-                    logger.warning(f"⚠️ AI 调用受限或网络波动 ({model}): {e}，将在 {wait_time} 秒后重试 ({attempt + 1}/{max_retries})")
-                    await asyncio.sleep(wait_time)
-                
-                except APIStatusError as e:
-                    # 401: API Key 无效 - 致命错误
-                    if e.status_code == 401:
-                        logger.error(f"❌ AI 认证失败 (401) - API Key 无效 ({model}): {e}")
-                        raise AIConfigurationError(f"AI API Key 无效 ({model})")
+                content = response.choices[0].message.content
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"🟢 [LLM 响应] 模型: {model}\n内容: {(content or '')[:2000]}...")
 
-                    # 400 Bad Request 通常意味着内容过滤或参数无效
-                    if e.status_code == 400:
-                        logger.warning(f"❌ AI 请求被拒绝 (400) - 可能触发敏感词过滤 ({model}): {e}")
-                        # 触发外部的切换逻辑，如果是路由模式，会捕获 None 然后切换
-                        return None 
-                    
-                    # 服务端错误，重试可能有效
-                    if e.status_code >= 500:
-                        if attempt == max_retries - 1:
-                            raise e
-                        wait_time = 2 * (attempt + 1)
-                        logger.warning(f"⚠️ AI 服务端错误 ({model}): {e}，将在 {wait_time} 秒后重试")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        raise e
+                if not content:
+                    logger.warning(f"⚠️ AI 返回内容为空 ({model})")
+                    self._mark_llm_failure(failure_state, "empty", f"{model} 返回空内容")
+                    return None
+
+                return content
+
+            except (RateLimitError, APIConnectionError) as e:
+                self._mark_llm_failure(failure_state, "unavailable", str(e))
+                logger.warning(f"⚠️ AI 调用受限或网络波动 ({model}): {e}")
+                return None
+
+            except APIStatusError as e:
+                # 401: API Key 无效 - 致命错误
+                if e.status_code == 401:
+                    logger.error(f"❌ AI 认证失败 (401) - API Key 无效 ({model}): {e}")
+                    raise AIConfigurationError(f"AI API Key 无效 ({model})")
+
+                # 400 Bad Request 通常意味着内容过滤或参数无效，不按服务不可用处理。
+                if e.status_code == 400:
+                    self._mark_llm_failure(failure_state, "rejected", str(e))
+                    logger.warning(f"❌ AI 请求被拒绝 (400) - 可能触发敏感词过滤 ({model}): {e}")
+                    return None
+
+                if e.status_code >= 500:
+                    self._mark_llm_failure(failure_state, "unavailable", str(e))
+                    logger.warning(f"⚠️ AI 服务端错误 ({model}): {e}")
+                    return None
+
+                self._mark_llm_failure(failure_state, "error", str(e))
+                logger.error(f"❌ AI 状态异常 ({model}): {e}")
+                return None
 
         except AIConfigurationError:
             raise
         except Exception as e:
+            self._mark_llm_failure(failure_state, "unavailable", str(e))
             logger.error(f"❌ AI 调用异常 ({model}): {e}")
             return None
 
@@ -541,40 +584,32 @@ class AIService:
         system_prompt = prompt_manager.get_system_prompt("news_extract_info")
         user_prompt = prompt_manager.get_user_prompt("news_extract_info", content=content[:20000])
 
-        async def try_extract(client, model):
-            res = await self._call_llm(client, model, user_prompt, system_prompt)
-            if not res:
-                return None
-            try:
-                clean_res = res.strip()
-                if "```" in clean_res:
-                    start = clean_res.find("{")
-                    end = clean_res.rfind("}")
-                    if start != -1 and end != -1:
-                        clean_res = clean_res[start : end + 1]
-                data = json.loads(clean_res)
-                return data.get("items", [])
-            except AIConfigurationError:
-                raise
-            except Exception as e:
-                logger.warning(f"AI提取结果解析失败: {e}")
-                return None
-
         if not (self._has_main_llm() or self._has_backup_llm()):
             return []
 
-        routes = self._iter_llm_routes(self._get_prefer_backup("SUMMARY"))
-        for r_idx, route in enumerate(routes):
-            max_attempts = 3 if r_idx == 0 else 1
-            for attempt in range(max_attempts):
-                # 使用 async with 确保资源释放
-                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
-                    res = await try_extract(client, route["model"])
-                if res is not None:
-                    return res
-                await asyncio.sleep(1)
+        res = await self._call_llm_with_routes(
+            user_prompt,
+            system_prompt,
+            prefer_backup=self._get_prefer_backup("SUMMARY"),
+        )
+        if not res:
+            return []
 
-        return []
+        try:
+            clean_res = res.strip()
+            if "```" in clean_res:
+                start = clean_res.find("{")
+                end = clean_res.rfind("}")
+                if start != -1 and end != -1:
+                    clean_res = clean_res[start : end + 1]
+            data = json.loads(clean_res)
+            items = data.get("items", []) if isinstance(data, dict) else []
+            return items if isinstance(items, list) else []
+        except AIConfigurationError:
+            raise
+        except Exception as e:
+            logger.warning(f"AI提取结果解析失败: {e}")
+            return []
 
     def _normalize_category(self, raw_category: str) -> str:
         """
@@ -614,10 +649,9 @@ class AIService:
         system_prompt = prompt_manager.get_system_prompt("sentiment_analysis_single", categories_str=categories_str)
         user_prompt = prompt_manager.get_user_prompt("sentiment_analysis_single", title=title, content=content[:1000])
 
-        async def try_analyze(client, model):
-            res = await self._call_llm(client, model, user_prompt, system_prompt)
-            if not res:
-                return None
+        prefer_backup = self._get_prefer_backup("SENTIMENT")
+        res = await self._call_llm_with_routes(user_prompt, system_prompt, prefer_backup=prefer_backup)
+        if res:
             try:
                 clean_res = res.strip()
                 if "```" in clean_res:
@@ -631,27 +665,18 @@ class AIService:
                     data["region"] = normalize_regions_to_countries(data.get("region"))
                     if not data.get("region") or data.get("region") in ["其他", "未知"]:
                         data["region"] = "全球"
-                    
+
                     # 补全可能缺失的字段，防止 KeyError
                     if "keywords" not in data:
                         data["keywords"] = []
                     if "entities" not in data:
                         data["entities"] = []
-                        
+
                     return data
             except AIConfigurationError:
                 raise
             except Exception:
                 pass
-            return None
-
-        routes = self._iter_llm_routes(self._get_prefer_backup("SENTIMENT"))
-        for route in routes:
-            # 使用 async with 确保资源释放
-            async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
-                res = await try_analyze(client, route["model"])
-            if res:
-                return res
 
         return {
             "score": 50,
@@ -685,19 +710,16 @@ class AIService:
             items_text += f"[ID:{item['id']}] {item['title']}\n"
         user_prompt = prompt_manager.get_user_prompt("sentiment_analysis_batch", items_text=items_text)
 
+        res = await self._call_llm_with_routes(
+            user_prompt,
+            system_prompt,
+            prefer_backup=self._get_prefer_backup("SENTIMENT"),
+        )
+
+        if not res:
+            return {}
+
         try:
-            routes = self._iter_llm_routes(self._get_prefer_backup("SENTIMENT"))
-            res: Optional[str] = None
-            for route in routes:
-                # 使用 async with 确保资源释放
-                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
-                    res = await self._call_llm(client, route["model"], user_prompt, system_prompt)
-                if res:
-                    break
-
-            if not res:
-                return {}
-
             clean_res = res.strip()
             # 无论是否包含 markdown 标记，都优先尝试提取 JSON 数组
             start = clean_res.find("[")
@@ -760,47 +782,101 @@ class AIService:
         user_prompt = prompt_manager.get_user_prompt("summary_generation", title=title, content=content)
 
         prefer_backup = self._get_prefer_backup("SUMMARY")
-        routes = self._iter_llm_routes(prefer_backup)
-        for route in routes:
-            # 使用 async with 确保资源释放
-            async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
-                res = await self._call_llm(
-                    client,
-                    route["model"],
-                    user_prompt,
-                    system_prompt,
-                )
-            if res:
-                return res
-        return None
+        return await self._call_llm_with_routes(user_prompt, system_prompt, prefer_backup=prefer_backup)
 
     async def _call_llm_with_routes(
         self,
         user_prompt: str,
         system_prompt: str,
         prefer_backup: Optional[bool] = None,
+        stop_on_unavailable: Optional[bool] = None,
     ) -> Optional[str]:
+        """
+        输入:
+        - `user_prompt`: 用户提示词
+        - `system_prompt`: 系统提示词
+        - `prefer_backup`: 是否优先备用通道
+        - `stop_on_unavailable`: AI 不可用时是否长退避并最终抛错
+
+        输出:
+        - 模型返回文本；失败返回 None 或在任务模式下抛出 AIServiceUnavailableError
+
+        作用:
+        - 按主备路由调用模型，并在后台任务模式下执行 30 秒、2 分钟、5 分钟退避重试。
+        """
+
         prefer = False if prefer_backup is None else prefer_backup
-        routes = self._iter_llm_routes(prefer)
-        for i, route in enumerate(routes):
-            # 使用 async with 确保 client 资源释放
-            async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
-                res = await self._call_llm(
-                    client,
-                    route["model"],
-                    user_prompt,
-                    system_prompt,
-                )
-            
+        should_stop = _ai_task_retry_enabled.get() if stop_on_unavailable is None else stop_on_unavailable
+        task_label = _ai_task_retry_label.get()
+
+        async def call_routes_once() -> Tuple[Optional[str], bool, str]:
+            """
+            输入:
+            - 无，闭包读取提示词和路由配置
+
+            输出:
+            - `(返回文本, 是否仅因不可用失败, 失败详情)`
+
+            作用:
+            - 完整尝试一轮主备路由，让外层决定是否进入长退避。
+            """
+
+            routes = self._iter_llm_routes(prefer)
+            if not routes:
+                return None, True, "未配置可用 AI 路由"
+
+            failure_kinds: List[str] = []
+            failure_details: List[str] = []
+            for i, route in enumerate(routes):
+                failure_state: Dict[str, str] = {}
+                # 使用 async with 确保 client 资源释放
+                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                    res = await self._call_llm(
+                        client,
+                        route["model"],
+                        user_prompt,
+                        system_prompt,
+                        failure_state=failure_state,
+                    )
+
+                if res:
+                    return res, False, ""
+
+                failure_kind = failure_state.get("kind", "unknown")
+                failure_kinds.append(failure_kind)
+                if failure_state.get("detail"):
+                    failure_details.append(f"{route['model']}:{failure_state['detail']}")
+
+                # 如果运行到这里，说明当前路由失败或返回空内容
+                if i < len(routes) - 1:
+                    next_route = routes[i + 1]
+                    logger.warning(f"⚠️ 路由 {route['model']} ({route['type']}) 调用失败或返回空，尝试切换到 -> {next_route['model']} ({next_route['type']})")
+                else:
+                    logger.error("❌ 所有可用 AI 路由均调用失败")
+
+            unavailable_only = bool(failure_kinds) and all(kind == "unavailable" for kind in failure_kinds)
+            return None, unavailable_only, "; ".join(failure_details[-3:])
+
+        attempts = len(AI_TASK_RETRY_DELAYS) + 1 if should_stop else 1
+        last_detail = ""
+        for attempt in range(attempts):
+            res, unavailable_only, detail = await call_routes_once()
             if res:
                 return res
-            
-            # 如果运行到这里，说明当前路由失败或返回空内容
-            if i < len(routes) - 1:
-                next_route = routes[i+1]
-                logger.warning(f"⚠️ 路由 {route['model']} ({route['type']}) 调用失败或返回空，尝试切换到 -> {next_route['model']} ({next_route['type']})")
-            else:
-                logger.error(f"❌ 所有可用 AI 路由均调用失败")
+
+            last_detail = detail or last_detail
+            if not should_stop or not unavailable_only:
+                return None
+
+            if attempt < len(AI_TASK_RETRY_DELAYS):
+                wait_seconds = AI_TASK_RETRY_DELAYS[attempt]
+                logger.warning(
+                    f"⚠️ AI 服务暂时不可用，{task_label} 暂停 {wait_seconds} 秒后重试 "
+                    f"({attempt + 1}/{len(AI_TASK_RETRY_DELAYS)})"
+                )
+                await asyncio.sleep(wait_seconds)
+
+        raise AIServiceUnavailableError(f"AI 服务在 3 次退避重试后仍不可用，停止本次{task_label}。{last_detail}")
         return None
 
 
@@ -1304,82 +1380,50 @@ class AIService:
             
         user_content = prompt_manager.get_user_prompt("cluster_verification_batch", pairs_text=pairs_text)
 
-        async def try_verify(client, model):
+        res = await self._call_llm_with_routes(
+            user_content,
+            system_prompt,
+            prefer_backup=self._get_prefer_backup("CLUSTERING"),
+        )
+        if not res:
+            logger.error("❌ 所有通道核验均失败，跳过本批次")
+            return [False] * len(pairs)
+
+        try:
+            clean_res = res.strip()
+            if clean_res.startswith("```"):
+                start = clean_res.find("[")
+                end = clean_res.rfind("]")
+                if start != -1 and end != -1:
+                    clean_res = clean_res[start : end + 1]
+            else:
+                start = clean_res.find("[")
+                end = clean_res.rfind("]")
+                if start != -1 and end != -1:
+                    clean_res = clean_res[start : end + 1]
+
+            # 尝试修复 Python 风格的布尔值
+            clean_res = clean_res.replace("True", "true").replace("False", "false")
+
             try:
-                res = await self._call_llm(client, model, user_content, system_prompt)
-                if not res:
-                    return None
-
-                clean_res = res.strip()
-                if clean_res.startswith("```"):
-                    start = clean_res.find("[")
-                    end = clean_res.rfind("]")
-                    if start != -1 and end != -1:
-                        clean_res = clean_res[start : end + 1]
+                results = json.loads(clean_res)
+            except json.JSONDecodeError:
+                # 尝试使用正则提取布尔值
+                bool_matches = re.findall(r'\b(true|false)\b', clean_res, re.IGNORECASE)
+                if len(bool_matches) == len(pairs):
+                    results = [b.lower() == 'true' for b in bool_matches]
                 else:
-                    start = clean_res.find("[")
-                    end = clean_res.rfind("]")
-                    if start != -1 and end != -1:
-                        clean_res = clean_res[start : end + 1]
+                    raise
 
-                # 尝试修复 Python 风格的布尔值
-                clean_res = clean_res.replace("True", "true").replace("False", "false")
+            if isinstance(results, list) and len(results) == len(pairs):
+                return [bool(x) for x in results]
 
-                try:
-                    results = json.loads(clean_res)
-                except json.JSONDecodeError:
-                    # 尝试使用正则提取布尔值
-                    import re
-                    bool_matches = re.findall(r'\b(true|false)\b', clean_res, re.IGNORECASE)
-                    if len(bool_matches) == len(pairs):
-                        results = [b.lower() == 'true' for b in bool_matches]
-                    else:
-                        raise
+            logger.error(f"❌ 批量核验返回格式错误: {results} (预期长度: {len(pairs)})")
+        except AIConfigurationError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ 批量核验异常: {e}")
 
-                if isinstance(results, list) and len(results) == len(pairs):
-                    return [bool(x) for x in results]
-
-                logger.error(f"❌ 批量核验返回格式错误: {results} (预期长度: {len(pairs)})")
-                return None
-            except AIConfigurationError:
-                raise
-            except Exception as e:
-                logger.error(f"❌ 批量核验异常 ({model}): {e}")
-                return None
-
-        routes = self._iter_llm_routes(self._get_prefer_backup("CLUSTERING"))
-        # 将 routes 转换为列表以便索引
-        route_list = list(routes)
-        
-        for i, route in enumerate(route_list):
-            # 如果是 backup 通道，尝试 3 次；如果是 main 通道，尝试 1 次
-            is_backup = (route["base_url"] == settings.BACKUP_AI_BASE_URL)
-            max_attempts = 3 if is_backup else 1
-            
-            for attempt in range(max_attempts):
-                if attempt > 0:
-                    await asyncio.sleep(2 if attempt == 1 else 10)
-                
-                # 使用 async with 确保资源释放
-                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
-                    try:
-                        res = await try_verify(client, route["model"])
-                    except AIConfigurationError:
-                        raise
-                
-                if res is not None:
-                    return res
-                
-                # 如果运行到这里，说明尝试失败（返回了 None）
-                if is_backup and attempt < max_attempts - 1:
-                    logger.warning(f"⚠️ 备用AI核验失败 (第{attempt + 1}次)，准备重试...")
-
-            # 当前路由的所有尝试都失败了
-            if i < len(route_list) - 1:
-                next_route = route_list[i+1]
-                logger.warning(f"⚠️ 路由 {route['model']} (CLUSTERING) 调用失败，尝试切换到 -> {next_route['model']}")
-
-        logger.error("❌ 所有通道核验均失败，跳过本批次")
         return [False] * len(pairs)
 
 

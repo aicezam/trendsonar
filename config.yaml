@@ -21,6 +21,20 @@ WEIBO_COOKIE: "Example:JAHKSJDHKASDHKJ……"
 
 # 浏览器正文抓取并发。正文抓取会启动/复用 Chromium，建议保持 1-2 以控制内存峰值
 CRAWLER_CONCURRENCY: 2
+# 正文最小有效长度。动态页有时首屏文本较短，建议 20-50
+CRAWLER_CONTENT_MIN_LENGTH: 30
+# 快速浏览器抓取返回前等待秒数。过低容易拿到动态页空壳
+CRAWLER_FAST_WAIT_SECONDS: 1.5
+# 快速抓取无正文时，动态页慢速兜底等待秒数。知乎/头条等建议 5-8
+CRAWLER_DYNAMIC_WAIT_SECONDS: 6.0
+# 单次完整正文抓取硬超时，单位秒。包含轻量抓取、crawl4ai 与 Playwright 兜底
+CRAWLER_FETCH_TIMEOUT_SECONDS: 45.0
+# 浏览器页面加载超时时间，单位毫秒
+CRAWLER_PAGE_TIMEOUT_MS: 60000
+# 正文补抓总尝试次数。2 表示首次失败后只重试 1 次
+CRAWLER_RETRY_ATTEMPTS: 2
+# 正文补抓外层失败后再次尝试的等待秒数
+CRAWLER_RETRY_DELAY_SECONDS: 8.0
 
 # ================= AI 模型配置 =================
 # --- Embedding & Rerank (SiliconFlow) ---

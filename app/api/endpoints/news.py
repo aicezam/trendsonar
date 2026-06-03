@@ -28,6 +28,7 @@ from app.models.news import News
 from app.services.ai_service import ai_service
 from app.services.crawler_service import crawler_service
 from app.utils.news_query import build_news_query_filters, serialize_news_item
+from app.utils.summary_material import build_summary_generation_input, get_existing_summary_material
 from app.utils.tools import normalize_regions_to_countries
 
 router = APIRouter(prefix="/api", tags=["news"])
@@ -636,13 +637,22 @@ async def api_generate_summary(news_id: int, db: AsyncSession = Depends(get_db))
 
     full_content = ""
 
-    main_content = news.content
-    if not main_content or len(main_content) < 50:
+    original_summary = (news.summary or "").strip()
+    main_content = (news.content or "").strip()
+    summary_material = get_existing_summary_material(original_summary)
+    if not main_content and not summary_material:
         main_content = await crawler_service.crawl_content(news.url) or ""
         if main_content:
             news.content = main_content
 
-    full_content += f"【主报道】{news.title}\n{main_content}\n\n"
+    main_input = build_summary_generation_input(
+        content=main_content,
+        original_summary=original_summary,
+    )
+    if not main_input:
+        return {"summary": "抓取失败，内容过短"}
+
+    full_content += f"【主报道】{news.title}\n{main_input}\n\n"
 
     if news.sources and len(news.sources) > 1:
         for src in news.sources:
@@ -655,11 +665,9 @@ async def api_generate_summary(news_id: int, db: AsyncSession = Depends(get_db))
                     full_content = full_content[:100000] + "\n...(截断)..."
                     break
 
-    if len(full_content) < 50:
-        return {"summary": "抓取失败，内容过短"}
-
     summary = await ai_service.generate_summary(news.title, full_content)
     news.summary = summary
+    news.is_ai_summary = True
 
     try:
         txt_to_embed = f"{news.title} {summary} {full_content[:1000]}"

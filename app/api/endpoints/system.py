@@ -220,6 +220,10 @@ class UpdateSourcesStructuredPayload(BaseModel):
     sources: list[NewsSourcePayload]
 
 
+class SourceContentTestPayload(BaseModel):
+    url: str
+
+
 def _get_news_sources_path() -> Path:
     candidates = [
         BASE_DIR / "data" / "news_sources.json",
@@ -860,4 +864,44 @@ async def api_test_news_source(source: NewsSourcePayload, request: Request):
             "preview": [],
             "message": str(e),
             "health": source_health_service.get_status(key),
+        }
+
+
+@router.post("/admin/news_sources/test_content")
+async def api_test_news_source_content(payload: SourceContentTestPayload, request: Request):
+    """
+    输入:
+    - `payload`: 需要测试正文抓取的新闻 URL
+
+    输出:
+    - 正文抓取结果、文本长度与预览内容
+
+    作用:
+    - 供管理端在新闻源测试结果中单独验证某条新闻的正文抓取效果
+    """
+
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+
+    target_url = str(payload.url or "").strip()
+    if not target_url:
+        raise HTTPException(status_code=400, detail="URL 不能为空")
+
+    from app.services.crawler_service import crawler_service
+
+    try:
+        content = await crawler_service.crawl_content(target_url)
+        cleaned = (content or "").strip()
+        return {
+            "ok": bool(cleaned),
+            "length": len(cleaned),
+            "preview": cleaned[:1200],
+            "message": "正文抓取成功" if cleaned else "未抓取到正文",
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "length": 0,
+            "preview": "",
+            "message": str(e),
         }

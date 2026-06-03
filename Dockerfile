@@ -17,6 +17,7 @@ RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debia
     && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # 固定一个已知有镜像同步的 Playwright 版本

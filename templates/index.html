@@ -897,11 +897,11 @@
                     <button class="btn-link" onclick="genSummary(${news.id})">重新生成摘要</button>
                 </div>
                 <div class="detail-status-grid">
-                    <div><strong>${status.has_summary ? '已生成' : '未生成'}</strong><span>AI 摘要</span></div>
+                    <div><strong>${status.has_summary ? '已有摘要' : '暂无摘要'}</strong><span>新闻摘要</span></div>
                     <div><strong>${status.related_source_count || 0}</strong><span>关联报道</span></div>
                 </div>
                 <div class="detail-section">
-                    <div class="detail-section-title">AI 摘要</div>
+                    <div class="detail-section-title">新闻摘要</div>
                     <div class="detail-summary markdown-body">${summary}</div>
                 </div>
                 <div class="detail-two-col">

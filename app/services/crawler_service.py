@@ -25,6 +25,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.core.config import BASE_DIR, get_settings
 from app.core.database import AsyncSessionLocal
+from app.core.exceptions import AIConfigurationError, AIServiceUnavailableError
 from app.core.logger import setup_logger
 from app.models.news import News
 from app.services.ai_service import ai_service
@@ -152,12 +153,28 @@ class CrawlerService:
                 continue
         return body.decode("utf-8", errors="replace")
 
+    def _content_min_length(self) -> int:
+        """
+        输入:
+        - 无
+
+        输出:
+        - 当前配置下可接受的正文最小长度
+
+        作用:
+        - 允许线上按站点特性调低动态页短文本的有效阈值，避免过早判空。
+        """
+
+        return max(10, int(getattr(settings, "CRAWLER_CONTENT_MIN_LENGTH", MIN_CONTENT_LENGTH) or MIN_CONTENT_LENGTH))
+
     def _normalize_content_text(
         self,
         text: str,
         max_length: int = 60000,
-        min_length: int = MIN_CONTENT_LENGTH,
+        min_length: Optional[int] = None,
     ) -> Optional[str]:
+        if min_length is None:
+            min_length = self._content_min_length()
         cleaned = clean_html_tags(text)
         cleaned = re.sub(r"(\S)\s+([，。！？；：、）】》])", r"\1\2", cleaned)
         cleaned = re.sub(r"([（【《])\s+(\S)", r"\1\2", cleaned)
@@ -239,11 +256,47 @@ class CrawlerService:
             },
         )
 
-    def _make_run_config(self):
+    def _browser_page_timeout_ms(self, wait_seconds: float = 0.0) -> int:
+        """
+        输入:
+        - `wait_seconds`: 页面导航后还需要额外等待的秒数
+
+        输出:
+        - 浏览器页面导航超时时间，单位毫秒
+
+        作用:
+        - 让浏览器内部导航超时早于外层正文补抓硬超时，避免外层取消时页面仍在 goto 导致 TargetClosedError 噪音。
+        """
+
+        configured_timeout = max(10000, int(getattr(settings, "CRAWLER_PAGE_TIMEOUT_MS", 60000) or 60000))
+        fetch_timeout = float(getattr(settings, "CRAWLER_FETCH_TIMEOUT_SECONDS", 45.0) or 45.0)
+        if fetch_timeout <= 0:
+            return configured_timeout
+
+        reserved_seconds = max(2.0, wait_seconds + 2.0)
+        capped_seconds = max(5.0, fetch_timeout - reserved_seconds)
+        return min(configured_timeout, int(capped_seconds * 1000))
+
+    def _make_run_config(self, *, dynamic_wait: bool = False):
+        """
+        输入:
+        - `dynamic_wait`: 是否启用动态页慢速等待配置
+
+        输出:
+        - 当前 crawl4ai 版本支持的运行配置
+
+        作用:
+        - 快速抓取失败后，可用更长等待时间重新读取动态渲染页面，降低空壳页面误判率。
+        """
+
         from crawl4ai import CacheMode, CrawlerRunConfig
 
         log_level = getattr(logging, (settings.LOG_LEVEL or "").upper(), logging.INFO)
         is_verbose = log_level == logging.DEBUG
+        fast_wait = max(0.0, float(getattr(settings, "CRAWLER_FAST_WAIT_SECONDS", 1.5) or 0.0))
+        dynamic_wait_seconds = max(fast_wait, float(getattr(settings, "CRAWLER_DYNAMIC_WAIT_SECONDS", 6.0) or 6.0))
+        wait_seconds = dynamic_wait_seconds if dynamic_wait else fast_wait
+        page_timeout = self._browser_page_timeout_ms(wait_seconds)
         return self._build_supported_config(
             CrawlerRunConfig,
             {
@@ -257,21 +310,64 @@ class CrawlerService:
                 "exclude_external_links": True,
                 "exclude_social_media_links": True,
                 "wait_until": "domcontentloaded",
-                "page_timeout": 30000,
-                "delay_before_return_html": 0,
-                "scan_full_page": False,
+                "page_timeout": page_timeout,
+                "delay_before_return_html": wait_seconds,
+                "scan_full_page": dynamic_wait,
                 "wait_for_images": False,
                 "screenshot": False,
                 "pdf": False,
             },
         )
 
-    def _extract_crawl4ai_markdown(self, result) -> Optional[str]:
+    def _extract_crawl4ai_markdown(self, result, *, min_length: Optional[int] = None) -> Optional[str]:
         if not result or not result.markdown:
             return None
         if hasattr(result.markdown, "raw_markdown"):
-            return self._normalize_content_text(result.markdown.raw_markdown)
-        return self._normalize_content_text(str(result.markdown))
+            return self._normalize_content_text(result.markdown.raw_markdown, min_length=min_length)
+        return self._normalize_content_text(str(result.markdown), min_length=min_length)
+
+    async def _crawl_content_with_playwright(self, target_url: str) -> Optional[str]:
+        """
+        输入:
+        - `target_url`: 目标新闻页面 URL
+
+        输出:
+        - Playwright 直接渲染后提取到的正文；失败返回 None
+
+        作用:
+        - 作为 crawl4ai 失败后的兜底抓取路径，处理部分站点在 crawl4ai 中导航超时或正文为空的问题。
+        """
+
+        try:
+            from playwright.async_api import async_playwright
+
+            wait_seconds = max(
+                1.0,
+                float(getattr(settings, "CRAWLER_DYNAMIC_WAIT_SECONDS", 6.0) or 6.0),
+            )
+            timeout_ms = self._browser_page_timeout_ms(wait_seconds)
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent=DEFAULT_HEADERS["User-Agent"],
+                    locale="zh-CN",
+                    extra_http_headers={
+                        "Accept": DEFAULT_HEADERS["Accept"],
+                        "Accept-Language": DEFAULT_HEADERS["Accept-Language"],
+                    },
+                )
+                page = await context.new_page()
+                try:
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    await page.wait_for_timeout(int(wait_seconds * 1000))
+                    html = await page.content()
+                    return self._extract_article_text(html)
+                finally:
+                    await context.close()
+                    await browser.close()
+        except Exception as e:
+            logger.debug(f"   ⚠️ [Playwright兜底] 抓取失败: {target_url} ({e})")
+            return None
 
     def _build_supported_config(self, config_cls, values: Dict[str, Any]):
         """
@@ -534,6 +630,8 @@ class CrawlerService:
                 )
                 return items
 
+        except (AIConfigurationError, AIServiceUnavailableError):
+            raise
         except Exception as e:
             logger.error(f"抓取异常 {name}: {e}")
             source_health_service.record_fetch_result(
@@ -892,15 +990,26 @@ class CrawlerService:
                 return light_content
 
             try:
-                run_conf = self._make_run_config()
-
+                run_conf = self._make_run_config(dynamic_wait=False)
                 result = await crawler.arun(url=target_url, config=run_conf)
+                content = self._extract_crawl4ai_markdown(result)
+                if content:
+                    return content
 
-                return self._extract_crawl4ai_markdown(result)
+                logger.debug(f"   ⚠️ [浏览器抓取] 快速模式未获得正文，切换动态等待: {target_url}")
+                dynamic_run_conf = self._make_run_config(dynamic_wait=True)
+                dynamic_result = await crawler.arun(url=target_url, config=dynamic_run_conf)
+                content = self._extract_crawl4ai_markdown(dynamic_result)
+                if content:
+                    return content
+
+                logger.debug(f"   ⚠️ [浏览器抓取] crawl4ai 未获得正文，切换 Playwright 兜底: {target_url}")
+                return await self._crawl_content_with_playwright(target_url)
 
             except Exception as e:
                 logger.error(f"❌ 抓取失败: {e}")
-            return None
+                logger.debug(f"   ⚠️ [浏览器抓取] crawl4ai 异常，切换 Playwright 兜底: {target_url}")
+                return await self._crawl_content_with_playwright(target_url)
 
         return await concurrency_service.run_crawler(do_crawl)
 
@@ -934,16 +1043,28 @@ class CrawlerService:
                 from crawl4ai import AsyncWebCrawler
 
                 browser_conf = self._make_browser_config()
-                run_conf = self._make_run_config()
+                run_conf = self._make_run_config(dynamic_wait=False)
 
                 async with AsyncWebCrawler(config=browser_conf) as crawler:
                     result = await crawler.arun(url=target_url, config=run_conf)
+                    content = self._extract_crawl4ai_markdown(result)
+                    if content:
+                        return content
 
-                return self._extract_crawl4ai_markdown(result)
+                    logger.debug(f"   ⚠️ [浏览器抓取] 快速模式未获得正文，切换动态等待: {target_url}")
+                    dynamic_run_conf = self._make_run_config(dynamic_wait=True)
+                    dynamic_result = await crawler.arun(url=target_url, config=dynamic_run_conf)
+                    content = self._extract_crawl4ai_markdown(dynamic_result)
+                    if content:
+                        return content
+
+                    logger.debug(f"   ⚠️ [浏览器抓取] crawl4ai 未获得正文，切换 Playwright 兜底: {target_url}")
+                    return await self._crawl_content_with_playwright(target_url)
 
             except Exception as e:
                 logger.error(f"❌ 抓取失败: {e}")
-            return None
+                logger.debug(f"   ⚠️ [浏览器抓取] crawl4ai 异常，切换 Playwright 兜底: {target_url}")
+                return await self._crawl_content_with_playwright(target_url)
 
         return await concurrency_service.run_crawler(do_crawl)
 

@@ -21,7 +21,7 @@ from sqlalchemy.orm import defer
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, check_db_connection
 from app.core.logger import logger
-from app.core.exceptions import AIConfigurationError
+from app.core.exceptions import AIConfigurationError, AIServiceUnavailableError
 from app.models.news import News
 from app.services.ai_service import ai_service
 from app.services.admin_service import schedule_restart
@@ -30,12 +30,105 @@ from app.services.crawler_service import crawler_service
 from app.services.report_service import report_service
 from app.services.task_manager import task_manager
 from app.services.topic_service import topic_service
+from app.utils.retry import retry_async_result
+from app.utils.summary_material import build_summary_generation_input, get_existing_summary_material
+from app.utils.tools import clean_html_tags
 from app.utils.tools import normalize_regions_to_countries
 
 settings = get_settings()
 
 DATA_DIR = Path("data")
 STATE_FILE = DATA_DIR / "scheduler_state.json"
+
+
+def _body_fetch_concurrency(total_task: int, hard_cap: int = 2) -> int:
+    """
+    输入:
+    - `total_task`: 本轮需要处理的任务数量
+    - `hard_cap`: 正文抓取并发硬上限
+
+    输出:
+    - 本轮正文相关任务应使用的并发数量
+
+    作用:
+    - 正文抓取比纯 LLM 调用更容易受浏览器实例影响，统一按爬虫并发配置限流。
+    """
+
+    configured = int(getattr(settings, "CRAWLER_CONCURRENCY", hard_cap) or hard_cap)
+    return max(1, min(configured, total_task, hard_cap))
+
+
+def _fallback_summary_material(news: News, min_length: int = 20) -> Optional[str]:
+    """
+    输入:
+    - `news`: 当前新闻对象
+    - `min_length`: 可作为兜底素材的最小摘要长度
+
+    输出:
+    - 可用于摘要/分析的已有摘要文本；无可用素材时返回 None
+
+    作用:
+    - 正文抓取失败时，允许使用站点原始摘要作为低成本兜底，减少直接跳过。
+    """
+
+    return get_existing_summary_material(news.summary, min_length=min_length)
+
+
+def _crawler_retry_attempts() -> int:
+    """
+    输入:
+    - 无
+
+    输出:
+    - 正文补抓总尝试次数
+
+    作用:
+    - 统一限制正文补抓次数，默认首次失败后只重试一次，避免无效反复抓取。
+    """
+
+    return max(1, int(getattr(settings, "CRAWLER_RETRY_ATTEMPTS", 2) or 2))
+
+
+async def _crawl_content_with_retry(url: str, label: str, min_length: Optional[int] = None) -> Optional[str]:
+    """
+    输入:
+    - `url`: 新闻正文地址
+    - `label`: 日志标签
+    - `min_length`: 正文最小有效长度
+
+    输出:
+    - 抓取到的正文；两次失败后返回 None
+
+    作用:
+    - 为摘要和分析任务统一提供轻量正文重试，避免全局清理浏览器打断其他并发抓取。
+    """
+
+    effective_min_length = max(10, int(min_length or getattr(settings, "CRAWLER_CONTENT_MIN_LENGTH", 30) or 30))
+    retry_delay = max(1.0, float(getattr(settings, "CRAWLER_RETRY_DELAY_SECONDS", 8.0) or 8.0))
+    fetch_timeout = max(5.0, float(getattr(settings, "CRAWLER_FETCH_TIMEOUT_SECONDS", 45.0) or 45.0))
+
+    async def crawl_once() -> Optional[str]:
+        """
+        输入:
+        - 无，闭包读取新闻 URL
+
+        输出:
+        - 抓取到的正文；失败返回 None
+
+        作用:
+        - 提供单次正文抓取动作，交给通用重试工具调度。
+        """
+
+        return await crawler_service.crawl_content(url)
+
+    return await retry_async_result(
+        crawl_once,
+        attempts=_crawler_retry_attempts(),
+        delay_seconds=retry_delay,
+        per_attempt_timeout_seconds=fetch_timeout,
+        min_valid_length=effective_min_length,
+        label=label,
+    )
 
 
 async def _process_summary_news_item(news_id: int, index: int, total: int) -> bool:
@@ -63,22 +156,31 @@ async def _process_summary_news_item(news_id: int, index: int, total: int) -> bo
             return False
 
         try:
-            content = news.content
-            if not content or len(content) < 50:
+            content = clean_html_tags(news.content or "").strip()
+            original_summary = (news.summary or "").strip()
+            fallback_content = _fallback_summary_material(news)
+            if not content and not fallback_content:
                 logger.debug(f"   {progress_str} 🕸️ 补抓正文: {news.title}")
-                content = await crawler_service.crawl_content(news.url)
-                if content:
-                    news.content = content
+                crawled_content = await _crawl_content_with_retry(news.url, f"自动摘要正文补抓({news.id})")
+                if crawled_content:
+                    content = crawled_content
+                    news.content = crawled_content
                     db.add(news)
                     await db.commit()
                 else:
                     logger.warning(f"   {progress_str} ❌ 无法获取正文，跳过: {news.title}")
                     return False
+            elif fallback_content and not content:
+                logger.info(f"   {progress_str} 🧾 使用来源自带摘要作为摘要素材: {news.title}")
 
             logger.info(f"   {progress_str} 📝 生成摘要: {news.title}")
-            input_content = content
-            if news.summary:
-                input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
+            input_content = build_summary_generation_input(
+                content=content,
+                original_summary=original_summary,
+            )
+            if not input_content:
+                logger.warning(f"   {progress_str} ❌ 无可用摘要素材，跳过: {news.title}")
+                return False
 
             summary = await ai_service.generate_summary(news.title, input_content)
             if not summary:
@@ -88,10 +190,13 @@ async def _process_summary_news_item(news_id: int, index: int, total: int) -> bo
             news.is_ai_summary = True
 
             try:
-                txt_to_embed = f"{news.title} {summary} {content[:1000]}"
+                embed_material = content or fallback_content or input_content
+                txt_to_embed = f"{news.title} {summary} {embed_material[:1000]}"
                 embs = await ai_service.get_embeddings([txt_to_embed])
                 if embs and embs[0]:
                     news.embedding = embs[0]
+            except AIServiceUnavailableError:
+                raise
             except Exception as e:
                 logger.error(f"   {progress_str} ⚠️ 向量更新失败: {e}")
 
@@ -106,12 +211,17 @@ async def _process_summary_news_item(news_id: int, index: int, total: int) -> bo
                         news.region = res.get("region", "其他")
                         news.keywords = res.get("keywords", [])
                         news.entities = res.get("entities", [])
+                except AIServiceUnavailableError:
+                    raise
                 except Exception as e:
                     logger.error(f"   {progress_str} ⚠️ 同步分析失败: {e}")
 
             db.add(news)
             await db.commit()
             return True
+        except AIServiceUnavailableError:
+            await db.rollback()
+            raise
         except Exception as e:
             await db.rollback()
             logger.error(f"   {progress_str} ⚠️ 处理异常 ({news.title}): {e}")
@@ -305,7 +415,7 @@ async def auto_generate_summaries_top_n() -> None:
         logger.info("✅ 自动摘要完成，共处理 0 条")
         return
 
-    concurrency = max(1, min(int(getattr(settings, "LLM_CONCURRENCY", 5) or 5), total_task, 5))
+    concurrency = _body_fetch_concurrency(total_task)
     sem = asyncio.Semaphore(concurrency)
 
     async def run_one(news_id: int, index: int) -> bool:
@@ -331,6 +441,8 @@ async def auto_generate_summaries_top_n() -> None:
 
     count = 0
     for res in results:
+        if isinstance(res, AIServiceUnavailableError):
+            raise res
         if isinstance(res, Exception):
             logger.error(f"   ⚠️ 摘要任务异常: {res}")
             continue
@@ -373,24 +485,36 @@ async def auto_generate_summaries_categories_top_n() -> None:
             for i, news in enumerate(news_to_process, 1):
                 try:
                     logger.info(f"   [{cat}] ({i}/{len(news_to_process)}) 📝 生成摘要: {news.title}")
-                    content = news.content
-                    if not content or len(content) < 50:
-                        content = await crawler_service.crawl_content(news.url)
+                    content = clean_html_tags(news.content or "").strip()
+                    original_summary = (news.summary or "").strip()
+                    fallback_content = _fallback_summary_material(news)
+
+                    if not content and not fallback_content:
+                        content = await _crawl_content_with_retry(news.url, f"分类摘要正文补抓({news.id})")
                         if content:
                             news.content = content
-                            db.add(news) # 立即保存正文
+                            db.add(news)
                         else:
+                            logger.warning(f"   [{cat}] ({i}/{len(news_to_process)}) ❌ 无法获取正文，跳过: {news.title}")
                             continue
-                            
-                    input_content = content
-                    if news.summary:
-                         input_content = f"原始摘要：{news.summary}\n\n正文内容：{content}"
-                         
+                    elif fallback_content and not content:
+                        logger.info(f"   [{cat}] ({i}/{len(news_to_process)}) 🧾 使用来源自带摘要作为摘要素材: {news.title}")
+
+                    input_content = build_summary_generation_input(
+                        content=content,
+                        original_summary=original_summary,
+                    )
+                    if not input_content:
+                        logger.warning(f"   [{cat}] ({i}/{len(news_to_process)}) ❌ 无可用摘要素材，跳过: {news.title}")
+                        continue
+
                     summary = await ai_service.generate_summary(news.title, input_content)
                     if summary:
                         news.summary = summary
                         news.is_ai_summary = True
                         db.add(news)
+                except AIServiceUnavailableError:
+                    raise
                 except Exception as e:
                     logger.error(f"   ⚠️ 生成摘要失败 ({news.title}): {e}")
             
@@ -436,25 +560,18 @@ async def auto_analyze_sentiment_top_n() -> None:
 
         logger.debug(f"   📊 待分析新闻数: {len(items_to_process)}")
 
-        sem = asyncio.Semaphore(5)
         total_items = len(items_to_process)
+        sem = asyncio.Semaphore(_body_fetch_concurrency(total_items))
         batch_size = 50
 
         async def analyze_task(news_item, index):
             async with sem:
                 try:
-                    if not news_item.content or len(news_item.content) < 50:
-                        logger.debug(f"   ({index}/{total_items}) 🕷️ 补抓正文: {news_item.title}")
-                        try:
-                            content = await crawler_service.crawl_content(news_item.url)
-                            if content:
-                                news_item.content = content
-                        except Exception as e:
-                            logger.error(f"   ({index}/{total_items}) ⚠️ 补抓失败: {e}")
-
-                    text = news_item.summary or news_item.content or ""
+                    text = (news_item.summary or "").strip() or (news_item.title or "").strip()
                     logger.debug(f"   ({index}/{total_items}) 🧠 分析中: {news_item.title}")
                     return await ai_service.analyze_sentiment(news_item.title, text)
+                except AIServiceUnavailableError:
+                    raise
                 except Exception as e:
                     logger.error(f"   ({index}/{total_items}) ⚠️ 分析失败 ({news_item.title}): {e}")
                     return None
@@ -524,36 +641,37 @@ async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = 
     """
 
     try:
-        logger.info(f"🚀 开始新一轮全流程任务 (generate_daily={generate_daily}, run_topic_task={run_topic_task})...")
-        news_items = await crawler_service.fetch_all_sources()
-        await crawler_service.save_raw_news(news_items)
+        with ai_service.task_retry_scope("全流程任务"):
+            logger.info(f"🚀 开始新一轮全流程任务 (generate_daily={generate_daily}, run_topic_task={run_topic_task})...")
+            news_items = await crawler_service.fetch_all_sources()
+            await crawler_service.save_raw_news(news_items)
 
-        await cluster_service.execute_clustering()
+            await cluster_service.execute_clustering()
 
-        await auto_batch_analyze_new_news()
+            await auto_batch_analyze_new_news()
 
-        await auto_generate_summaries_top_n()
-        await auto_generate_summaries_categories_top_n()
+            await auto_generate_summaries_top_n()
+            await auto_generate_summaries_categories_top_n()
 
-        await auto_analyze_sentiment_top_n()
+            await auto_analyze_sentiment_top_n()
 
-        if generate_daily:
-            await report_service.generate_and_cache_global_report("daily")
+            if generate_daily:
+                await report_service.generate_and_cache_global_report("daily")
 
-        if run_topic_task:
-            try:
-                await topic_service.refresh_topics()
-            except AIConfigurationError:
-                raise
-            except Exception as e:
-                logger.error(f"❌ 专题刷新异常: {e}")
-        else:
-            logger.info("⏩ 跳过专题刷新 (未到配置的时间间隔)")
+            if run_topic_task:
+                try:
+                    await topic_service.refresh_topics()
+                except (AIConfigurationError, AIServiceUnavailableError):
+                    raise
+                except Exception as e:
+                    logger.error(f"❌ 专题刷新异常: {e}")
+            else:
+                logger.info("⏩ 跳过专题刷新 (未到配置的时间间隔)")
 
-        await cleanup_old_data()
+            await cleanup_old_data()
 
-        logger.info("✅ 本轮全流程任务结束")
-    except AIConfigurationError:
+            logger.info("✅ 本轮全流程任务结束")
+    except (AIConfigurationError, AIServiceUnavailableError):
         raise
     except Exception as e:
         logger.error(f"❌ 任务执行异常: {e}")
@@ -679,6 +797,11 @@ async def scheduled_task() -> None:
             
             continue
 
+        except AIServiceUnavailableError as e:
+            logger.error(f"🛑 AI 服务持续不可用，本轮调度任务已停止: {e}")
+            await asyncio.sleep(300)
+            continue
+
         except Exception as e:
             logger.error(f"❌ 调度循环异常: {e}")
 
@@ -699,21 +822,24 @@ async def run_manual() -> None:
 
     logger.info("🚀 手动任务开始...")
     try:
-        items = await crawler_service.fetch_all_sources()
-        await crawler_service.save_raw_news(items)
-        await cluster_service.execute_clustering()
-        await auto_generate_summaries_top_n()
-        await auto_generate_summaries_categories_top_n()
-        await auto_analyze_sentiment_top_n()
+        with ai_service.task_retry_scope("手动全流程任务"):
+            items = await crawler_service.fetch_all_sources()
+            await crawler_service.save_raw_news(items)
+            await cluster_service.execute_clustering()
+            await auto_generate_summaries_top_n()
+            await auto_generate_summaries_categories_top_n()
+            await auto_analyze_sentiment_top_n()
 
-        await report_service.generate_and_cache_global_report("daily")
-        await report_service.generate_and_cache_global_report("weekly")
-        await report_service.generate_and_cache_global_report("monthly")
+            await report_service.generate_and_cache_global_report("daily")
+            await report_service.generate_and_cache_global_report("weekly")
+            await report_service.generate_and_cache_global_report("monthly")
 
-        logger.info("✅ 手动任务结束")
+            logger.info("✅ 手动任务结束")
     finally:
         try:
             await topic_service.refresh_topics()
+        except AIServiceUnavailableError:
+            raise
         except Exception as e:
             logger.error(f"❌ 专题刷新异常: {e}")
         

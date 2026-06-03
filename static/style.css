@@ -836,6 +836,13 @@ body.page-admin .source-modal-title { font-size: 15px; font-weight: 850; color: 
 body.page-admin .source-modal-item a { display: block; color: var(--primary-color); font-size: 12px; word-break: break-all; text-decoration: none; margin-bottom: 8px; }
 body.page-admin .source-modal-field { color: var(--text-secondary); font-size: 12px; margin-bottom: 5px; }
 body.page-admin .source-modal-summary-text { color: var(--text-secondary); font-size: 13px; line-height: 1.6; white-space: pre-wrap; background: var(--bg-soft); border-radius: 8px; padding: 8px; margin-top: 8px; }
+body.page-admin .source-modal-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+body.page-admin .source-content-test { margin-top: 10px; border-radius: 10px; padding: 10px; border: 1px solid var(--border-color); background: var(--bg-soft); }
+body.page-admin .source-content-test.ok { border-color: rgba(22, 163, 74, 0.28); background: rgba(22, 163, 74, 0.06); }
+body.page-admin .source-content-test.bad { border-color: rgba(220, 38, 38, 0.22); background: rgba(220, 38, 38, 0.05); }
+body.page-admin .source-content-test-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--text-secondary); font-size: 12px; margin-bottom: 8px; }
+body.page-admin .source-content-test-head strong { color: var(--text-main); }
+body.page-admin .source-content-test-body { color: var(--text-secondary); font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
 
 body.page-index .desktop-toolbar { display: none; flex-direction: row; gap: 12px; margin-top: 24px; align-items: center; }
 body.page-index .toolbar-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }

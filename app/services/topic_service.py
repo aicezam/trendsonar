@@ -14,13 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, check_db_connection
 from app.core.logger import setup_logger
-from app.core.exceptions import AIConfigurationError
+from app.core.exceptions import AIConfigurationError, AIServiceUnavailableError
 from app.core.prompts import prompt_manager
 from app.models.news import News
 from app.models.topic import Topic, TopicTimelineItem
 from app.services.ai_service import AIService
 from app.services.crawler_service import crawler_service
 from app.services.topic_discovery_service import TopicDiscoveryService
+from app.utils.retry import retry_async_result
+from app.utils.summary_material import build_summary_generation_input, get_existing_summary_material
 from app.utils.tools import clean_html_tags
 
 settings = get_settings()
@@ -219,7 +221,8 @@ class TopicService:
         if not (settings.DATABASE_URL or "").strip():
             return
 
-        await self._refresh_topics_by_discovery()
+        with self.ai.task_retry_scope("专题生成任务"):
+            await self._refresh_topics_by_discovery()
 
     async def _refresh_topics_by_discovery(self) -> None:
         """
@@ -343,6 +346,7 @@ class TopicService:
                     t_vec = t_embs[0] if t_embs and t_embs[0] else []
 
                 logger.info(f"🔍 [候选通过] {cluster_id} -> {action}: {t_name}")
+                used_ids_before_update = set(used_ids)
                 result_topic = await self._match_and_update_topic(
                     db,
                     t_name,
@@ -357,9 +361,8 @@ class TopicService:
                 )
 
                 if result_topic:
-                    for n in confirmed_news:
-                        processed_news_ids.add(int(n.id))
-                        used_ids.add(int(n.id))
+                    actual_processed_ids = {int(nid) for nid in used_ids - used_ids_before_update}
+                    processed_news_ids.update(actual_processed_ids)
                     if existing_topic_obj:
                         updated_topics_count += 1
                     else:
@@ -381,10 +384,14 @@ class TopicService:
         后台任务：为指定专题执行扫描
         """
         try:
-            async with AsyncSessionLocal() as db:
-                topic = await db.get(Topic, topic_id)
-                if topic:
-                    await self._trigger_topic_scan(db, topic, include_used=include_used)
+            with self.ai.task_retry_scope("专题扫描任务"):
+                async with AsyncSessionLocal() as db:
+                    topic = await db.get(Topic, topic_id)
+                    if topic:
+                        await self._trigger_topic_scan(db, topic, include_used=include_used)
+        except AIServiceUnavailableError:
+            logger.error("后台扫描任务因 AI 服务持续不可用而停止", exc_info=True)
+            raise
         except Exception as e:
             logger.error(f"后台扫描任务失败: {e}", exc_info=True)
 
@@ -807,6 +814,14 @@ class TopicService:
         # 旧专题：不限制最小数量，只要有新的就合并
         if is_duplicate and not confirmed_news:
             return None
+
+        confirmed_news = await self._ensure_confirmed_news_content(db, confirmed_news)
+        if is_duplicate and not confirmed_news:
+            logger.info("   ⏩ [旧专题] 相关新闻正文均无法获取，跳过本次更新")
+            return None
+        if not is_duplicate and len(confirmed_news) < settings.TOPIC_MIN_NEWS_COUNT:
+            logger.info(f"   ⚠️ [新专题] 正文补抓后数量不足 ({len(confirmed_news)} < {settings.TOPIC_MIN_NEWS_COUNT})，跳过")
+            return None
         
         # 3. 创建或更新专题
         current_topic_id = None
@@ -848,28 +863,7 @@ class TopicService:
             current_topic_id = new_topic.id
             topic_obj_to_return = new_topic
         
-        # 4. 补全新闻详情与生成时间轴
-        # 4.1 先检查并补全新闻详情
-        async with crawler_service.make_crawler() as crawler:
-            for n in confirmed_news:
-                if not n.content or len(n.content) < 100:
-                    logger.info(f"   📥 正在补全新闻详情: {n.title[:20]}...")
-                    try:
-                        crawled = await crawler_service.crawl_content_with_instance(n.url, crawler)
-                        if crawled and len(crawled) > 50:
-                            n.content = crawled
-                            # 仅在缺少摘要时补摘要，避免重复消耗主模型 token。
-                            if not (n.summary or "").strip():
-                                fresh_summary = await self.ai.generate_summary(n.title, n.content, max_words=200)
-                                if fresh_summary:
-                                    n.summary = fresh_summary
-                            db.add(n)
-                    except Exception as e:
-                        logger.warning(f"   ⚠️ 补全详情失败: {e}")
-        
-        await db.flush()
-
-        # 4.2 生成标准化的时间轴内容 (按天聚合 + AI 合成)
+        # 4. 生成标准化的时间轴内容 (按天聚合 + AI 合成)
         # 将 confirmed_news 按日期分组
         news_by_date = defaultdict(list)
         for n in confirmed_news:
@@ -1022,6 +1016,8 @@ class TopicService:
                 # 标记 used_ids
                 for nid in source_ids:
                     used_ids.add(nid)
+                if primary_news and primary_news.get("id"):
+                    used_ids.add(int(primary_news["id"]))
 
         await db.flush() # 确保 item 入库
 
@@ -1115,6 +1111,9 @@ class TopicService:
                 logger.error(f"🛑 配置错误: {e} 请检查 config.yaml 是否配置正确")
                 logger.warning("⚠️ 专题追踪任务进入维护模式，每 5 分钟尝试重启服务检查一次...")
                 await asyncio.sleep(300)
+            except AIServiceUnavailableError as e:
+                logger.error(f"🛑 AI 服务持续不可用，本轮专题追踪任务已停止: {e}")
+                await asyncio.sleep(300)
             except Exception as e:
                 logger.error(f"专题追踪定时任务错误: {e}")
                 await asyncio.sleep(300)
@@ -1180,28 +1179,146 @@ class TopicService:
             await db.flush()
         return out
 
+    async def _ensure_confirmed_news_content(self, db: AsyncSession, news_list: List[News]) -> List[News]:
+        """
+        输入:
+        - `db`: 数据库会话
+        - `news_list`: 已确认归入专题的新闻列表
+
+        输出:
+        - 正文可用的新闻列表
+
+        作用:
+        - 在创建或更新专题前补全正文；无法获取正文时优先使用已有摘要兜底，减少专题素材流失。
+        """
+
+        ready_news: List[News] = []
+        use_standalone_crawler = False
+        min_content_length = max(10, int(getattr(settings, "CRAWLER_CONTENT_MIN_LENGTH", 30) or 30))
+        retry_attempts = max(1, int(getattr(settings, "CRAWLER_RETRY_ATTEMPTS", 2) or 2))
+        retry_delay = max(1.0, float(getattr(settings, "CRAWLER_RETRY_DELAY_SECONDS", 8.0) or 8.0))
+        fetch_timeout = max(5.0, float(getattr(settings, "CRAWLER_FETCH_TIMEOUT_SECONDS", 45.0) or 45.0))
+        async with crawler_service.make_crawler() as crawler:
+            for news in news_list:
+                cleaned_content = clean_html_tags(news.content or "").strip()
+                existing_summary = get_existing_summary_material(news.summary)
+
+                if cleaned_content and len(cleaned_content) >= 100:
+                    news.content = cleaned_content
+                    ready_news.append(news)
+                    continue
+                if existing_summary:
+                    logger.info(f"   🧾 使用来源自带摘要作为专题素材: {news.title}")
+                    ready_news.append(news)
+                    continue
+
+                logger.info(f"   📥 正在补全新闻详情: {(news.title or '')[:20]}...")
+                retry_with_new_crawler = False
+
+                async def crawl_once() -> Optional[str]:
+                    """
+                    输入:
+                    - 无，闭包读取新闻 URL 与复用爬虫实例
+
+                    输出:
+                    - 抓取到的正文；失败返回 None
+
+                    作用:
+                    - 为重试工具提供单次正文抓取动作。
+                    """
+
+                    if use_standalone_crawler or retry_with_new_crawler:
+                        return await crawler_service.crawl_content(news.url)
+                    return await crawler_service.crawl_content_with_instance(news.url, crawler)
+
+                async def switch_crawler_before_retry(next_attempt: int) -> None:
+                    """
+                    输入:
+                    - `next_attempt`: 下一次尝试序号
+
+                    输出:
+                    - 无
+
+                    作用:
+                    - 失败后切换为新爬虫实例重试，避免全局清理浏览器打断其他并发抓取。
+                    """
+
+                    nonlocal retry_with_new_crawler, use_standalone_crawler
+                    retry_with_new_crawler = True
+                    use_standalone_crawler = True
+
+                crawled = await retry_async_result(
+                    crawl_once,
+                    attempts=retry_attempts,
+                    delay_seconds=retry_delay,
+                    per_attempt_timeout_seconds=fetch_timeout,
+                    min_valid_length=min_content_length,
+                    label=f"正文补抓({news.id})",
+                    before_retry=switch_crawler_before_retry,
+                )
+                if not crawled:
+                    fallback_summary = get_existing_summary_material(news.summary)
+                    if fallback_summary:
+                        logger.warning(f"   ⚠️ 无法获取正文，改用已有摘要作为专题素材: {news.title}")
+                        ready_news.append(news)
+                    else:
+                        logger.warning(f"   ⚠️ 无法获取正文，跳过新闻: {news.title}")
+                    continue
+
+                news.content = crawled
+                if not (news.summary or "").strip():
+                    fresh_summary = await self.ai.generate_summary(news.title, news.content, max_words=200)
+                    if fresh_summary:
+                        news.summary = fresh_summary
+                db.add(news)
+                ready_news.append(news)
+
+        await db.flush()
+        return ready_news
+
     async def _ensure_news_summary(self, db: AsyncSession, news: News) -> None:
-        if (news.summary or "").strip():
-            return
+        existing_summary = get_existing_summary_material(news.summary)
+
+        cleaned_content = clean_html_tags(news.content or "").strip()
 
         # 如果缺失，尝试抓取内容
-        if not news.content or len(news.content) < 50:
-             try:
-                content = await crawler_service.crawl_content(news.url)
-                if content:
-                    # 抓取后立即清洗
-                    cleaned = clean_html_tags(content)
-                    if len(cleaned) > 50:
-                        news.content = cleaned
-             except Exception:
-                 pass
-        
-        content = news.content or ""
-        if len(content) < 50:
-            return # 内容太短，无法总结
-            
+        if (not cleaned_content or len(cleaned_content) < 50) and not existing_summary:
+            async def crawl_once() -> Optional[str]:
+                """
+                输入:
+                - 无，闭包读取新闻 URL
+
+                输出:
+                - 抓取到的正文；失败返回 None
+
+                作用:
+                - 为摘要补全正文提供一次抓取动作。
+                """
+
+                return await crawler_service.crawl_content(news.url)
+
+            content = await retry_async_result(
+                crawl_once,
+                attempts=max(1, int(getattr(settings, "CRAWLER_RETRY_ATTEMPTS", 2) or 2)),
+                delay_seconds=max(1.0, float(getattr(settings, "CRAWLER_RETRY_DELAY_SECONDS", 8.0) or 8.0)),
+                per_attempt_timeout_seconds=max(5.0, float(getattr(settings, "CRAWLER_FETCH_TIMEOUT_SECONDS", 45.0) or 45.0)),
+                min_valid_length=max(10, int(getattr(settings, "CRAWLER_CONTENT_MIN_LENGTH", 30) or 30)),
+                label=f"摘要正文补抓({news.id})",
+            )
+            if content:
+                cleaned_content = clean_html_tags(content)
+                if len(cleaned_content) > 50:
+                    news.content = cleaned_content
+
+        input_content = build_summary_generation_input(
+            content=cleaned_content,
+            original_summary=news.summary,
+        )
+        if not input_content:
+            return
+
         try:
-            summary = await self.ai.generate_summary(news.title, content, max_words=200)
+            summary = await self.ai.generate_summary(news.title, input_content, max_words=200)
             if summary:
                 news.summary = summary
                 db.add(news)

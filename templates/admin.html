@@ -270,6 +270,7 @@
     let currentConfigText = "";
     let sources = [];
     let sourcePreviewResults = {};
+    let sourceContentTestResults = {};
     let logsTimer = null;
     let activeTab = "config";
     
@@ -452,6 +453,13 @@
             desc: "正文抓取并发与微博 Cookie 等抓取配置。",
             fields: [
                 { key: "CRAWLER_CONCURRENCY", label: "爬虫并发", type: "number" },
+                { key: "CRAWLER_CONTENT_MIN_LENGTH", label: "正文有效长度", type: "number" },
+                { key: "CRAWLER_FAST_WAIT_SECONDS", label: "快速等待秒数", type: "number", step: "0.5" },
+                { key: "CRAWLER_DYNAMIC_WAIT_SECONDS", label: "动态等待秒数", type: "number", step: "0.5" },
+                { key: "CRAWLER_FETCH_TIMEOUT_SECONDS", label: "单次抓取超时秒", type: "number", step: "1" },
+                { key: "CRAWLER_PAGE_TIMEOUT_MS", label: "页面超时毫秒", type: "number" },
+                { key: "CRAWLER_RETRY_ATTEMPTS", label: "补抓尝试次数", type: "number" },
+                { key: "CRAWLER_RETRY_DELAY_SECONDS", label: "重试等待秒数", type: "number", step: "0.5" },
                 { key: "WEIBO_COOKIE", label: "微博 Cookie", type: "textarea", wide: true },
             ]
         },
@@ -472,6 +480,13 @@
         TOPIC_CREATE_MAX_PER_RUN: 5,
         TOPIC_MIN_SOURCE_COUNT: 2,
         TOPIC_EXISTING_MERGE_HINT_THRESHOLD: 0.68,
+        CRAWLER_CONTENT_MIN_LENGTH: 30,
+        CRAWLER_FAST_WAIT_SECONDS: 1.5,
+        CRAWLER_DYNAMIC_WAIT_SECONDS: 6,
+        CRAWLER_FETCH_TIMEOUT_SECONDS: 45,
+        CRAWLER_PAGE_TIMEOUT_MS: 60000,
+        CRAWLER_RETRY_ATTEMPTS: 2,
+        CRAWLER_RETRY_DELAY_SECONDS: 8,
         "AI_ROUTE.SUMMARY": "main",
         "AI_ROUTE.SENTIMENT": "backup",
         "AI_ROUTE.KEYWORDS": "backup",
@@ -507,6 +522,13 @@
         AUTO_ANALYSIS_TOP_N: "每轮自动深度分析的新闻数量上限。示例：500，数据量大时可调低。",
         ANALYSIS_BATCH_SIZE: "批量分析每批处理数量。过大可能超出模型上下文，建议 10-50。",
         CRAWLER_CONCURRENCY: "正文抓取和新闻源请求的全局并发上限。正文抓取会启动/复用浏览器，内存敏感时建议 1-2。",
+        CRAWLER_CONTENT_MIN_LENGTH: "正文抓取结果低于该长度会被视为无效。动态页短文本较多时可设 20-30，过高会误跳过。",
+        CRAWLER_FAST_WAIT_SECONDS: "浏览器快速抓取返回前等待秒数。设为 1-2 秒可避免页面刚加载就返回空壳。",
+        CRAWLER_DYNAMIC_WAIT_SECONDS: "快速抓取无正文时的慢速动态等待秒数。知乎、头条等动态页建议 5-8 秒。",
+        CRAWLER_FETCH_TIMEOUT_SECONDS: "单次完整正文抓取的硬超时，包含轻量抓取、crawl4ai 和 Playwright 兜底。建议 30-60 秒，避免坏链接卡住整批任务。",
+        CRAWLER_PAGE_TIMEOUT_MS: "浏览器页面加载超时时间，单位毫秒。动态站点建议 60000 或更高。",
+        CRAWLER_RETRY_ATTEMPTS: "正文补抓总尝试次数。2 表示首次失败后只重试 1 次；抓不到的站点通常不建议更高。",
+        CRAWLER_RETRY_DELAY_SECONDS: "外层正文补抓失败后再次尝试前等待秒数。页面/driver 启动慢时建议 8-15 秒。",
         EMBEDDING_CONCURRENCY: "Embedding 请求全局并发上限。示例：5，避免向量服务限流。",
         LLM_CONCURRENCY: "所有 LLM 调用共享的总并发上限。示例：5，用于控制外部 API 压力。",
         DATA_CLEANUP_ENABLED: "是否在全流程任务结束后自动删除低热度历史新闻。默认关闭，关闭时不会删除任何新闻。",
@@ -938,6 +960,54 @@
         if (modal) modal.style.display = "none";
     }
 
+    async function testSourceContent(index, itemIndex) {
+        const source = sources[index] || {};
+        const previewData = sourcePreviewResults[index] || {};
+        const preview = Array.isArray(previewData.preview) ? previewData.preview : [];
+        const item = preview[itemIndex] || {};
+        const url = String(item.url || "").trim();
+        if (!url) {
+            alert("该条新闻没有可测试的链接");
+            return;
+        }
+
+        const resultKey = `${index}-${itemIndex}`;
+        sourceContentTestResults[resultKey] = {
+            loading: true,
+            ok: false,
+            length: 0,
+            preview: "",
+            message: "正在测试正文抓取...",
+        };
+        openSourcePreviewModal(index);
+
+        try {
+            const resp = await fetch("/api/admin/news_sources/test_content", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url })
+            });
+            const data = await resp.json().catch(() => ({}));
+            sourceContentTestResults[resultKey] = {
+                loading: false,
+                ok: !!data.ok,
+                length: Number(data.length || 0),
+                preview: String(data.preview || ""),
+                message: String(data.message || (data.ok ? "正文抓取成功" : "正文抓取失败")),
+            };
+        } catch (err) {
+            sourceContentTestResults[resultKey] = {
+                loading: false,
+                ok: false,
+                length: 0,
+                preview: "",
+                message: err && err.message ? String(err.message) : "正文抓取失败",
+            };
+        }
+
+        openSourcePreviewModal(index);
+    }
+
     function openSourcePreviewModal(index) {
         const source = sources[index] || {};
         const data = sourcePreviewResults[index] || { preview: [], message: "暂无测试结果", count: 0, ok: false };
@@ -967,6 +1037,23 @@
                     <div class="source-modal-field"><strong>来源：</strong>${escapeHtml(item.source || source.name || "")}</div>
                     <div class="source-modal-field"><strong>发布时间：</strong>${escapeHtml(item.publish_date || item.time || "")}</div>
                     <div class="source-modal-summary-text">${escapeHtml(item.summary || "无摘要")}</div>
+                    <div class="source-modal-actions">
+                        <button class="admin-btn" onclick="testSourceContent(${index}, ${idx})">测试正文抓取</button>
+                    </div>
+                    ${(() => {
+                        const contentTest = sourceContentTestResults[`${index}-${idx}`];
+                        if (!contentTest) return "";
+                        return `
+                            <div class="source-content-test ${contentTest.ok ? "ok" : "bad"}">
+                                <div class="source-content-test-head">
+                                    <strong>${contentTest.ok ? "正文抓取成功" : "正文抓取失败"}</strong>
+                                    <span>${escapeHtml(contentTest.message || "")}</span>
+                                    <span>${contentTest.length || 0} 字</span>
+                                </div>
+                                <div class="source-content-test-body">${escapeHtml(contentTest.preview || (contentTest.loading ? "正在测试正文抓取..." : "无正文预览"))}</div>
+                            </div>
+                        `;
+                    })()}
                 </div>
             `).join("");
         }
