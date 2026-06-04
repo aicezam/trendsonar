@@ -93,7 +93,7 @@ AI_ROUTE:
   TOPIC_TIMELINE: "backup" # 时间轴事件生成 (高信息密度描述)
   TOPIC_OVERVIEW: "backup" # 专题综述生成 (深度分析)
   TOPIC_INITIAL_SUMMARY: "main" # 专题初始摘要 (基于事实的快速摘要，用于审核)
-  # --- 报表生成 ---
+  # --- 报告生成 ---
   REPORT: "backup"         # 日报/周报生成
   # --- 交互对话 ---
   CHAT: "main"           # 实时问答/助手对话
@@ -113,7 +113,7 @@ AUTO_ANALYSIS_TOP_N: 200
 ANALYSIS_BATCH_SIZE: 20
 
 # ================= 数据清理配置 =================
-# 是否自动删除低热度历史新闻。默认关闭，避免影响历史检索和报表分析
+# 是否自动删除低热度历史新闻。默认关闭，避免影响历史检索和报告分析
 DATA_CLEANUP_ENABLED: false
 # 启用清理后，删除热度低于该数值的新闻
 DATA_CLEANUP_MIN_HEAT: 1.0

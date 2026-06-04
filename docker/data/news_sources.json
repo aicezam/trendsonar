@@ -98,5 +98,15 @@
         "name": "腾讯新闻",
         "weight": 1,
         "address": "https://orz.ai/api/v1/dailynews/?platform=tenxunwang"
+    },
+    {
+        "name": "雪球热榜",
+        "weight": 1,
+        "address": "https://orz.ai/api/v1/dailynews/multi?platforms=xueqiu"
+    },
+    {
+        "name": "抖音热榜",
+        "weight": 1,
+        "address": "https://orz.ai/api/v1/dailynews/multi?platforms=douyin"
     }
 ]

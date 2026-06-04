@@ -1,5 +1,5 @@
 """
-本文件用于编排抓取、聚类、摘要与报表生成等全流程任务，并提供定时调度入口。
+本文件用于编排抓取、聚类、摘要与报告生成等全流程任务，并提供定时调度入口。
 主要函数:
 - `scheduled_task`: 定时调度循环
 - `run_manual`: 手动触发全流程
@@ -630,7 +630,7 @@ async def cleanup_old_data() -> None:
 async def run_pipeline_task(generate_daily: bool = True, run_topic_task: bool = True) -> None:
     """
     输入:
-    - `generate_daily`: 是否在流程中生成每日大盘报表
+    - `generate_daily`: 是否在流程中生成每日大盘报告
     - `run_topic_task`: 是否在流程中运行专题追踪任务
 
     输出:
@@ -757,7 +757,7 @@ async def scheduled_task() -> None:
 
             if now.hour == 23 and now.minute == 58:
                 if last_daily_final != now.date():
-                    logger.info("⏰ [Schedule] 触发每日最终报表 (23:58)...")
+                    logger.info("⏰ [Schedule] 触发每日最终报告 (23:58)...")
                     await report_service.generate_and_cache_global_report("daily")
                     last_daily_final = now.date()
                     _save_scheduler_state(last_periodic_run, last_topic_run, last_daily_final, last_weekly_final, last_monthly_final)
@@ -765,7 +765,7 @@ async def scheduled_task() -> None:
 
             if now.weekday() == 6 and now.hour == 23 and now.minute == 55:
                 if last_weekly_final != now.date():
-                    logger.info("⏰ [Schedule] 触发每周最终报表 (周日 23:55)...")
+                    logger.info("⏰ [Schedule] 触发每周最终报告 (周日 23:55)...")
                     await report_service.generate_and_cache_global_report("weekly")
                     last_weekly_final = now.date()
                     _save_scheduler_state(last_periodic_run, last_topic_run, last_daily_final, last_weekly_final, last_monthly_final)
@@ -774,7 +774,7 @@ async def scheduled_task() -> None:
             tomorrow = now + timedelta(days=1)
             if tomorrow.day == 1 and now.hour == 23 and now.minute == 50:
                 if last_monthly_final != now.date():
-                    logger.info("⏰ [Schedule] 触发每月最终报表 (月末 23:50)...")
+                    logger.info("⏰ [Schedule] 触发每月最终报告 (月末 23:50)...")
                     await report_service.generate_and_cache_global_report("monthly")
                     last_monthly_final = now.date()
                     _save_scheduler_state(last_periodic_run, last_topic_run, last_daily_final, last_weekly_final, last_monthly_final)
@@ -925,7 +925,7 @@ async def background_analyze_all() -> None:
     - 无
 
     作用:
-    - 以批处理方式补全历史新闻的情感与关键词，并在结束后刷新报表缓存
+    - 以批处理方式补全历史新闻的情感与关键词，并在结束后刷新报告缓存
     """
 
     logger.info("🚀 开始全量情感分析任务（处理所有未分析的历史数据）...")

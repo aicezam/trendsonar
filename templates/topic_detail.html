@@ -1,3 +1,4 @@
+{# 本文件渲染专题详情页，包括时间线、来源分组、趋势图表和相关新闻列表。 #}
 {% extends "base.html" %}
 {% block title %}专题详情 - {{ settings.APP_NAME }}{% endblock %}
 {% block body_class %}page-topic-detail{% endblock %}
@@ -165,6 +166,10 @@
     let currentTimeline = [];
     let timelineExpanded = false;
     const TIMELINE_PREVIEW_LIMIT = 10;
+    const TS_CHART_COLORS = ["#10b981", "#2563eb", "#f59e0b", "#ef4444", "#14b8a6", "#64748b"];
+    const TS_HEAT_COLOR = "#ef4444";
+    const TS_AXIS_COLOR = "rgba(71, 85, 105, 0.72)";
+    const TS_GRID_COLOR = "rgba(148, 163, 184, 0.24)";
 
     function fmtTime(iso) {
         if (!iso) return "-";
@@ -369,9 +374,8 @@
         const analysisCard = document.getElementById("analysisCard");
         const sortBtn = document.getElementById("sortBtn");
 
-        // 如果是首次加载（loading可见），才显示loading；后续刷新不显示全屏loading
         if (loading.style.display !== "none") {
-             // keep loading visible
+             // 首次加载时保留加载状态。
         }
 
         try {
@@ -417,7 +421,7 @@
             const news = data.news || [];
             
             if (news.length) {
-                // Group by source
+                // 按来源聚合相关新闻，便于判断来源覆盖。
                 const groups = {};
                 news.forEach(n => {
                     const s = n.source || "未知来源";
@@ -425,14 +429,14 @@
                     groups[s].push(n);
                 });
                 
-                // Sort by count desc
+                // 按报道数量降序排列来源。
                 const sortedSources = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
                 
                 for (const src of sortedSources) {
                     const items = groups[src];
                     const groupCard = el("div", { class: "news-card source-group" });
                     
-                    // Header (Click to toggle)
+                    // 来源组头部可点击展开。
                     const header = el("div", { class: "source-header", onclick: "toggleSourceGroup(this)" });
                     header.innerHTML = `
                         <div class="source-title-row">
@@ -443,12 +447,12 @@
                     `;
                     groupCard.appendChild(header);
                     
-                    // List (Hidden by default)
+                    // 来源列表默认收起。
                     const list = el("div", { class: "source-list hidden" });
                     items.forEach(n => {
                         const itemRow = el("div", { class: "source-item-row" });
                         
-                        // Title Link
+                        // 新闻标题链接。
                         const a = el("a", { 
                             class: "source-link", 
                             href: n.url || "#", 
@@ -456,7 +460,7 @@
                             text: n.title || "(无标题)" 
                         });
                         
-                        // Time
+                        // 发布时间。
                         const timeSpan = el("span", { class: "source-time", text: fmtTime(n.time) });
                         
                         itemRow.appendChild(a);
@@ -493,7 +497,7 @@
     function renderWordCloud(words) {
         const container = document.getElementById("topicWordCloud");
         container.innerHTML = "";
-        const colors = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"];
+        const colors = TS_CHART_COLORS;
         if (!words || words.length === 0) {
             container.innerHTML = '<div class="analysis-empty">暂无数据</div>';
             return;
@@ -509,7 +513,7 @@
         const maxSize = isMobile ? 1.6 : 2.2;
         const maxWords = isMobile ? 80 : 140;
         const displayWords = words.sort((a, b) => b.value - a.value).slice(0, maxWords);
-        displayWords.forEach(w => {
+        displayWords.forEach((w, index) => {
             const span = document.createElement("span");
             span.className = "cloud-tag";
             span.textContent = w.name;
@@ -518,7 +522,7 @@
                 size = minSize + ((w.value - minVal) / (maxVal - minVal)) * (maxSize - minSize);
             }
             span.style.fontSize = size + "rem";
-            span.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+            span.style.backgroundColor = colors[index % colors.length];
             container.appendChild(span);
         });
     }
@@ -529,6 +533,7 @@
         chartSource = echarts.init(container);
         const isMobile = isMobileScreen();
         chartSource.setOption({
+            color: TS_CHART_COLORS,
             tooltip: { trigger: "item" },
             legend: {
                 type: "scroll",
@@ -543,7 +548,7 @@
                 radius: isMobile ? ["35%", "60%"] : ["40%", "70%"],
                 center: isMobile ? ["50%", "45%"] : ["60%", "50%"],
                 data: sourceData || [],
-                itemStyle: { borderRadius: 5, borderColor: "#fff", borderWidth: 2 },
+                itemStyle: { borderRadius: 6, borderColor: "#fff", borderWidth: 2 },
                 label: { show: !isMobile }
             }]
         });
@@ -555,6 +560,7 @@
         chartSentiment = echarts.init(container);
         const isMobile = isMobileScreen();
         chartSentiment.setOption({
+            color: ["#10b981", "#f59e0b", "#ef4444"],
             tooltip: { trigger: "item" },
             legend: { bottom: "0%" },
             series: [{
@@ -581,6 +587,7 @@
             return;
         }
         chartCorrelation.setOption({
+            color: TS_CHART_COLORS,
             tooltip: {},
             series: [{
                 type: "graph",
@@ -606,9 +613,10 @@
             return;
         }
         chartFreqTrend.setOption({
+            color: TS_CHART_COLORS,
             tooltip: { trigger: "axis" },
             legend: { top: 0 },
-            grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
+            grid: { left: "3%", right: "4%", bottom: "8%", containLabel: true },
             xAxis: { type: "category", data: data.dates || [], axisLabel: { rotate: isMobile ? 45 : 0 } },
             yAxis: { type: "value" },
             series: data.series || []
@@ -626,6 +634,7 @@
             return;
         }
         chartSentimentTrend.setOption({
+            color: TS_CHART_COLORS,
             tooltip: { trigger: "axis" },
             legend: { top: 0 },
             grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
@@ -682,17 +691,18 @@
         chartTrendHeat = ensureTrendChart(chartTrendHeat, "topicTrendHeat");
         const dates = data.dates || [];
         chartTrendHeat.setOption({
+            color: [TS_HEAT_COLOR, "#2563eb"],
             tooltip: { trigger: "axis" },
             legend: { top: 0 },
             grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
-            xAxis: { type: "category", data: dates, axisLabel: { rotate: isMobileScreen() ? 45 : 0 } },
+            xAxis: { type: "category", data: dates, axisLabel: { color: TS_AXIS_COLOR, rotate: isMobileScreen() ? 45 : 0 }, axisLine: { lineStyle: { color: TS_GRID_COLOR } } },
             yAxis: [
-                { type: "value", name: "热度" },
-                { type: "value", name: "数量" }
+                { type: "value", name: "热度", axisLabel: { color: TS_AXIS_COLOR }, splitLine: { lineStyle: { type: "dashed", color: TS_GRID_COLOR } } },
+                { type: "value", name: "数量", axisLabel: { color: TS_AXIS_COLOR }, splitLine: { show: false } }
             ],
             series: [
-                { name: "热度", type: "line", smooth: true, areaStyle: {}, data: data.series?.heat || [] },
-                { name: "报道量", type: "bar", yAxisIndex: 1, data: data.series?.news_count || [] }
+                { name: "热度", type: "line", smooth: true, areaStyle: { opacity: 0.08 }, lineStyle: { width: 3 }, data: data.series?.heat || [] },
+                { name: "报道量", type: "bar", yAxisIndex: 1, itemStyle: { borderRadius: [5, 5, 0, 0] }, data: data.series?.news_count || [] }
             ]
         });
     }
@@ -700,13 +710,14 @@
     function renderTrendSentimentChart(data) {
         chartTrendSentiment = ensureTrendChart(chartTrendSentiment, "topicTrendSentiment");
         chartTrendSentiment.setOption({
+            color: ["#10b981", "#f59e0b", "#ef4444", "#2563eb"],
             tooltip: { trigger: "axis" },
             legend: { top: 0 },
             grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
-            xAxis: { type: "category", data: data.dates || [], axisLabel: { rotate: isMobileScreen() ? 45 : 0 } },
+            xAxis: { type: "category", data: data.dates || [], axisLabel: { color: TS_AXIS_COLOR, rotate: isMobileScreen() ? 45 : 0 }, axisLine: { lineStyle: { color: TS_GRID_COLOR } } },
             yAxis: [
-                { type: "value", name: "数量" },
-                { type: "value", name: "分值", min: 0, max: 100 }
+                { type: "value", name: "数量", axisLabel: { color: TS_AXIS_COLOR }, splitLine: { lineStyle: { type: "dashed", color: TS_GRID_COLOR } } },
+                { type: "value", name: "分值", min: 0, max: 100, axisLabel: { color: TS_AXIS_COLOR }, splitLine: { show: false } }
             ],
             series: [
                 { name: "正面", type: "bar", stack: "sentiment", data: data.series?.positive || [] },
@@ -726,11 +737,12 @@
             return chart;
         }
         chart.setOption({
+            color: TS_CHART_COLORS,
             tooltip: { trigger: "axis" },
             legend: { type: "scroll", top: 0 },
             grid: { left: "3%", right: "4%", bottom: "3%", containLabel: true },
-            xAxis: { type: "category", data: data.dates || [], axisLabel: { rotate: isMobileScreen() ? 45 : 0 } },
-            yAxis: { type: "value" },
+            xAxis: { type: "category", data: data.dates || [], axisLabel: { color: TS_AXIS_COLOR, rotate: isMobileScreen() ? 45 : 0 }, axisLine: { lineStyle: { color: TS_GRID_COLOR } } },
+            yAxis: { type: "value", axisLabel: { color: TS_AXIS_COLOR }, splitLine: { lineStyle: { type: "dashed", color: TS_GRID_COLOR } } },
             series
         });
         return chart;

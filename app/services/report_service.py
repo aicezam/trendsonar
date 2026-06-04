@@ -1,7 +1,7 @@
 """
-本文件用于生成舆情报表（全局/关键词），并提供报表缓存、历史记录与图表数据聚合能力。
+本文件用于生成舆情报告（全局/关键词），并提供报告缓存、历史记录与图表数据聚合能力。
 主要类/对象:
-- `ReportService`: 报表生成与缓存服务
+- `ReportService`: 报告生成与缓存服务
 - `report_service`: 全局服务单例
 """
 
@@ -36,10 +36,10 @@ class ReportService:
     - 数据库中的新闻数据与分析条件（时间/分类/地区/来源等）
 
     输出:
-    - 报表结构化数据与历史缓存记录
+    - 报告结构化数据与历史缓存记录
 
     作用:
-    - 生成舆情分析报表（全局/关键词），并写入数据库缓存供前端展示
+    - 生成舆情分析报告（全局/关键词），并写入数据库缓存供前端展示
     """
 
     def __init__(self) -> None:
@@ -488,14 +488,14 @@ class ReportService:
         - 无
 
         作用:
-        - 生成指定周期的全局报表并写入缓存
+        - 生成指定周期的全局报告并写入缓存
         """
         
         if not await check_db_connection(verbose=False):
-            logger.warning("⚠️ 数据库连接不可用，跳过生成全局报表缓存")
+            logger.warning("⚠️ 数据库连接不可用，跳过生成全局报告缓存")
             return
 
-        logger.info(f"📊 开始生成全局大盘报表缓存 ({period})...")
+        logger.info(f"📊 开始生成全局大盘报告缓存 ({period})...")
         try:
             today = datetime.now()
             end_date_str = today.strftime("%Y-%m-%d")
@@ -522,22 +522,22 @@ class ReportService:
                 )
 
             await self.save_report_cache("global", period, data)
-            logger.info(f"✅ 全局报表缓存 ({period}) 已更新")
+            logger.info(f"✅ 全局报告缓存 ({period}) 已更新")
         except Exception as e:
-            logger.error(f"❌ 生成报表缓存失败: {e}")
+            logger.error(f"❌ 生成报告缓存失败: {e}")
 
     async def save_report_cache(self, r_type: str, keyword: str, data: Dict[str, Any]) -> Optional[int]:
         """
         输入:
-        - `r_type`: 报表类型（global/keyword）
+        - `r_type`: 报告类型（global/keyword）
         - `keyword`: 关键词或周期标识（global 时用 daily/weekly/monthly）
-        - `data`: 报表结构化数据
+        - `data`: 报告结构化数据
 
         输出:
         - 无
 
         作用:
-        - 写入报表缓存，并对数量与同日重复缓存进行控制
+        - 写入报告缓存，并对数量与同日重复缓存进行控制
         """
         if not await check_db_connection(verbose=False):
             return None
@@ -579,10 +579,10 @@ class ReportService:
         - `limit`: 返回数量上限
 
         输出:
-        - 最近关键词报表列表（按关键词去重）
+        - 最近关键词报告列表（按关键词去重）
 
         作用:
-        - 为前端展示最近生成的关键词报表入口
+        - 为前端展示最近生成的关键词报告入口
         """
         if not await check_db_connection(verbose=False):
             return []
@@ -630,10 +630,10 @@ class ReportService:
         - `keyword`: 关键词
 
         输出:
-        - 该关键词下的历史报表记录列表
+        - 该关键词下的历史报告记录列表
 
         作用:
-        - 支持关键词报表历史回溯
+        - 支持关键词报告历史回溯
         """
         if not await check_db_connection(verbose=False):
             return []
@@ -664,10 +664,10 @@ class ReportService:
         - 无
 
         输出:
-        - 全局报表历史记录列表
+        - 全局报告历史记录列表
 
         作用:
-        - 支持全局报表历史回溯
+        - 支持全局报告历史回溯
         """
         if not await check_db_connection(verbose=False):
             return []
@@ -728,8 +728,8 @@ class ReportService:
             result = await db.execute(select(ReportCache).where(ReportCache.id == report_id))
             cached = result.scalar_one_or_none()
             if not cached:
-                logger.warning(f"⚠️ 报表未找到: report_id={report_id}")
-                yield "报表未找到"
+                logger.warning(f"⚠️ 报告未找到: report_id={report_id}")
+                yield "报告未找到"
                 return
 
             data = dict(cached.data or {})
@@ -737,7 +737,7 @@ class ReportService:
             # If already done or has content (legacy support), yield result directly
             ai_status = data.get("ai_status")
             ai_analysis = data.get("ai_analysis")
-            logger.info(f"ℹ️ 报表状态: id={report_id} status={ai_status} len={len(ai_analysis or '')}")
+            logger.info(f"ℹ️ 报告状态: id={report_id} status={ai_status} len={len(ai_analysis or '')}")
             
             if (ai_status == "done" or (ai_analysis and len(ai_analysis) > 100)) and ai_analysis:
                 # Update status if missing
@@ -904,7 +904,7 @@ class ReportService:
         source: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> None:
-        logger.info(f"📄 后台生成报表开始: keyword={keyword or '-'}")
+        logger.info(f"📄 后台生成报告开始: keyword={keyword or '-'}")
         data = await self._generate_analysis_data(
             keyword=keyword,
             start_date=start_date,
@@ -931,10 +931,10 @@ class ReportService:
             report_id = await self.save_report_cache("global", "weekly", data)
 
         if not report_id:
-            logger.warning("⚠️ 报表缓存写入失败，后台任务结束")
+            logger.warning("⚠️ 报告缓存写入失败，后台任务结束")
             return
 
-        logger.info(f"📄 报表缓存已写入: id={report_id} keyword={keyword or '-'}")
+        logger.info(f"📄 报告缓存已写入: id={report_id} keyword={keyword or '-'}")
         
         # Only start background analysis if we have news AND it's not a keyword report (which streams on-demand)
         # OR if we want to support background generation for all.
@@ -959,7 +959,7 @@ class ReportService:
         # Actually, if I comment it out, existing logic in stream_ai_analysis (endpoint) needs to pick it up.
         # Let's check stream_ai_analysis implementation again.
         
-        logger.info(f"📄 后台生成报表结束: id={report_id} keyword={keyword or '-'}")
+        logger.info(f"📄 后台生成报告结束: id={report_id} keyword={keyword or '-'}")
 
     async def _stream_ai_analysis_to_cache(self, report_id: int) -> None:
         if not await check_db_connection(verbose=False):
@@ -1123,13 +1123,13 @@ class ReportService:
     async def load_report(self, report_id: int) -> Optional[Dict[str, Any]]:
         """
         输入:
-        - `report_id`: 报表缓存 ID
+        - `report_id`: 报告缓存 ID
 
         输出:
-        - 报表结构化数据；不存在返回 None
+        - 报告结构化数据；不存在返回 None
 
         作用:
-        - 读取指定历史报表缓存供前端渲染
+        - 读取指定历史报告缓存供前端渲染
         """
         if not await check_db_connection(verbose=False):
             return None
@@ -1170,10 +1170,10 @@ class ReportService:
         - `use_cache`: 是否优先读取缓存
 
         输出:
-        - 报表结构化数据（summary/charts/top_news/ai_analysis）
+        - 报告结构化数据（summary/charts/top_news/ai_analysis）
 
         作用:
-        - 对外提供统一报表数据入口，并在条件允许时命中缓存提升性能
+        - 对外提供统一报告数据入口，并在条件允许时命中缓存提升性能
         """
 
         if use_cache and not keyword and not start_date and not end_date and not category and not region and not source and not news_ids:
@@ -1208,7 +1208,7 @@ class ReportService:
                         data = dict(data)
                         data["id"] = rid
                         elapsed_ms = int((monotonic() - t0) * 1000)
-                        logger.info(f"📖 读取全局报表数据库缓存 ({kw or '未知'}) {elapsed_ms}ms")
+                        logger.info(f"📖 读取全局报告数据库缓存 ({kw or '未知'}) {elapsed_ms}ms")
                         self._global_cache = (monotonic(), str(kw or ""), data)
                         return data
 
@@ -1253,7 +1253,7 @@ class ReportService:
         - `generate_ai`: 是否生成 AI 分析文字
 
         输出:
-        - 报表结构化数据（摘要、趋势、来源、词云、情绪分布、Top 新闻等）
+        - 报告结构化数据（摘要、趋势、来源、词云、情绪分布、Top 新闻等）
 
         作用:
         - 在数据库中按条件查询新闻，并聚合计算各类统计指标

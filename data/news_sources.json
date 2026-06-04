@@ -118,5 +118,17 @@
         "weight": 1.0,
         "address": "https://orz.ai/api/v1/dailynews/?platform=tenxunwang",
         "enabled": true
+    },
+    {
+        "name": "雪球热榜",
+        "weight": 1.0,
+        "address": "https://orz.ai/api/v1/dailynews/multi?platforms=xueqiu",
+        "enabled": true
+    },
+    {
+        "name": "抖音热榜",
+        "weight": 1.0,
+        "address": "https://orz.ai/api/v1/dailynews/multi?platforms=douyin",
+        "enabled": true
     }
 ]

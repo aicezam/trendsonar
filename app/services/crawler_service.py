@@ -31,6 +31,11 @@ from app.models.news import News
 from app.services.ai_service import ai_service
 from app.services.concurrency_service import concurrency_service
 from app.services.source_health_service import source_health_service
+from app.utils.json_news_payload import (
+    ensure_unique_json_item_links,
+    extract_json_news_items,
+    normalize_json_news_item,
+)
 from app.utils.tools import clean_html_tags
 
 settings = get_settings()
@@ -166,6 +171,21 @@ class CrawlerService:
         """
 
         return max(10, int(getattr(settings, "CRAWLER_CONTENT_MIN_LENGTH", MIN_CONTENT_LENGTH) or MIN_CONTENT_LENGTH))
+
+    def _source_fetch_timeout(self) -> aiohttp.ClientTimeout:
+        """
+        输入:
+        - 无
+
+        输出:
+        - 新闻源列表请求超时配置
+
+        作用:
+        - 新闻源聚合接口和 RSSHub 可能响应较慢，使用统一配置避免固定 20 秒导致误判抓取失败。
+        """
+
+        timeout_seconds = max(20.0, float(getattr(settings, "CRAWLER_FETCH_TIMEOUT_SECONDS", 45.0) or 45.0))
+        return aiohttp.ClientTimeout(total=timeout_seconds)
 
     def _normalize_content_text(
         self,
@@ -457,6 +477,9 @@ class CrawlerService:
         url: Optional[str],
         pub_date: datetime,
         summary: Optional[str] = None,
+        content: Optional[str] = None,
+        heat: Optional[float] = None,
+        original_url: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         输入:
@@ -466,6 +489,9 @@ class CrawlerService:
         - `url`: 链接
         - `pub_date`: 发布时间
         - `summary`: 摘要（可选）
+        - `content`: 可直接作为正文素材的内容（可选）
+        - `heat`: 条目级热度（可选）
+        - `original_url`: 来源原始链接（可选）
 
         输出:
         - 清洗后的新闻元信息字典；不合规时返回 None
@@ -480,16 +506,19 @@ class CrawlerService:
             if domain in url:
                 return None
         
-        # 清洗摘要中的坏链
+        # 清洗来源自带文本中的坏链
         cleaned_summary = self._clean_summary(summary)
+        cleaned_content = self._clean_summary(content)
 
         return {
             "title": title.strip(),
             "url": url.strip(),
             "source": source_name,
             "publish_date": pub_date,
-            "heat": weight,
+            "heat": heat if heat is not None else weight,
             "summary": cleaned_summary,
+            "content": cleaned_content,
+            "original_url": (original_url or url).strip(),
         }
 
     async def fetch_and_parse(
@@ -516,7 +545,7 @@ class CrawlerService:
         logger.debug(f"{log_prefix} 正在抓取: {name} ({url})")
 
         try:
-            async with session.get(url, timeout=20) as resp:
+            async with session.get(url, timeout=self._source_fetch_timeout()) as resp:
                 if resp.status != 200:
                     logger.error(f"抓取失败 {name}: HTTP {resp.status}")
                     return []
@@ -533,19 +562,23 @@ class CrawlerService:
                 if "json" in content_type:
                     try:
                         data = json.loads(text)
-                        raw_items = []
-                        if isinstance(data, list):
-                            raw_items = data
-                        elif isinstance(data, dict):
-                            raw_items = data.get("data", []) or data.get("items", []) or data.get("stories", [])
+                        raw_items = extract_json_news_items(data)
 
-                        for item in raw_items:
-                            title = item.get("title")
-                            link = item.get("url") or item.get("link") or item.get("share_url")
-                            summary = item.get("summary") or item.get("description") or item.get("digest")
-                            pub_date = datetime.now()
+                        normalized_items = [
+                            item for raw_item in raw_items if (item := normalize_json_news_item(raw_item))
+                        ]
 
-                            p = self._process_meta(name, weight, title, link, pub_date, summary)
+                        for item in ensure_unique_json_item_links(normalized_items):
+                            p = self._process_meta(
+                                name,
+                                weight,
+                                item.get("title"),
+                                item.get("link"),
+                                item.get("publish_date", datetime.now()),
+                                summary=item.get("summary"),
+                                content=item.get("content"),
+                                original_url=item.get("original_link"),
+                            )
                             if p:
                                 items.append(p)
 
@@ -581,6 +614,7 @@ class CrawlerService:
                                     desc_elem = item.find("description") or item.find("summary")
 
                                 summary = desc_elem.text if desc_elem else ""
+                                content = summary
 
                                 pub_date = datetime.now()
                                 date_elem = item.find("pubDate") or item.find("dc:date") or item.find("updated")
@@ -596,7 +630,7 @@ class CrawlerService:
                                     except Exception:
                                         pass
 
-                                p = self._process_meta(name, weight, title, link, pub_date, summary)
+                                p = self._process_meta(name, weight, title, link, pub_date, summary, content=content)
                                 if p:
                                     items.append(p)
                             if items:
@@ -782,7 +816,8 @@ class CrawlerService:
                     publish_date=item["publish_date"],
                     heat_score=item["heat"],
                     summary=item.get("summary", ""),
-                    sources=[{"name": item["source"], "url": item["url"]}],
+                    content=item.get("content", ""),
+                    sources=[{"name": item["source"], "url": item.get("original_url", item["url"])}],
                     sentiment_score=item.get("sentiment_score", 50.0),
                     sentiment_label=item.get("sentiment_label", "中立"),
                     keywords=item.get("keywords", []),

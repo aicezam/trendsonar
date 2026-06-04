@@ -1,116 +1,10 @@
+{# 本文件渲染管理后台，包括系统配置、新闻源健康度、日志和提示词管理。 #}
 {% extends "base.html" %}
 
 {% block title %}{{ settings.APP_NAME }} - 管理{% endblock %}
 
 {% block head %}
 <link rel="stylesheet" href="/static/codemirror.min.css">
-<style>
-    .prompts-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-        gap: 15px;
-        padding: 15px 0;
-    }
-    .prompt-card {
-        background: var(--bg-card);
-        border: 1px solid var(--border-color);
-        border-radius: 6px;
-        padding: 15px;
-        display: flex;
-        flex-direction: column;
-        transition: box-shadow 0.2s;
-    }
-    .prompt-card:hover {
-        box-shadow: var(--shadow-md);
-    }
-    .prompt-card h4 {
-        margin: 0 0 8px 0;
-        font-size: 16px;
-        color: var(--text-main);
-    }
-    .prompt-card p {
-        margin: 0 0 15px 0;
-        font-size: 13px;
-        color: var(--text-secondary);
-        flex: 1;
-        line-height: 1.4;
-    }
-    .prompt-actions {
-        display: flex;
-        justify-content: flex-end;
-    }
-    
-    .admin-subtabs {
-        display: flex;
-        gap: 10px;
-        margin-bottom: 15px;
-        flex-wrap: wrap;
-        border-bottom: 1px solid var(--border-color);
-        padding-bottom: 10px;
-    }
-    .admin-subtab {
-        padding: 6px 12px;
-        border: 1px solid var(--border-color);
-        border-radius: 4px;
-        background: var(--bg-soft);
-        cursor: pointer;
-        font-size: 13px;
-        color: var(--text-secondary);
-    }
-    .admin-subtab:hover { background: var(--bg-body); }
-    .admin-subtab.active {
-        background: var(--primary-color);
-        color: #fff;
-        border-color: var(--primary-color);
-    }
-
-    /* Modal */
-    .modal-overlay {
-        position: fixed;
-        top: 0; left: 0; right: 0; bottom: 0;
-        background: rgba(0,0,0,0.5);
-        z-index: 1000;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-    }
-    .modal {
-        background: var(--bg-card);
-        width: 800px;
-        max-width: 90%;
-        max-height: 90vh;
-        border-radius: 8px;
-        display: flex;
-        flex-direction: column;
-        box-shadow: var(--shadow-lg);
-    }
-    .modal-header {
-        padding: 15px 20px;
-        border-bottom: 1px solid var(--border-color);
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-    .modal-header h3 { margin: 0; font-size: 18px; color: var(--text-main); }
-    .modal-close {
-        background: none; border: none; font-size: 24px; cursor: pointer; color: var(--text-light);
-    }
-    .modal-body {
-        padding: 20px;
-        overflow-y: auto;
-    }
-    .modal-footer {
-        padding: 15px 20px;
-        border-top: 1px solid var(--border-color);
-        display: flex;
-        justify-content: flex-end;
-        gap: 10px;
-    }
-    .form-group { margin-bottom: 15px; }
-    .form-group label { display: block; margin-bottom: 5px; font-weight: 500; color: var(--text-main); }
-    .form-text { font-size: 14px; color: var(--text-secondary); line-height: 1.5; }
-    .form-hint { font-size: 12px; color: var(--text-light); margin-top: 4px; }
-</style>
 {% endblock %}
 
 {% block content %}
@@ -124,7 +18,7 @@
         </div>
         <div id="adminLoginStatus" class="admin-status"></div>
         {% else %}
-        <div class="admin-row" style="justify-content: flex-end;">
+        <div class="admin-row admin-row-right">
             <button id="logoutBtn" class="admin-btn danger">退出登录</button>
         </div>
         <div class="admin-tabs">
@@ -136,20 +30,20 @@
         <div class="admin-panels">
             <div id="panelConfig" class="admin-panel active">
                 <div class="admin-log-toolbar">
-                    <div class="admin-hint" style="flex:1; margin:0;">以表单方式维护系统配置，保存后服务将自动重启以应用新配置。</div>
+                    <div class="admin-hint admin-hint-fluid">以表单方式维护系统配置，保存后服务将自动重启以应用新配置。</div>
                     <button id="reloadConfigBtn" class="admin-btn">重新加载</button>
                     <button id="toggleAdvancedConfigBtn" class="admin-btn">高级配置</button>
                     <button id="saveConfigBtn" class="admin-btn primary">保存并重启</button>
                 </div>
                 <div id="configForm" class="config-form-grid"></div>
-                <div id="advancedConfigWrap" class="advanced-config-wrap" style="display:none;">
+                <div id="advancedConfigWrap" class="advanced-config-wrap is-hidden">
                     <div class="admin-hint">高级配置区会与表单同步，使用 JSON 格式编辑暂未表单化的配置项。</div>
                     <textarea id="configEditor" class="admin-textarea" spellcheck="false" placeholder="加载中..."></textarea>
                 </div>
             </div>
             <div id="panelSources" class="admin-panel">
                 <div class="admin-log-toolbar">
-                    <div class="admin-hint" style="flex:1; margin:0;">管理新闻源配置，可维护启用状态、测试抓取结果并查看最近加载情况。</div>
+                    <div class="admin-hint admin-hint-fluid">管理新闻源配置，可维护启用状态、测试抓取结果并查看最近加载情况。</div>
                     <button id="addSourceBtn" class="admin-btn">新增新闻源</button>
                     <button id="reloadSourcesBtn" class="admin-btn">刷新</button>
                 </div>
@@ -158,10 +52,10 @@
             </div>
             <div id="panelLogs" class="admin-panel">
                 <div class="admin-log-toolbar">
-                    <select id="logSourceSelect" class="admin-input" style="width: 220px;">
+                    <select id="logSourceSelect" class="admin-input admin-select-log-source">
                         <option value="realtime">实时（内存）</option>
                     </select>
-                    <div id="logsRetentionInfo" class="admin-hint" style="flex:1; margin:0;"></div>
+                    <div id="logsRetentionInfo" class="admin-hint admin-hint-fluid"></div>
                     <button id="refreshLogsBtn" class="admin-btn">刷新</button>
                     <button id="clearLogsBtn" class="admin-btn danger">清空实时</button>
                 </div>
@@ -169,7 +63,7 @@
             </div>
             <div id="panelPrompts" class="admin-panel">
                 <div class="admin-log-toolbar">
-                    <div class="admin-hint" style="flex:1; margin:0;">管理 AI 功能模块的提示词配置。修改后实时生效。</div>
+                    <div class="admin-hint admin-hint-fluid">管理 AI 功能模块的提示词配置。修改后实时生效。</div>
                     <button id="refreshPromptsBtn" class="admin-btn">刷新</button>
                 </div>
                 <div id="promptsGroups" class="admin-subtabs"></div>
@@ -179,7 +73,7 @@
         <div id="adminStatus" class="admin-status"></div>
         {% endif %}
     </div>
-    <div id="promptModal" class="modal-overlay" style="display: none;">
+    <div id="promptModal" class="modal-overlay is-hidden">
         <div class="modal">
             <div class="modal-header">
                 <h3 id="modalTitle">编辑提示词</h3>
@@ -189,7 +83,7 @@
                 <input type="hidden" id="editPromptKey">
                 <div class="form-group">
                     <label>标题</label>
-                    <input type="text" id="editPromptTitle" class="admin-input" readonly style="background: var(--bg-soft);">
+                    <input type="text" id="editPromptTitle" class="admin-input admin-input-soft" readonly>
                 </div>
                 <div class="form-group">
                     <label>描述</label>
@@ -211,7 +105,7 @@
             </div>
         </div>
     </div>
-    <div id="sourceFormModal" class="modal-overlay" style="display: none;">
+    <div id="sourceFormModal" class="modal-overlay is-hidden">
         <div class="modal source-form-modal">
             <div class="modal-header">
                 <h3 id="sourceFormModalTitle">新增新闻源</h3>
@@ -221,17 +115,17 @@
                 <input type="hidden" id="editSourceIndex" value="">
                 <div class="form-group">
                     <label>名称</label>
-                    <input type="text" id="sourceFormName" class="admin-input" style="width:100%;">
+                    <input type="text" id="sourceFormName" class="admin-input admin-input-full">
                 </div>
                 <div class="form-group">
                     <label>权重</label>
-                    <input type="number" id="sourceFormWeight" class="admin-input" step="0.1" style="width:100%;">
+                    <input type="number" id="sourceFormWeight" class="admin-input admin-input-full" step="0.1">
                 </div>
                 <div class="form-group">
                     <label>地址</label>
-                    <input type="text" id="sourceFormAddress" class="admin-input" style="width:100%;">
+                    <input type="text" id="sourceFormAddress" class="admin-input admin-input-full">
                 </div>
-                <label class="source-switch-pill on" style="width:max-content;">
+                <label class="source-switch-pill source-switch-inline on">
                     <input type="checkbox" id="sourceFormEnabled" checked>
                     <span>启用新闻源</span>
                 </label>
@@ -242,7 +136,7 @@
             </div>
         </div>
     </div>
-    <div id="sourcePreviewModal" class="modal-overlay" style="display: none;">
+    <div id="sourcePreviewModal" class="modal-overlay is-hidden">
         <div class="modal source-preview-modal">
             <div class="modal-header">
                 <h3 id="sourcePreviewModalTitle">新闻源测试结果</h3>
@@ -273,8 +167,8 @@
     let sourceContentTestResults = {};
     let logsTimer = null;
     let activeTab = "config";
-    
-    // Lazy loading variables
+
+    // 日志懒加载状态。
     let fullLogLines = [];
     let renderedLimit = 200;
     const LOG_PAGE_SIZE = 200;
@@ -291,7 +185,7 @@
                 tabSize: 2,
             });
         }
-        
+
         resizeEditors();
     }
 
@@ -436,7 +330,7 @@
                 { key: "AI_ROUTE.TOPIC_TIMELINE", label: "专题时间轴", type: "route" },
                 { key: "AI_ROUTE.TOPIC_OVERVIEW", label: "专题综述", type: "route" },
                 { key: "AI_ROUTE.TOPIC_INITIAL_SUMMARY", label: "专题初始摘要", type: "route" },
-                { key: "AI_ROUTE.REPORT", label: "报表生成", type: "route" },
+                { key: "AI_ROUTE.REPORT", label: "报告生成", type: "route" },
                 { key: "AI_ROUTE.CHAT", label: "对话助手", type: "route" },
             ]
         },
@@ -575,7 +469,7 @@
         "AI_ROUTE.TOPIC_TIMELINE": "选择专题时间轴生成使用的模型节点。示例：backup。",
         "AI_ROUTE.TOPIC_OVERVIEW": "选择专题综述生成使用的模型节点。示例：backup。",
         "AI_ROUTE.TOPIC_INITIAL_SUMMARY": "选择专题初始摘要使用的模型节点。示例：main。",
-        "AI_ROUTE.REPORT": "选择日报/周报等报表生成使用的模型节点。示例：backup。",
+        "AI_ROUTE.REPORT": "选择日报/周报等报告生成使用的模型节点。示例：backup。",
         "AI_ROUTE.CHAT": "选择管理端问答助手使用的模型节点。示例：main。",
         NEWS_CATEGORIES: "新闻分类列表，每行一个。示例：财经商业、科技科学、社会民生。",
         IGNORED_DOMAINS: "忽略域名列表，每行一个。命中的链接不会抓取或入库。示例：twitter.com。",
@@ -767,9 +661,9 @@
     function toggleAdvancedConfig() {
         const wrap = document.getElementById("advancedConfigWrap");
         if (!wrap) return;
-        const willShow = wrap.style.display === "none";
+        const willShow = wrap.classList.contains("is-hidden");
         if (willShow) syncAdvancedConfigFromForm();
-        wrap.style.display = willShow ? "block" : "none";
+        wrap.classList.toggle("is-hidden", !willShow);
         setTimeout(resizeEditors, 20);
     }
 
@@ -779,10 +673,10 @@
 
         if (configPanel && configTextarea && configPanel.classList.contains("active")) {
             const rect = configTextarea.getBoundingClientRect();
-            // Try to find the wrapper if CodeMirror is initialized
+            // 代码编辑器初始化后优先使用外层容器计算高度。
             const wrapper = configPanel.querySelector(".CodeMirror");
             const top = wrapper ? wrapper.getBoundingClientRect().top : rect.top;
-            
+
             const available = Math.max(260, window.innerHeight - top - 20);
             if (codeMirrorEditor) {
                 codeMirrorEditor.setSize("100%", available + "px");
@@ -839,7 +733,7 @@
         setAppNameFromConfig();
         setStatus(statusEl, "已加载。保存后将自动重启。", "ok");
     }
-    
+
     async function loadSources() {
         const statusEl = document.getElementById("adminStatus");
         const pathEl = document.getElementById("sourcesPath");
@@ -890,12 +784,12 @@
         weightEl.value = source.weight || 1;
         addressEl.value = source.address || "";
         enabledEl.checked = source.enabled !== false;
-        modal.style.display = "flex";
+        modal.classList.remove("is-hidden");
     }
 
     function closeSourceFormModal() {
         const modal = document.getElementById("sourceFormModal");
-        if (modal) modal.style.display = "none";
+        if (modal) modal.classList.add("is-hidden");
     }
 
     async function saveSourceForm() {
@@ -955,9 +849,27 @@
         return fallback || "未执行";
     }
 
+    function getSourceHealthScore(health, enabled) {
+        const fetchOk = health.last_fetch_status === "success";
+        const testOk = health.last_test_status === "success";
+        const failureCount = Number(health.failure_count || 0);
+        let score = enabled ? 45 : 20;
+        if (fetchOk) score += 35;
+        if (testOk) score += 15;
+        score -= Math.min(30, failureCount * 10);
+        if (!enabled) score = Math.min(score, 55);
+        return Math.max(0, Math.min(100, score));
+    }
+
+    function getSourceHealthTone(score) {
+        if (score >= 80) return "ok";
+        if (score >= 55) return "warn";
+        return "bad";
+    }
+
     function closeSourcePreviewModal() {
         const modal = document.getElementById("sourcePreviewModal");
-        if (modal) modal.style.display = "none";
+        if (modal) modal.classList.add("is-hidden");
     }
 
     async function testSourceContent(index, itemIndex) {
@@ -1057,7 +969,7 @@
                 </div>
             `).join("");
         }
-        modal.style.display = "flex";
+        modal.classList.remove("is-hidden");
     }
 
     async function testSource(index) {
@@ -1096,6 +1008,8 @@
             const fetchClass = getSourceStatusClass(fetchStatus);
             const testClass = getSourceStatusClass(testStatus);
             const cachedPreview = sourcePreviewResults[index];
+            const healthScore = getSourceHealthScore(health, enabled);
+            const healthTone = getSourceHealthTone(healthScore);
             return `
                 <div class="source-card prompt-card ${enabled ? "" : "disabled"}">
                     <div class="source-card-top">
@@ -1112,6 +1026,13 @@
                         <span class="source-badge ${fetchClass}">加载：${getSourceStatusText(fetchStatus, "未加载")}</span>
                         <span class="source-badge ${testClass}">测试：${getSourceStatusText(testStatus, "未测试")}</span>
                         <span class="source-badge idle">权重 ${escapeHtml(source.weight || 1)}</span>
+                    </div>
+                    <div class="source-health-meter ${healthTone}" aria-label="新闻源健康度 ${healthScore}">
+                        <div class="source-health-row">
+                            <span>健康度</span>
+                            <strong>${healthScore}</strong>
+                        </div>
+                        <div class="source-health-bar"><i style="width:${healthScore}%"></i></div>
                     </div>
                     <div class="source-card-meta">
                         <div><strong>地址</strong><span class="source-address-text">${escapeHtml(source.address || "-")}</span></div>
@@ -1150,7 +1071,7 @@
         const statusEl = document.getElementById("adminStatus");
         setStatus(statusEl, "保存中...", "");
         const advancedWrap = document.getElementById("advancedConfigWrap");
-        const configText = advancedWrap && advancedWrap.style.display !== "none" ? getEditorValue() : syncAdvancedConfigFromForm();
+        const configText = advancedWrap && !advancedWrap.classList.contains("is-hidden") ? getEditorValue() : syncAdvancedConfigFromForm();
         try {
             JSON.parse(configText);
         } catch (e) {
@@ -1261,14 +1182,14 @@
         }
         const data = await resp.json().catch(() => ({}));
         const raw = data.logs || "";
-        
+
         const newLines = raw ? raw.split(/\r?\n/).reverse() : [];
-        
-        // If content is identical (same length and same newest line), skip render to avoid flicker
+
+        // 内容未变化时跳过渲染，避免日志面板闪烁。
         if (fullLogLines.length > 0 && newLines.length === fullLogLines.length && newLines[0] === fullLogLines[0]) {
             return;
         }
-        
+
         fullLogLines = newLines;
         renderLogs();
     }
@@ -1313,13 +1234,13 @@
         const logEl = document.getElementById("logViewer");
         if (!logEl) return;
 
-        // Check if user is at the top (viewing newest logs)
+        // 判断用户是否停留在顶部查看最新日志。
         const isAtTop = logEl.scrollTop < 50;
-        
+
         const slice = fullLogLines.slice(0, renderedLimit);
         logEl.textContent = slice.join("\n");
-        
-        // If user was at top, keep them at top so they see new logs
+
+        // 若用户原本在顶部，保持顶部位置以便继续查看最新日志。
         if (isAtTop) {
             logEl.scrollTop = 0;
         }
@@ -1328,15 +1249,13 @@
     function onLogScroll() {
         const logEl = document.getElementById("logViewer");
         if (!logEl) return;
-        
+
         const { scrollTop, scrollHeight, clientHeight } = logEl;
-        // If scrolled near bottom, load more
+        // 滚动接近底部时继续加载更旧日志。
         if (scrollTop + clientHeight >= scrollHeight - 50) {
             if (renderedLimit < fullLogLines.length) {
                 renderedLimit += LOG_PAGE_SIZE;
-                // Preserve scroll position (though usually not needed as we append to bottom)
-                // renderLogs will update content, browser usually keeps scrollTop relative to top.
-                // Since we append to bottom, the view shouldn't jump.
+                // 追加旧日志后保留当前滚动上下文，减少视图跳动。
                 renderLogs();
             }
         }
@@ -1360,7 +1279,7 @@
         const tabSourcesBtn = document.getElementById("tabSourcesBtn");
         const tabLogsBtn = document.getElementById("tabLogsBtn");
         const tabPromptsBtn = document.getElementById("tabPromptsBtn");
-        
+
         const panelConfig = document.getElementById("panelConfig");
         const panelSources = document.getElementById("panelSources");
         const panelLogs = document.getElementById("panelLogs");
@@ -1370,7 +1289,7 @@
         if (tabSourcesBtn) tabSourcesBtn.classList.toggle("active", tab === "sources");
         if (tabLogsBtn) tabLogsBtn.classList.toggle("active", tab === "logs");
         if (tabPromptsBtn) tabPromptsBtn.classList.toggle("active", tab === "prompts");
-        
+
         if (panelConfig) panelConfig.classList.toggle("active", tab === "config");
         if (panelSources) panelSources.classList.toggle("active", tab === "sources");
         if (panelLogs) panelLogs.classList.toggle("active", tab === "logs");
@@ -1380,7 +1299,7 @@
             clearInterval(logsTimer);
             logsTimer = null;
         }
-        
+
         if (tab === "logs") {
             renderedLimit = LOG_PAGE_SIZE;
             fullLogLines = [];
@@ -1397,12 +1316,10 @@
             loadPrompts();
         } else if (tab === "sources") {
              loadSources();
-             // Delay resize to allow DOM to settle
+             // 延迟重算高度，等待面板 DOM 完成切换。
              setTimeout(resizeEditors, 10);
         } else {
-            // config
-            // We assume config is already loaded, but we can reload if needed. 
-            // Usually we just resize.
+            // 配置页通常已经加载，只需要重算编辑器高度。
             setTimeout(resizeEditors, 10);
         }
     }
@@ -1412,20 +1329,20 @@
         location.reload();
     }
 
-    // --- Prompts Management ---
+    // --- 提示词管理 ---
     let allPrompts = {};
     let activePromptGroup = "全部";
 
     async function loadPrompts() {
         const statusEl = document.getElementById("adminStatus");
         setStatus(statusEl, "加载提示词中...", "");
-        
+
         const resp = await fetch("/api/system/prompts", { method: "GET" });
         if (!resp.ok) {
             setStatus(statusEl, "加载提示词失败", "error");
             return;
         }
-        
+
         const data = await resp.json();
         allPrompts = data;
         renderPromptGroups();
@@ -1456,7 +1373,7 @@
             btn.textContent = g;
             btn.onclick = () => {
                 activePromptGroup = g;
-                renderPromptGroups(); // Re-render to update active class
+                renderPromptGroups(); // 重新渲染以更新当前分组样式。
                 renderPrompts();
             };
             container.appendChild(btn);
@@ -1468,13 +1385,13 @@
         if (!grid) return;
         grid.innerHTML = "";
 
-        // Sort by key
+        // 按键名排序，保持管理视图稳定。
         const keys = Object.keys(allPrompts).sort();
-        
+
         keys.forEach(key => {
             const item = allPrompts[key];
             const itemGroup = item.group || "未分类";
-            
+
             if (activePromptGroup !== "全部" && itemGroup !== activePromptGroup) {
                 return;
             }
@@ -1482,8 +1399,8 @@
             const card = document.createElement("div");
             card.className = "prompt-card";
             card.innerHTML = `
-                <h4>${item.title || key} <span style="font-weight:normal; font-size:12px; color:var(--text-light);">(${key})</span></h4>
-                <div style="font-size:12px; color:var(--primary-color); margin-bottom:5px;">${item.group || "未分类"}</div>
+                <h4>${item.title || key} <span class="prompt-key">(${key})</span></h4>
+                <div class="prompt-group-name">${item.group || "未分类"}</div>
                 <p>${item.description || "暂无描述"}</p>
                 <div class="prompt-actions">
                     <button class="admin-btn small" onclick="editPrompt('${key}')">编辑</button>
@@ -1502,20 +1419,20 @@
         document.getElementById("editPromptDesc").textContent = item.description || "";
         document.getElementById("editPromptSystem").value = item.system_prompt || "";
         document.getElementById("editPromptUser").value = item.user_prompt || "";
-        
+
         document.getElementById("modalTitle").textContent = "编辑提示词 - " + (item.title || key);
-        document.getElementById("promptModal").style.display = "flex";
+        document.getElementById("promptModal").classList.remove("is-hidden");
     };
 
     window.closePromptModal = function() {
-        document.getElementById("promptModal").style.display = "none";
+        document.getElementById("promptModal").classList.add("is-hidden");
     };
 
     window.savePrompt = async function() {
         const key = document.getElementById("editPromptKey").value;
         const systemPrompt = document.getElementById("editPromptSystem").value;
         const userPrompt = document.getElementById("editPromptUser").value;
-        
+
         if (!key) return;
 
         const statusEl = document.getElementById("adminStatus");
@@ -1540,11 +1457,11 @@
         }
 
         const resData = await resp.json();
-        // Update local cache
+        // 更新本地缓存，避免保存后重新请求。
         if (resData.data) {
             allPrompts[key] = resData.data;
         }
-        
+
         closePromptModal();
         setStatus(statusEl, "提示词保存成功", "ok");
     };
@@ -1561,14 +1478,14 @@
         document.getElementById("toggleAdvancedConfigBtn")?.addEventListener("click", toggleAdvancedConfig);
         document.getElementById("saveConfigBtn")?.addEventListener("click", saveConfig);
         document.getElementById("logoutBtn")?.addEventListener("click", logout);
-        
+
         document.getElementById("tabConfigBtn")?.addEventListener("click", () => setTab("config"));
         document.getElementById("tabSourcesBtn")?.addEventListener("click", () => setTab("sources"));
         document.getElementById("tabLogsBtn")?.addEventListener("click", () => setTab("logs"));
         document.getElementById("tabPromptsBtn")?.addEventListener("click", () => setTab("prompts"));
-        
+
         document.getElementById("refreshPromptsBtn")?.addEventListener("click", loadPrompts);
-        
+
         document.getElementById("refreshLogsBtn")?.addEventListener("click", async () => {
             await refreshLogFiles(true);
             await fetchLogsBySource();
@@ -1590,10 +1507,10 @@
             }
             updateLogsToolbarState();
         });
-        
+
         document.getElementById("reloadSourcesBtn")?.addEventListener("click", loadSources);
         document.getElementById("addSourceBtn")?.addEventListener("click", addSource);
-        
+
         const logViewer = document.getElementById("logViewer");
         if (logViewer) logViewer.addEventListener("scroll", onLogScroll);
 

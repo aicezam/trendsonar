@@ -3,12 +3,22 @@
 主要函数/类:
 - `lifespan`: 应用生命周期管理（初始化数据库、启动定时任务）
 - `page_index`: 首页渲染
-- `page_report`: 报表页渲染
+- `page_report`: 报告页渲染
 - `page_admin`: 管理页渲染
 - `admin_login`: 管理登录（写入 Cookie 会话）
 - `admin_logout`: 管理退出（清理 Cookie 会话）
 - `AdminLoginPayload`: 管理登录请求体
 """
+
+# 在导入业务模块前，先解析 --config 参数并设置环境变量
+import argparse as _argparse
+import os as _os
+
+_parser = _argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--config", "-c", type=str, default=None)
+_args, _ = _parser.parse_known_args()
+if _args.config:
+    _os.environ["TRENDSONAR_CONFIG"] = _args.config
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -21,7 +31,7 @@ from pydantic import BaseModel
 
 from app.api.api import api_router
 from app.api.deps import settings, templates
-from app.core.config import BASE_DIR, get_missing_config_keys
+from app.core.config import BASE_DIR, CONFIG_PATH, get_missing_config_keys
 from app.core.database import dispose_engine, init_db
 from app.core.logger import configure_logging, setup_logger
 from app.services.admin_service import (
@@ -121,10 +131,10 @@ async def page_report(request: Request):
     - `request`: FastAPI 请求对象
 
     输出:
-    - 报表页面 HTML 响应
+    - 报告页面 HTML 响应
 
     作用:
-    - 渲染并返回舆情分析报表页面
+    - 渲染并返回舆情分析报告页面
     """
 
     missing_keys = get_missing_config_keys(settings)
@@ -214,6 +224,7 @@ async def admin_logout():
 
 if __name__ == "__main__":
     log_level = (settings.LOG_LEVEL or "info").lower()
+    print(f"📄 配置文件: {CONFIG_PATH}")
     uvicorn.run(
         "main:app",
         host="0.0.0.0",

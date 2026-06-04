@@ -18,7 +18,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.utils.config_io import load_yaml_dict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-CONFIG_PATH = BASE_DIR / "config.yaml"
+
+# 支持通过环境变量 TRENDSONAR_CONFIG 指定配置文件路径，默认使用 config.yaml
+import os
+_config_env = os.environ.get("TRENDSONAR_CONFIG")
+CONFIG_PATH = Path(_config_env) if _config_env else BASE_DIR / "config.yaml"
 
 
 def _normalize_yaml_config(data: Dict[str, Any]) -> Dict[str, Any]:

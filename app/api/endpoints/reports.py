@@ -1,9 +1,9 @@
 """
-本文件用于提供报表相关 API：生成全局报表、生成关键词报表、读取历史与图表数据等。
+本文件用于提供报告相关 API：生成全局报告、生成关键词报告、读取历史与图表数据等。
 主要函数:
-- `get_recent_reports`: 获取最近生成的报表
-- `generate_global_report`: 生成并缓存全局报表
-- `get_report_history`: 获取报表历史
+- `get_recent_reports`: 获取最近生成的报告
+- `generate_global_report`: 生成并缓存全局报告
+- `get_report_history`: 获取报告历史
 """
 
 from collections import Counter
@@ -131,10 +131,10 @@ async def get_recent_reports(
     - `keyword`: 关键词（可选；若指定则返回该关键词下最近记录）
 
     输出:
-    - 最近关键词报表列表
+    - 最近关键词报告列表
 
     作用:
-    - 为前端展示最近生成的关键词报表入口
+    - 为前端展示最近生成的关键词报告入口
     """
     return await report_service.get_recent_reports(limit, keyword)
 
@@ -148,11 +148,11 @@ async def get_report_history(
     """
     输入:
     - `limit`: 返回数量
-    - `report_type`: 报表类型 (global / keyword)
+    - `report_type`: 报告类型 (global / keyword)
     - `keyword`: 关键词 (当 report_type=keyword 时需提供)
 
     输出:
-    - 历史报表列表
+    - 历史报告列表
 
     作用:
     - 管理后台查看历史生成记录
@@ -167,13 +167,13 @@ async def get_report_history(
 async def load_report(report_id: int):
     """
     输入:
-    - `report_id`: 报表 ID
+    - `report_id`: 报告 ID
 
     输出:
-    - 报表详情数据
+    - 报告详情数据
 
     作用:
-    - 获取指定历史报表的详细数据供前端渲染
+    - 获取指定历史报告的详细数据供前端渲染
     """
     report = await report_service.load_report(report_id)
     if not report:
@@ -203,10 +203,10 @@ async def get_report_analysis(
     - `generate_ai`: 是否生成 AI 分析文字结论
 
     输出:
-    - 报表分析数据（摘要、图表数据、Top 新闻、AI 分析）
+    - 报告分析数据（摘要、图表数据、Top 新闻、AI 分析）
 
     作用:
-    - 按条件生成报表数据，供前端图表渲染与下载
+    - 按条件生成报告数据，供前端图表渲染与下载
     """
     news_ids: Optional[List[int]] = None
     if ids:
@@ -415,13 +415,13 @@ async def generate_report_background(
 ):
     """
     输入:
-    - 报表生成参数
+    - 报告生成参数
 
     输出:
     - 任务提交状态
 
     作用:
-    - 异步触发报表生成任务
+    - 异步触发报告生成任务
     """
     params = {
         "q": q or "",
@@ -449,7 +449,7 @@ async def generate_report_background(
     status = await task_manager.start_background(
         task_name,
         run_report_task,
-        progress="报表生成中",
+        progress="报告生成中",
     )
     return {"status": "running" if status.get("running") else status.get("status"), "task": status}
 
@@ -470,7 +470,7 @@ async def stream_ai_report(
     """
     输入:
     - `q`: 关键词 (可选)
-    - `report_id`: 报表ID (可选, 优先使用)
+    - `report_id`: 报告ID (可选, 优先使用)
 
     输出:
     - AI 分析流式响应 (text/plain)
@@ -486,9 +486,9 @@ async def stream_ai_report(
         final_report_id = await report_service.find_latest_report_id(q)
     
     if not final_report_id:
-        logger.warning(f"⚠️ 流式请求未找到报表ID: q={q}")
+        logger.warning(f"⚠️ 流式请求未找到报告ID: q={q}")
         async def empty_generator():
-            yield "报表未生成，请先点击生成报表"
+            yield "报告未生成，请先点击生成报告"
         return StreamingResponse(empty_generator(), media_type="text/plain")
     
     logger.info(f"🚀 开始流式传输: report_id={final_report_id}")

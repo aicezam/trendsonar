@@ -1,57 +1,55 @@
+{# 本文件渲染首页新闻流、筛选工具、AI 助手和新闻详情弹窗。 #}
 {% extends "base.html" %}
 {% block title %}TrendSonar{% endblock %}
 {% block head %}
 {% endblock %}
 {% block content %}
 
-    <!-- Mobile Menu -->
+    <!-- 移动端筛选抽屉 -->
     <div id="mobileMenu" class="mobile-menu-overlay">
         <div class="mobile-menu-content">
             <div class="menu-header">
                 <h3>筛选选项</h3>
-                <button id="closeMobileMenu" style="font-size: 1.2rem; color: #9ca3af;">&times;</button>
+                <button id="closeMobileMenu" class="mobile-menu-close">&times;</button>
             </div>
-            
-            <!-- Search moved to top bar -->
+
+            <!-- 搜索入口放在顶部工具条，抽屉只保留高级筛选项。 -->
 
             <div class="menu-section">
                 <div class="menu-label">时间范围</div>
                 <div class="grid-3" id="mobileTimeOptions">
-                    <!-- JS generated -->
                 </div>
-                <div id="mobileDateRange" class="flex-row" style="display:none; margin-top: 8px; align-items: center;">
-                    <input type="date" id="mobileStartDate" class="input-text" style="flex:1; padding: 6px;">
-                    <span style="color: #6b7280;">-</span>
-                    <input type="date" id="mobileEndDate" class="input-text" style="flex:1; padding: 6px;">
+                <div id="mobileDateRange" class="flex-row mobile-date-range is-hidden">
+                    <input type="date" id="mobileStartDate" class="input-text flex-fill input-compact">
+                    <span class="text-muted-inline">-</span>
+                    <input type="date" id="mobileEndDate" class="input-text flex-fill input-compact">
                 </div>
             </div>
 
-            <div class="menu-section" style="display:none;">
+            <div class="menu-section is-hidden">
                 <div class="menu-label">领域筛选</div>
                 <div id="mobileCategoryContainer" class="ms-container full-width">
-                    <!-- JS Generated -->
                 </div>
             </div>
 
             <div class="menu-section">
                 <div class="menu-label">地区筛选</div>
                 <div id="mobileRegionContainer" class="ms-container full-width">
-                    <!-- JS Generated -->
                 </div>
             </div>
 
             <div class="menu-section">
                 <div class="menu-label">来源筛选</div>
                 <div id="mobileSourceContainer" class="ms-container full-width">
-                    <!-- JS Generated -->
                 </div>
             </div>
 
             <div class="menu-section">
                 <div class="menu-label">排序方式</div>
                 <div class="flex-row segmented">
-                    <button class="btn-filter flex-1" data-sort="heat" id="mobileSortHeat">🔥 按热度</button>
-                    <button class="btn-filter flex-1" data-sort="date" id="mobileSortDate">🕒 按时间</button>
+                    <span class="segmented-indicator"></span>
+                    <button class="btn-filter flex-1" data-sort="date" id="mobileSortDate">最新优先</button>
+                    <button class="btn-filter flex-1" data-sort="heat" id="mobileSortHeat">热度优先</button>
                 </div>
             </div>
 
@@ -59,43 +57,12 @@
         </div>
     </div>
 
-    <!-- Desktop Filter Drawer -->
-    <div id="desktopDrawerOverlay" class="desktop-drawer-overlay">
-        <div class="desktop-drawer-content">
-            <div class="drawer-header">
-                <h3>高级筛选</h3>
-                <button id="closeDesktopDrawer" class="btn-icon">&times;</button>
-            </div>
-            <div class="drawer-body">
-                <div class="filter-section-drawer">
-                    <label>时间范围</label>
-                    <select id="desktopTimeSelect" class="select-filter" style="width: 100%;">
-                        <!-- JS generated -->
-                    </select>
-                    <div id="desktopDateRange" style="display:none; flex-direction: column; gap: 8px; margin-top: 8px;">
-                         <input type="date" id="desktopStartDate" class="input-date" style="width: 100%;">
-                         <input type="date" id="desktopEndDate" class="input-date" style="width: 100%;">
-                    </div>
-                </div>
-
-                <div class="filter-section-drawer">
-                    <label>地区筛选</label>
-                    <div id="desktopRegionSelect" class="ms-container full-width"></div>
-                </div>
-            </div>
-            <div class="drawer-footer">
-                <button id="applyDesktopFilter" class="btn-primary">确认筛选</button>
-            </div>
-        </div>
-    </div>
-
     <div class="container">
-        <!-- Category Tabs -->
+        <!-- 分类标签 -->
         <div id="categoryTabs" class="category-tabs-container">
-            <!-- JS Generated -->
         </div>
 
-        <!-- Mobile Top Bar -->
+        <!-- 移动端顶部工具条 -->
         <div class="mobile-top-bar">
             <div class="mobile-search-group">
                 <input type="text" id="mobileTopSearchInput" placeholder="搜索新闻 (支持语义)...">
@@ -104,27 +71,32 @@
             <button class="btn-more-filter" id="mobileMoreBtn">筛选</button>
         </div>
 
-        <!-- Desktop Toolbar -->
+        <!-- 桌面端工具条 -->
         <div class="desktop-toolbar">
-            <div class="flex-row segmented" style="margin-right: 0;">
-                <button class="btn-filter" data-sort="heat" id="desktopSortHeat">🔥 热度</button>
-                <button class="btn-filter" data-sort="date" id="desktopSortDate">🕒 时间</button>
-            </div>
-            <!-- Removed Category Dropdown -->
-            <div id="desktopSourceSelect" class="ms-container"></div>
-            
-            <div class="search-box" style="flex: 1;">
-                <input type="text" id="desktopSearchInput" class="input-text search-input-desktop" placeholder="🔍搜索新闻 (支持模糊搜索与语义搜索)...">
+            <div class="topics-segmented">
+                <button class="topics-filter-btn" data-sort="date" id="desktopSortDate" type="button">最新优先</button>
+                <button class="topics-filter-btn" data-sort="heat" id="desktopSortHeat" type="button">热度优先</button>
             </div>
 
-            <button id="openDesktopDrawerBtn" class="btn-more-filter">
-                <span style="margin-right: 4px;">⚡</span> 更多筛选
-            </button>
+            <select id="desktopTimeSelect" class="select-filter toolbar-time"></select>
+            <div id="desktopDateRange" class="toolbar-date-range is-hidden">
+                <input type="date" id="desktopStartDate" class="input-date">
+                <span class="date-sep">-</span>
+                <input type="date" id="desktopEndDate" class="input-date">
+            </div>
+
+            <div id="desktopSourceSelect" class="ms-container toolbar-select"></div>
+            <div id="desktopRegionSelect" class="ms-container toolbar-select"></div>
+
+            <div class="search-box toolbar-search">
+                <input type="text" id="desktopSearchInput" class="input-text search-input-desktop" placeholder="搜索新闻、实体或事件线索...">
+            </div>
+            <button id="desktopSearchBtn" class="btn-toolbar-action">搜索</button>
+            <button id="desktopResetBtn" class="topics-ghost-btn">重置</button>
         </div>
 
-        <!-- News List -->
+        <!-- 新闻列表 -->
         <div id="newsList" class="news-list">
-            <!-- JS Generated Items -->
         </div>
 
         <div id="loadingState" class="loading-state">
@@ -132,14 +104,20 @@
         </div>
     </div>
 
-    <!-- Chat Widget -->
-    <div id="chatBtn" class="chat-widget-btn">💬</div>
+    <button id="chatBtn" class="chat-widget-btn" type="button" aria-label="打开 TrendSonar AI 助手" aria-expanded="false">
+        <span class="chat-widget-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none">
+                <path d="M6.75 17.25C5.65 16.18 5 14.73 5 13.13C5 9.74 7.91 7 11.5 7H12.5C16.09 7 19 9.74 19 13.13C19 16.52 16.09 19.25 12.5 19.25H10.46L7.55 21V18.7C7.26 18.57 6.99 18.42 6.75 17.25Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                <path d="M9.25 12.88H9.26M12 12.88H12.01M14.75 12.88H14.76" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+        </span>
+    </button>
     <div id="chatWindow" class="chat-window">
         <div class="chat-header">
             <span>TrendSonar AI</span>
             <div class="chat-header-controls">
-                <div id="modelSwitch" class="chat-switch" title="点击切换备用AI">Main</div>
-                <button id="closeChat" style="color:white; font-size:1.2rem; cursor:pointer;">&times;</button>
+                <button id="modelSwitch" class="chat-switch" type="button" title="点击切换备用 AI">Main</button>
+                <button id="closeChat" class="chat-close" type="button" aria-label="关闭 AI 助手">&times;</button>
             </div>
         </div>
         <div id="chatMessages" class="chat-messages">
@@ -147,8 +125,8 @@
         </div>
         <div class="chat-input-area">
             <div class="chat-quick-questions">
-                <div class="chat-chip" onclick="sendQuickMsg('今天有哪些热点新闻？')">🔥 今天有哪些热点新闻？</div>
-                <div class="chat-chip" onclick="sendQuickMsg('昨天发生了什么？')">📅 昨天发生了什么？</div>
+                <div class="chat-chip" onclick="sendQuickMsg('今天有哪些热点新闻？')">今天有哪些热点新闻？</div>
+                <div class="chat-chip" onclick="sendQuickMsg('昨天发生了什么？')">昨天发生了什么？</div>
             </div>
             <div class="chat-input-row">
                 <input type="text" id="chatInput" class="chat-input" placeholder="输入问题...">
@@ -176,18 +154,18 @@
 {% block scripts %}
     <script src="/static/marked.min.js"></script>
     <script>
-        // Global Error Handler for debugging
+        // 全局错误提示：让首页加载失败时有可见反馈。
         window.onerror = function(msg, url, line, col, error) {
             console.error('Global Error:', msg, error);
             const loading = document.getElementById('loadingState');
             if (loading) {
                 loading.classList.remove('hidden');
-                loading.innerHTML += `<br><span style="color:red; font-size:0.8rem;">系统错误: ${msg}</span>`;
+                loading.innerHTML += `<br><span class="inline-error">系统错误: ${msg}</span>`;
             }
             return false;
         };
 
-        // State
+        // 页面状态集中管理，避免筛选、分页和弹窗状态互相污染。
         const state = {
             list: [],
             page: 1,
@@ -195,14 +173,14 @@
             searchPageSize: 10,
             loading: false,
             hasMore: true,
-            isGenerating: false, // Global lock for manual summary generation
+            isGenerating: false, // 手动摘要生成的全局锁，避免并发请求。
             filter: {
                 q: '',
                 source: '',
                 category: 'all',
-                region: '', // Added region filter
-                sortBy: 'heat', // 'heat' | 'date'
-                dateOption: 'today', // 'today', '24h', '3d', '7d', 'week', 'month', 'custom', 'other'
+                region: '',
+                sortBy: localStorage.getItem('index_sortBy') || 'heat',
+                dateOption: 'today',
                 dateTouched: false,
                 startDate: new Date().toISOString().split('T')[0],
                 endDate: new Date().toISOString().split('T')[0]
@@ -217,8 +195,7 @@
             }
         };
 
-        // Constants
-        // Remove static NEWS_CATEGORIES, fetch from API
+        // 基础筛选选项，分类与来源由接口动态加载。
         const TIME_OPTIONS = [
             { label: '今日', value: 'today' },
             { label: '24小时', value: '24h' },
@@ -231,17 +208,18 @@
             { label: '其他', value: 'other' }
         ];
 
-        // DOM Elements
         const els = {
             mobileMenu: document.getElementById('mobileMenu'),
             mobileMoreBtn: document.getElementById('mobileMoreBtn'),
             closeMobileMenu: document.getElementById('closeMobileMenu'),
             applyMobileFilter: document.getElementById('applyMobileFilter'),
-            
+
             mobileTopSearchInput: document.getElementById('mobileTopSearchInput'),
             mobileTopSearchBtn: document.getElementById('mobileTopSearchBtn'),
             desktopSearch: document.getElementById('desktopSearchInput'),
-            
+            desktopSearchBtn: document.getElementById('desktopSearchBtn'),
+            desktopResetBtn: document.getElementById('desktopResetBtn'),
+
             mobileDateRange: document.getElementById('mobileDateRange'),
             mobileStartDate: document.getElementById('mobileStartDate'),
             mobileEndDate: document.getElementById('mobileEndDate'),
@@ -249,19 +227,12 @@
             desktopDateRange: document.getElementById('desktopDateRange'),
             desktopStartDate: document.getElementById('desktopStartDate'),
             desktopEndDate: document.getElementById('desktopEndDate'),
-            
+
             mobileTimeContainer: document.getElementById('mobileTimeOptions'),
             desktopTimeSelect: document.getElementById('desktopTimeSelect'),
-            
-            // Drawer Elements
-            desktopDrawerOverlay: document.getElementById('desktopDrawerOverlay'),
-            openDesktopDrawerBtn: document.getElementById('openDesktopDrawerBtn'),
-            closeDesktopDrawer: document.getElementById('closeDesktopDrawer'),
-            applyDesktopFilter: document.getElementById('applyDesktopFilter'),
 
-            // Updated IDs for Containers
             categoryTabs: document.getElementById('categoryTabs'),
-            
+
             mobileRegionContainer: document.getElementById('mobileRegionContainer'),
             desktopRegionSelect: 'desktopRegionSelect',
 
@@ -270,7 +241,7 @@
 
             newsList: document.getElementById('newsList'),
             loading: document.getElementById('loadingState'),
-            
+
             sortBtns: {
                 mobileHeat: document.getElementById('mobileSortHeat'),
                 mobileDate: document.getElementById('mobileSortDate'),
@@ -294,7 +265,6 @@
             body: document.getElementById('detailBody')
         };
 
-        // MultiSelect Class
         class MultiSelect {
             constructor(containerIdOrElement, placeholder, options, selectedValues, onChange) {
                 if (typeof containerIdOrElement === 'string') {
@@ -302,7 +272,7 @@
                 } else {
                     this.container = containerIdOrElement;
                 }
-                
+
                 this.placeholder = placeholder;
                 this.options = options || [];
                 this.selected = new Set(selectedValues ? selectedValues.split(',').filter(x=>x && x!=='all') : []);
@@ -313,8 +283,7 @@
             render() {
                 if (!this.container) return;
                 this.container.innerHTML = '';
-                
-                // Trigger
+
                 const trigger = document.createElement('div');
                 trigger.className = 'ms-trigger';
                 this.updateTriggerText(trigger);
@@ -323,13 +292,11 @@
                     this.toggleDropdown();
                 };
                 this.container.appendChild(trigger);
-                
-                // Dropdown
+
                 const dropdown = document.createElement('div');
                 dropdown.className = 'ms-dropdown';
                 this.dropdown = dropdown;
-                
-                // Search (only if many options)
+
                 if (this.options.length > 8) {
                     const searchBox = document.createElement('div');
                     searchBox.className = 'ms-search';
@@ -346,29 +313,25 @@
                     searchBox.appendChild(input);
                     dropdown.appendChild(searchBox);
                 }
-                
-                // Options
+
                 this.options.forEach(opt => {
                     const row = document.createElement('div');
                     row.className = 'ms-option';
-                    
+
                     const cb = document.createElement('input');
                     cb.type = 'checkbox';
                     cb.checked = this.selected.has(opt.value);
-                    
+
                     row.onclick = (e) => {
                         e.stopPropagation();
-                        // Toggle
                         if (this.selected.has(opt.value)) this.selected.delete(opt.value);
                         else this.selected.add(opt.value);
-                        
+
                         cb.checked = this.selected.has(opt.value);
                         this.updateTriggerText(trigger);
-                        // Immediate callback
                         this.onChange(Array.from(this.selected).join(','));
                     };
-                    
-                    // Prevent double toggle if clicking directly on checkbox
+
                     cb.onclick = (e) => {
                         e.stopPropagation();
                         if (e.target.checked) this.selected.add(opt.value);
@@ -376,15 +339,15 @@
                         this.updateTriggerText(trigger);
                         this.onChange(Array.from(this.selected).join(','));
                     };
-                    
+
                     row.appendChild(cb);
                     row.appendChild(document.createTextNode(opt.label));
                     dropdown.appendChild(row);
                 });
-                
+
                 this.container.appendChild(dropdown);
             }
-            
+
             updateTriggerText(el) {
                 if (this.selected.size === 0) {
                     el.textContent = this.placeholder;
@@ -396,9 +359,8 @@
                     el.textContent = `${this.placeholder} (${this.selected.size})`;
                 }
             }
-            
+
             toggleDropdown() {
-                // Close others
                 document.querySelectorAll('.ms-dropdown.show').forEach(d => {
                     if (d !== this.dropdown) d.classList.remove('show');
                 });
@@ -407,11 +369,10 @@
 
             updateSelected(newValString) {
                  this.selected = new Set(newValString ? newValString.split(',').filter(x=>x && x!=='all') : []);
-                 this.render(); 
+                 this.render();
             }
         }
 
-        // Global instances
         let msRegion, msSource;
         let msMobileRegion, msMobileSource;
 
@@ -431,23 +392,19 @@
             return "sent-neu";
         }
 
-        // --- Initialization ---
         async function init() {
             renderTimeOptions();
-            
-            // Load filters
+
             await Promise.all([fetchRegions(), fetchCategories(), fetchSources()]);
-            
-            // Set chat state
+
             state.chat.isOpen = false;
             els.chatWindow.classList.toggle('show', state.chat.isOpen);
-            
+
             updateUIState();
             bindEvents();
             bindChatEvents();
             fetchNews(true);
-            
-            // Global click to close dropdowns
+
             document.addEventListener('click', (e) => {
                 if (!e.target.closest('.ms-container')) {
                     document.querySelectorAll('.ms-dropdown.show').forEach(d => d.classList.remove('show'));
@@ -455,29 +412,13 @@
             });
         }
 
-        // --- Event Binding ---
         function bindEvents() {
-            // Mobile Menu
             els.mobileMoreBtn.onclick = () => els.mobileMenu.classList.add('show');
             els.closeMobileMenu.onclick = () => els.mobileMenu.classList.remove('show');
             els.mobileMenu.onclick = (e) => {
                 if(e.target === els.mobileMenu) els.mobileMenu.classList.remove('show');
             };
 
-            // Desktop Drawer
-            if (els.openDesktopDrawerBtn) {
-                els.openDesktopDrawerBtn.onclick = () => els.desktopDrawerOverlay.classList.add('show');
-                els.closeDesktopDrawer.onclick = () => els.desktopDrawerOverlay.classList.remove('show');
-                els.desktopDrawerOverlay.onclick = (e) => {
-                    if (e.target === els.desktopDrawerOverlay) els.desktopDrawerOverlay.classList.remove('show');
-                };
-                els.applyDesktopFilter.onclick = () => {
-                    els.desktopDrawerOverlay.classList.remove('show');
-                    fetchNews(true);
-                };
-            }
-
-            // Search
             const applyKeywordSearch = (value) => {
                 state.filter.q = String(value || '').trim();
                 if (state.filter.q && !state.filter.dateTouched) {
@@ -494,42 +435,59 @@
             };
             els.mobileTopSearchInput.onkeyup = onSearch;
             els.desktopSearch.onkeyup = onSearch;
-            
+
             els.mobileTopSearchBtn.onclick = () => {
                 applyKeywordSearch(els.mobileTopSearchInput.value);
                 fetchNews(true);
             };
+            els.desktopSearchBtn.onclick = () => {
+                applyKeywordSearch(els.desktopSearch.value);
+                fetchNews(true);
+            };
+            els.desktopResetBtn.onclick = () => {
+                state.filter.q = '';
+                state.filter.dateOption = 'today';
+                state.filter.startDate = '';
+                state.filter.endDate = '';
+                state.filter.source = '';
+                state.filter.region = '';
+                state.filter.dateTouched = false;
+                els.desktopSearch.value = '';
+                els.mobileTopSearchInput.value = '';
+                if (msSource) msSource.updateSelected('');
+                if (msRegion) msRegion.updateSelected('');
+                setTimeOption('today', { auto: true, skipFetch: true });
+                fetchNews(true);
+            };
 
-            // Date Range
             const onDateChange = (e, type) => {
                 state.filter.dateTouched = true;
                 const val = e.target.value;
                 if (type === 'start') state.filter.startDate = val;
                 else state.filter.endDate = val;
-                
+
                 els.mobileStartDate.value = state.filter.startDate;
                 els.desktopStartDate.value = state.filter.startDate;
                 els.mobileEndDate.value = state.filter.endDate;
                 els.desktopEndDate.value = state.filter.endDate;
-                
+
                 if (!isMobile() && state.filter.startDate && state.filter.endDate) {
                     fetchNews(true);
                 }
             };
-            
+
             els.mobileStartDate.onchange = (e) => onDateChange(e, 'start');
             els.desktopStartDate.onchange = (e) => onDateChange(e, 'start');
             els.mobileEndDate.onchange = (e) => onDateChange(e, 'end');
             els.desktopEndDate.onchange = (e) => onDateChange(e, 'end');
 
-            // Time Select
             els.desktopTimeSelect.onchange = (e) => {
                 setTimeOption(e.target.value);
             };
 
-            // Sort
             const setSort = (val) => {
                 state.filter.sortBy = val;
+                localStorage.setItem('index_sortBy', val);
                 updateUIState();
                 if (!isMobile()) fetchNews(true);
             };
@@ -538,45 +496,38 @@
             els.sortBtns.desktopHeat.onclick = () => setSort('heat');
             els.sortBtns.desktopDate.onclick = () => setSort('date');
 
-            // Mobile Apply
             els.applyMobileFilter.onclick = () => {
                 applyKeywordSearch(els.mobileTopSearchInput.value);
                 els.mobileMenu.classList.remove('show');
                 fetchNews(true);
             };
 
-            // Scroll
             window.onscroll = () => {
                 if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 200) {
                     fetchNews();
                 }
             };
         }
-        
-        // --- Fetch & Render Filters ---
+
         async function fetchRegions() {
             try {
                 const res = await fetch('/api/regions');
                 if(!res.ok) throw new Error(res.status);
                 const list = await res.json();
                 const options = list.map(r => ({label: r, value: r}));
-                
-                // Desktop
+
                 msRegion = new MultiSelect(els.desktopRegionSelect, '全部地区', options, state.filter.region, (val) => {
                     state.filter.region = val;
-                    // Sync Mobile
                     if(msMobileRegion) msMobileRegion.updateSelected(val);
                     fetchNews(true);
                 });
-                
-                // Mobile
+
                 msMobileRegion = new MultiSelect(els.mobileRegionContainer, '全部地区', options, state.filter.region, (val) => {
                     state.filter.region = val;
-                    // Sync Desktop
                     if(msRegion) msRegion.updateSelected(val);
                 });
-                
-            } catch (e) { 
+
+            } catch (e) {
                 console.error("Fetch Regions Error:", e);
                 msRegion = new MultiSelect(els.desktopRegionSelect, '加载失败', [], '', ()=>{});
             }
@@ -588,46 +539,41 @@
                 if(!res.ok) throw new Error(res.status);
                 const list = await res.json();
 
-                // Sort "其他" to the end
                 const otherIndex = list.indexOf('其他');
                 if (otherIndex > -1) {
                     list.push(list.splice(otherIndex, 1)[0]);
                 }
-                
-                // Add "All" option
+
                 const allCategories = ['全部', ...list];
                 renderCategoryTabs(allCategories);
-                
-            } catch (e) { 
+
+            } catch (e) {
                 console.error("Fetch Categories Error:", e);
                 renderCategoryTabs(['全部']);
             }
         }
-        
+
         function renderCategoryTabs(categories) {
             if (!els.categoryTabs) return;
             els.categoryTabs.innerHTML = '';
-            
+
             categories.forEach(cat => {
                 const btn = document.createElement('div');
                 btn.className = 'category-tab-item';
                 btn.textContent = cat;
-                
-                // Active state
+
                 const isAll = (state.filter.category === 'all' || !state.filter.category);
                 const isActive = (cat === '全部' && isAll) || (cat === state.filter.category);
-                
+
                 if (isActive) btn.classList.add('active');
-                
+
                 btn.onclick = () => {
                     const val = (cat === '全部') ? 'all' : cat;
                     state.filter.category = val;
-                    
-                    // Update UI immediately
+
                     Array.from(els.categoryTabs.children).forEach(c => c.classList.remove('active'));
                     btn.classList.add('active');
-                    
-                    // Auto scroll to center
+
                     const container = els.categoryTabs;
                     const scrollLeft = btn.offsetLeft - (container.offsetWidth / 2) + (btn.offsetWidth / 2);
                     container.scrollTo({
@@ -637,7 +583,7 @@
 
                     fetchNews(true);
                 };
-                
+
                 els.categoryTabs.appendChild(btn);
             });
         }
@@ -648,19 +594,19 @@
                 if(!res.ok) throw new Error(res.status);
                 const list = await res.json();
                 const options = list.map(s => ({label: s, value: s}));
-                
+
                 msSource = new MultiSelect(els.desktopSourceSelect, '全部来源', options, state.filter.source, (val) => {
                     state.filter.source = val;
                     if(msMobileSource) msMobileSource.updateSelected(val);
                     fetchNews(true);
                 });
-                
+
                 msMobileSource = new MultiSelect(els.mobileSourceContainer, '全部来源', options, state.filter.source, (val) => {
                     state.filter.source = val;
                     if(msSource) msSource.updateSelected(val);
                 });
-                
-            } catch (e) { 
+
+            } catch (e) {
                 console.error("Fetch Sources Error:", e);
                 msSource = new MultiSelect(els.desktopSourceSelect, '加载失败', [], '', ()=>{});
             }
@@ -677,8 +623,7 @@
             };
             els.mobileTimeContainer.innerHTML = '';
             TIME_OPTIONS.forEach(opt => els.mobileTimeContainer.appendChild(createBtn(opt)));
-            
-            // Desktop Select
+
             els.desktopTimeSelect.innerHTML = '';
              TIME_OPTIONS.forEach(opt => {
                 const o = document.createElement('option');
@@ -694,18 +639,18 @@
                 els.chatWindow.classList.toggle('show', state.chat.isOpen);
                 if(state.chat.isOpen) els.chatInput.focus();
             };
-            
+
             els.closeChat.onclick = () => {
                 state.chat.isOpen = false;
                 els.chatWindow.classList.remove('show');
             };
-            
+
             els.modelSwitch.onclick = () => {
                 state.chat.useBackup = !state.chat.useBackup;
                 els.modelSwitch.classList.toggle('active', state.chat.useBackup);
                 els.modelSwitch.innerText = state.chat.useBackup ? "Backup" : "Main";
             };
-            
+
             window.sendQuickMsg = (text) => {
                 if (state.chat.isSending) return;
                 els.chatInput.value = text;
@@ -715,82 +660,80 @@
             const sendMsg = async () => {
                 const text = els.chatInput.value.trim();
                 if (!text || state.chat.isSending) return;
-                
-                // User Message
+
                 appendMessage(text, 'user');
                 els.chatInput.value = '';
-                
+
                 state.chat.isSending = true;
                 els.chatSend.disabled = true;
                 els.chatSend.innerText = '...';
-                
-                // AI Placeholder with animated status
+
                 const aiMsgId = appendMessage('...', 'ai');
                 const aiMsgEl = document.getElementById(aiMsgId);
-                
-                const statusMessages = ['🤔 思考中...', '🔎 查询中...', '📝 准备回复...'];
+
+                const statusMessages = ['思考中...', '查询中...', '准备回复...'];
                 let statusIdx = 0;
-                aiMsgEl.innerHTML = `<span style="color:var(--text-light); font-style:italic;">${statusMessages[0]}</span>`;
-                
+                aiMsgEl.innerHTML = `<span class="inline-loading">${statusMessages[0]}</span>`;
+
                 const statusTimer = setInterval(() => {
                     if (statusIdx < statusMessages.length - 1) {
                         statusIdx++;
-                        aiMsgEl.innerHTML = `<span style="color:var(--text-light); font-style:italic;">${statusMessages[statusIdx]}</span>`;
+                        aiMsgEl.innerHTML = `<span class="inline-loading">${statusMessages[statusIdx]}</span>`;
                     }
                 }, 5000);
-                
+
                 try {
                     const params = new URLSearchParams({
                         query: text,
                         stream: 'true',
                         use_backup: state.chat.useBackup
                     });
-                    
+
                     const response = await fetch(`/api/chat?${params.toString()}`);
                     if (!response.ok) throw new Error("API Error");
-                    
+
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
-                    
-                    let fullText = ""; // Accumulate full text for markdown parsing
+
+                    // 累积流式 Markdown 内容，避免每个分片单独渲染造成闪烁。
+                    let fullText = "";
                     let isFirstChunk = true;
 
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) break;
-                        
+
                         if (isFirstChunk) {
                             clearInterval(statusTimer);
                             isFirstChunk = false;
                         }
-                        
+
                         const chunk = decoder.decode(value, { stream: true });
                         fullText += chunk;
-                        
-                        // Parse markdown and update
+
                         aiMsgEl.innerHTML = marked.parse(fullText);
-                        
-                        // Auto scroll
+
                         els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
                     }
-                    
+
                 } catch (e) {
                     clearInterval(statusTimer);
                     aiMsgEl.innerText += "\n[出错: " + e.message + "]";
                 } finally {
-                    clearInterval(statusTimer); // Ensure timer is cleared
+                    // 停止等待态轮询，恢复输入控件。
+                    clearInterval(statusTimer);
                     state.chat.isSending = false;
                     els.chatSend.disabled = false;
                     els.chatSend.innerText = '发送';
                 }
             };
-            
+
             els.chatSend.onclick = sendMsg;
             els.chatInput.onkeyup = (e) => {
                 if (e.key === 'Enter') sendMsg();
             };
         }
-        
+
         function appendMessage(text, role) {
             const id = 'msg-' + Date.now() + Math.random().toString(36).substr(2, 9);
             const div = document.createElement('div');
@@ -802,8 +745,6 @@
             return id;
         }
 
-            // Cleanup old functions that are replaced
-            // fetchSources, fetchRegions, renderFilterOptions are now redefined above
 
         function closeNewsDetail() {
             detailEls.modal.classList.remove('show');
@@ -821,9 +762,13 @@
             if (!items || !items.length) return `<div class="detail-empty">${emptyText}</div>`;
             return items.map(item => {
                 const time = item.time ? new Date(item.time).toLocaleString('zh-CN') : '-';
+                const itemId = Number(item.id || 0);
+                const titleHtml = itemId > 0
+                    ? `<button class="detail-inline-link" type="button" onclick="openNewsDetail(${itemId})">${escapeHtml(item.title || '(无标题)')}</button>`
+                    : `<a href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title || '(无标题)')}</a>`;
                 return `
                     <div class="detail-list-item">
-                        <a href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title || '(无标题)')}</a>
+                        ${titleHtml}
                         <div class="detail-item-meta">
                             <span>${escapeHtml(item.source || '未知来源')}</span>
                             <span>${time}</span>
@@ -889,19 +834,18 @@
                 <div class="detail-meta-line">
                     <span>${escapeHtml(news.source || '未知来源')}</span>
                     <span>${time}</span>
-                    <span>热度 ${Number(news.heat || 0).toFixed(1)}</span>
-                    <span class="sentiment-pill ${sentimentClass(news.sentiment_label)}">${escapeHtml(news.sentiment_label || '未分析')}${news.sentiment_score !== undefined ? '：' + news.sentiment_score : ''}</span>
-                </div>
-                <div class="detail-actions">
-                    <a class="detail-primary-link" href="${escapeHtml(news.url || '#')}" target="_blank" rel="noopener noreferrer">查看原文</a>
-                    <button class="btn-link" onclick="genSummary(${news.id})">重新生成摘要</button>
+                    <span class="meta-heat-val">热度 ${Number(news.heat || 0).toFixed(1)}</span>
+                    <span class="meta-sent-val ${sentimentClass(news.sentiment_label)}">${escapeHtml(news.sentiment_label || '未分析')}${news.sentiment_score !== undefined ? '：' + news.sentiment_score : ''}</span>
                 </div>
                 <div class="detail-status-grid">
                     <div><strong>${status.has_summary ? '已有摘要' : '暂无摘要'}</strong><span>新闻摘要</span></div>
                     <div><strong>${status.related_source_count || 0}</strong><span>关联报道</span></div>
                 </div>
                 <div class="detail-section">
-                    <div class="detail-section-title">新闻摘要</div>
+                    <div class="detail-section-title">
+                        <span>新闻摘要</span>
+                        <button class="btn-link" onclick="genSummary(${news.id})">重新生成</button>
+                    </div>
                     <div class="detail-summary markdown-body">${summary}</div>
                 </div>
                 <div class="detail-two-col">
@@ -914,10 +858,10 @@
                         <div class="detail-chip-row">${renderDetailTags(news.entities, '暂无实体')}</div>
                     </div>
                 </div>
-                ${topicSection}
-                ${sourceSection}
-                ${similarSection}
-            `;
+            ${topicSection}
+            ${similarSection}
+            ${sourceSection}
+        `;
         }
 
         async function loadSimilarNews(id) {
@@ -968,15 +912,14 @@
         });
 
 
-        // --- Logic Helper ---
         function isMobile() {
             return window.innerWidth < 768;
         }
 
         function getEffectiveDate() {
-            if (state.filter.dateOption === 'other') return ''; // Using startDate/endDate instead
+            if (state.filter.dateOption === 'other') return '';
             if (state.filter.dateOption === 'today') return new Date().toISOString().split('T')[0];
-            return state.filter.dateOption; // Returns '24h', '3d' etc.
+            return state.filter.dateOption;
         }
 
         function setTimeOption(val, options = {}) {
@@ -984,23 +927,20 @@
                 state.filter.dateTouched = true;
             }
             state.filter.dateOption = val;
-            
-            // Show/Hide date ranges based on selection
+
             const showRange = (val === 'other');
-            els.mobileDateRange.style.display = showRange ? 'flex' : 'none';
-            els.desktopDateRange.style.display = showRange ? 'flex' : 'none';
+            els.mobileDateRange.classList.toggle('is-hidden', !showRange);
+            els.desktopDateRange.classList.toggle('is-hidden', !showRange);
 
             if (val === 'today') {
                 const t = new Date().toISOString().split('T')[0];
                 state.filter.startDate = t;
                 state.filter.endDate = t;
             } else if (val !== 'other') {
-                // Clear custom dates if not using range
                 state.filter.startDate = '';
                 state.filter.endDate = '';
             }
-            
-            // Sync UI values
+
             els.mobileStartDate.value = state.filter.startDate;
             els.desktopStartDate.value = state.filter.startDate;
             els.mobileEndDate.value = state.filter.endDate;
@@ -1010,10 +950,8 @@
             if (!options.skipFetch && !isMobile() && val !== 'other') fetchNews(true);
         }
 
-        // renderFilterOptions is replaced by renderTimeOptions called in init
 
         function updateUIState() {
-            // Update Mobile Buttons
             const updateBtns = (container) => {
                 Array.from(container.children).forEach(btn => {
                     if (btn.tagName === 'BUTTON') {
@@ -1027,13 +965,11 @@
             };
             updateBtns(els.mobileTimeContainer);
 
-            // Update Desktop Select
             const isPredefined = TIME_OPTIONS.some(o => o.value === state.filter.dateOption);
             if (isPredefined) {
                  els.desktopTimeSelect.value = state.filter.dateOption;
             }
 
-            // Update Sort Buttons
             const s = state.filter.sortBy;
             const setSortActive = (btn, active) => {
                 if (active) btn.classList.add('active');
@@ -1043,12 +979,24 @@
             setSortActive(els.sortBtns.mobileDate, s === 'date');
             setSortActive(els.sortBtns.desktopHeat, s === 'heat');
             setSortActive(els.sortBtns.desktopDate, s === 'date');
-            
-            // Sync Date Input (if visible)
+
             els.mobileStartDate.value = state.filter.startDate;
             els.desktopStartDate.value = state.filter.startDate;
             els.mobileEndDate.value = state.filter.endDate;
             els.desktopEndDate.value = state.filter.endDate;
+        }
+
+        // 输入新闻时间字符串；输出首页列表使用的“月/日 时:分”格式。
+        function formatNewsCardTime(timeValue) {
+            if (!timeValue) return '-';
+            const date = new Date(timeValue);
+            if (Number.isNaN(date.getTime())) return '-';
+
+            const month = date.getMonth() + 1;
+            const day = date.getDate();
+            const hour = String(date.getHours()).padStart(2, '0');
+            const minute = String(date.getMinutes()).padStart(2, '0');
+            return `${month}/${day} ${hour}:${minute}`;
         }
 
         function renderNewsList() {
@@ -1057,9 +1005,12 @@
                 const card = document.createElement('div');
                 card.className = 'news-card';
                 card.style.setProperty('--card-index', String(index));
-                
-                const timeStr = new Date(item.time).toLocaleString('zh-CN', {month:'numeric', day:'numeric', hour:'numeric', minute:'numeric'});
+
+                const timeStr = formatNewsCardTime(item.time);
                 const hasRelated = item.sources && item.sources.length > 1;
+                const heatValue = Number(item.heat || 0);
+                const heatWidth = Math.max(8, Math.min(100, heatValue * 6));
+                const sourceCount = Array.isArray(item.sources) ? item.sources.length : 0;
                 const sentimentLabel = (item.sentiment_label || '未分析').trim();
                 let sentimentClass = 'sent-neu';
                 if (sentimentLabel === '正面') sentimentClass = 'sent-pos';
@@ -1070,24 +1021,24 @@
                     <div class="card-body">
                         <div class="content">
                             <div class="news-head">
-                                <a href="${item.url}" target="_blank" class="news-title">${item.title}</a>
-                            </div>
-                            
-                            <div class="meta-row">
-                                <div class="meta-left">
-                                    <span class="tag tag-category">${item.category || '其他'}</span>
-                                    <span class="tag tag-heat">🔥 ${item.heat.toFixed(1)}</span>
-                                    <span class="tag sentiment-pill ${sentimentClass}">
-                                        ${sentimentLabel}${item.sentiment_score !== undefined ? '：' + item.sentiment_score : ''}
-                                    </span>
-                                    ${regionText ? `<span class="tag tag-region">${escapeHtml(regionText)}</span>` : ''}
-                                </div>
-                                <div class="meta-right">
-                                    <span class="time-str">${timeStr}</span>
-                                    <span class="btn-link" role="button" tabindex="0" onclick="openNewsDetail(${item.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openNewsDetail(${item.id})}">详情</span>
-                                </div>
+                                <button class="news-title news-title-btn" type="button" onclick="openNewsDetail(${item.id})">${item.title}</button>
                             </div>
 
+                            <div class="meta-row news-meta-row">
+                                <div class="meta-left">
+                                    <span class="news-meta-item meta-category">${item.category || '其他'}</span>
+                                    <span class="news-meta-item meta-heat">热度 ${heatValue.toFixed(1)}</span>
+                                    <span class="news-meta-item meta-sentiment ${sentimentClass}">
+                                        ${sentimentLabel}${item.sentiment_score !== undefined ? '：' + item.sentiment_score : ''}
+                                    </span>
+                                    ${hasRelated ? `<span class="news-meta-item meta-source">来源 ${sourceCount} 个</span>` : ''}
+                                    ${regionText ? `<span class="news-meta-item meta-region">${escapeHtml(regionText)}</span>` : ''}
+                                </div>
+                                <div class="meta-right">
+                                    <span class="news-meta-item meta-time">${timeStr}</span>
+                                    <span class="news-meta-item meta-action" role="button" tabindex="0" onclick="openNewsDetail(${item.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openNewsDetail(${item.id})}">详情</span>
+                                </div>
+                            </div>
                             <div class="summary-box" id="summary-${item.id}">
                                 ${renderSummaryHtml(item.summary, item.id)}
                             </div>
@@ -1098,14 +1049,13 @@
             });
         }
 
-        // --- API Actions ---
         async function fetchNews(reset = false) {
             if (state.loading) return;
             if (reset) {
                 state.page = 1;
                 state.list = [];
                 state.hasMore = true;
-                els.newsList.innerHTML = ''; // Clear immediately
+                els.newsList.innerHTML = '';
             }
             if (!state.hasMore) return;
 
@@ -1128,8 +1078,7 @@
                     page_size: effectivePageSize,
                     date: getEffectiveDate()
                 });
-                
-                // Add start/end date if 'other' is selected
+
                 if (state.filter.dateOption === 'other') {
                     if (state.filter.startDate) params.append('start_date', state.filter.startDate);
                     if (state.filter.endDate) params.append('end_date', state.filter.endDate);
@@ -1137,10 +1086,10 @@
 
                 const res = await fetch(`/api/news?${params.toString()}`, { signal: controller.signal });
                 clearTimeout(timeoutId);
-                
+
                 if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
                 const data = await res.json();
-                
+
                 if (data.data.length < effectivePageSize) {
                     state.hasMore = false;
                     els.loading.textContent = '- 到底了 -';
@@ -1150,9 +1099,9 @@
 
                 if (reset) state.list = data.data;
                 else state.list = state.list.concat(data.data);
-                
+
                 state.page++;
-                renderNewsList(); 
+                renderNewsList();
             } catch (err) {
                 console.error(err);
                 if (err.name === 'AbortError') {
@@ -1169,16 +1118,16 @@
             const content = document.getElementById(`summary-content-${id}`);
             const btnExpand = document.getElementById(`btn-expand-${id}`);
             const btnCollapse = document.getElementById(`btn-collapse-${id}`);
-            
+
             if (content && btnExpand && btnCollapse) {
                 if (showFull) {
                     content.classList.remove('collapsed');
-                    btnExpand.style.display = 'none';
-                    btnCollapse.style.display = 'inline';
+                    btnExpand.classList.add('is-hidden');
+                    btnCollapse.classList.remove('is-hidden');
                 } else {
                     content.classList.add('collapsed');
-                    btnExpand.style.display = 'inline';
-                    btnCollapse.style.display = 'none';
+                    btnExpand.classList.remove('is-hidden');
+                    btnCollapse.classList.add('is-hidden');
 
                     // 收起时滚动回新闻卡片顶部
                     const card = content.closest('.news-card');
@@ -1186,7 +1135,7 @@
                         const headerOffset = 80; // 预留顶部导航栏高度
                         const elementPosition = card.getBoundingClientRect().top;
                         const offsetPosition = elementPosition + window.scrollY - headerOffset;
-                        
+
                         window.scrollTo({
                              top: offsetPosition,
                              behavior: "smooth"
@@ -1201,13 +1150,11 @@
                 return `
                     <div class="summary-placeholder">
                         <span>暂无摘要</span>
-                        <button class="btn-link" onclick="genSummary(${id})">✨ 生成摘要</button>
+                        <button class="btn-link" onclick="genSummary(${id})">生成摘要</button>
                     </div>
                 `;
             }
 
-            // 过滤掉无法访问的内部 OSS 图片链接 (xhyun.news.cn)
-            // 避免产生 net::ERR_NAME_NOT_RESOLVED 错误
             let cleanSummary = summary;
             try {
                 const filterTemp = document.createElement('div');
@@ -1217,7 +1164,7 @@
                 images.forEach(img => {
                     // 检查是否为已知的内部/不可达域名
                     if (img.src && (
-                        img.src.includes('ops.xhyun.news.cn') || 
+                        img.src.includes('ops.xhyun.news.cn') ||
                         img.src.includes('bucket-cb-yunqiao')
                     )) {
                         img.remove();
@@ -1230,56 +1177,51 @@
             } catch (e) {
                 console.warn('Summary cleanup failed', e);
             }
-            
-            // 使用纯文本长度判断是否需要折叠，避免截断 HTML
+
             const tempDiv = document.createElement('div');
             tempDiv.innerHTML = cleanSummary;
             const textLength = tempDiv.innerText.length;
             const threshold = 300;
-            
+
             if (textLength <= threshold) {
-                return cleanSummary + ` <button class="btn-regen" onclick="genSummary(${id})">🔄 重新生成</button>`;
+                return cleanSummary + ` <button class="btn-regen" onclick="genSummary(${id})">重新生成</button>`;
             } else {
                 return `
                     <div id="summary-content-${id}" class="summary-content collapsed">
                         ${cleanSummary}
                     </div>
                     <button id="btn-expand-${id}" class="btn-link" onclick="toggleSummary(${id}, true)">查看全部</button>
-                    <button id="btn-collapse-${id}" class="btn-link" style="display:none;" onclick="toggleSummary(${id}, false)">收起</button>
-                    <button class="btn-regen" onclick="genSummary(${id})">🔄 重新生成</button>
+                    <button id="btn-collapse-${id}" class="btn-link is-hidden" onclick="toggleSummary(${id}, false)">收起</button>
+                    <button class="btn-regen" onclick="genSummary(${id})">重新生成</button>
                 `;
             }
         }
 
         window.genSummary = async (id) => {
-            if (state.isGenerating) return; // Prevent multiple concurrent
-            
+            if (state.isGenerating) return;
+
             const box = document.getElementById(`summary-${id}`);
             if (!box) return;
-            
+
             state.isGenerating = true;
             updateRegenButtonsState();
 
             const originalContent = box.innerHTML;
-            // Determine if it's regeneration or new generation
             const isRegen = box.querySelector('.btn-regen') !== null;
-            
+
             if (isRegen) {
-                // Find the regen button and change text
                 const btn = box.querySelector('.btn-regen');
-                if (btn) btn.innerText = "⏳ 生成中...";
+                if (btn) btn.innerText = "生成中...";
             } else {
-                box.innerHTML = '<span style="color:var(--primary-color)">正在生成摘要...</span>';
+                box.innerHTML = '<span class="summary-loading">正在生成摘要...</span>';
             }
-            
+
             try {
                 const res = await fetch(`/api/generate_summary/${id}`, { method: 'POST' });
                 const data = await res.json();
                 if (data.summary) {
-                    // Update content and append regen button
                     box.innerHTML = renderSummaryHtml(data.summary, id);
-                    
-                    // Update local state
+
                     const item = state.list.find(i => i.id === id);
                     if (item) item.summary = data.summary;
                 } else {
@@ -1295,14 +1237,11 @@
         };
 
         function updateRegenButtonsState() {
-            // Disable/Enable all regen buttons and create summary buttons
             const regenBtns = document.querySelectorAll('.btn-regen');
             const createBtns = document.querySelectorAll('.summary-placeholder .btn-link');
-            
+
             const setDisabled = (btn) => {
                 btn.disabled = state.isGenerating;
-                // 视觉反馈由 CSS :disabled 选择器处理 btn-regen
-                // 对于 btn-link（新建），这里通过内联样式提供禁用状态
                 if (state.isGenerating) btn.style.opacity = '0.5';
                 else btn.style.opacity = '1';
                 btn.style.cursor = state.isGenerating ? 'not-allowed' : 'pointer';
@@ -1312,7 +1251,6 @@
             createBtns.forEach(setDisabled);
         }
 
-        // Start
         init();
     </script>
 {% endblock %}
