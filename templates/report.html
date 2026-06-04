@@ -18,17 +18,20 @@
         <div class="report-hero-copy">
             <div class="report-kicker">AI Report</div>
             <div class="report-lead">输入关键词或直接生成全网报告，快速查看趋势、情感、来源分布和热点新闻列表。</div>
-        </div>
-        <div class="search-bar-wrapper">
-            <div class="input-group">
-                <span class="input-icon" aria-hidden="true"></span>
-                <input type="text" id="keyword" class="input-text-search" placeholder="输入关键词 (例如: '人工智能', '新能源')">
+
+            <!-- 最近报告 -->
+            <div class="recent-reports" id="recentReportsList">
             </div>
-            <button class="btn-search" onclick="openSettingsModal()">生成深度报告</button>
         </div>
 
-        <!-- 最近报告 -->
-        <div class="recent-reports" id="recentReportsList">
+        <div class="report-search-panel">
+            <div class="search-bar-wrapper">
+                <div class="input-group">
+                    <input type="text" id="keyword" class="input-text-search" placeholder="输入关键词，例如：人工智能、新能源">
+                </div>
+                <button class="btn-search" onclick="openSettingsModal()">生成深度报告</button>
+            </div>
+            <div class="report-search-hint">留空可生成全网综合报告，也可以输入指定主题进行深度分析。</div>
         </div>
     </div>
 
