@@ -108,22 +108,19 @@
         </div>
 
         <div class="chart-row two-cols">
-            <div class="chart-card">
+            <div class="chart-card source-chart-card">
                 <div class="chart-header">
                     <span class="chart-title">媒体来源分布</span>
                     <select class="chart-filter" id="filter-source" onchange="updateChart('source', this.value)"></select>
                 </div>
                 <div id="chartSource" class="chart-container"></div>
             </div>
-            <div class="chart-card">
+            <div class="chart-card sentiment-chart-card">
                 <div class="chart-header">
                     <span class="chart-title">情感倾向占比</span>
                     <select class="chart-filter" id="filter-sentiment" onchange="updateChart('sentiment', this.value)"></select>
                 </div>
                 <div id="chartSentiment" class="chart-container"></div>
-                <div class="sentiment-keywords-note">
-                    主要负面词: <span id="negKeywords"></span>
-                </div>
             </div>
         </div>
     </div>
@@ -318,16 +315,17 @@
     let chartCorrelation = null, chartFreqTrend = null, chartSentimentTrend = null;
     let chartTermTrend = null, chartTermSentiment = null, chartTermCooccurrence = null;
     let reportClickableTerms = [];
+    let reportNegativeTerms = [];
     let activeTermAnalysis = { term: "", range: "year" };
     let termAnalysisAbortController = null;
     let termAnalysisRequestId = 0;
     const termAnalysisCache = new Map();
     const TERM_ANALYSIS_CACHE_LIMIT = 12;
-    const TS_CHART_COLORS = ['#10b981', '#2563eb', '#f59e0b', '#ef4444', '#14b8a6', '#64748b'];
-    const TS_HEAT_COLOR = '#ef4444';
-    const TS_COUNT_COLOR = '#2563eb';
-    const TS_AXIS_COLOR = 'rgba(71, 85, 105, 0.72)';
-    const TS_GRID_COLOR = 'rgba(148, 163, 184, 0.24)';
+    const TS_CHART_COLORS = ['#10b981', '#60a5fa', '#f59e0b', '#f87171', '#8b5cf6', '#14b8a6', '#94a3b8'];
+    const TS_HEAT_COLOR = '#f59e0b';
+    const TS_COUNT_COLOR = '#60a5fa';
+    const TS_AXIS_COLOR = 'rgba(71, 85, 105, 0.76)';
+    const TS_GRID_COLOR = 'rgba(148, 163, 184, 0.18)';
 
     function escapeHtml(text) {
         return String(text || "")
@@ -982,8 +980,10 @@
             else if (type === 'sentiment') {
                 const sentimentDist = Array.isArray(data) ? data : (data.sentiment_dist || []);
                 const negKeywords = Array.isArray(data) ? [] : (data.neg_keywords || []);
+                reportNegativeTerms = (negKeywords || []).map(t => String(t).trim()).filter(Boolean);
                 renderSentimentChart(sentimentDist);
-                document.getElementById('negKeywords').innerText = (negKeywords || []).join(', ');
+                const negEl = document.getElementById('negKeywords');
+                if (negEl) negEl.innerText = reportNegativeTerms.join(', ');
             }
             else if (type === 'list') renderNewsList(data);
 
@@ -1046,11 +1046,12 @@
             }
 
         const charts = data.charts || {};
+        reportNegativeTerms = (charts.neg_keywords || []).map(t => String(t).trim()).filter(Boolean);
+        setTxt('negKeywords', reportNegativeTerms.join(', '));
         renderTrendChart(charts.trend);
         renderWordCloud(charts.word_cloud);
         renderSourceChart(charts.source);
         renderSentimentChart(charts.sentiment_dist);
-        setTxt('negKeywords', (charts.neg_keywords || []).join(', '));
 
         if (mode === 'keyword') {
             renderCorrelationChart(charts.correlation);
@@ -1244,13 +1245,14 @@
             trendData.category_series.forEach((s, idx) => {
                 series.push({
                     ...s,
-                    itemStyle: { ...(s.itemStyle || {}), color: TS_CHART_COLORS[idx % TS_CHART_COLORS.length] },
+                    itemStyle: { ...(s.itemStyle || {}), color: TS_CHART_COLORS[idx % TS_CHART_COLORS.length], borderRadius: 0, opacity: 0.9 },
+                    barMaxWidth: 28,
                     emphasis: { focus: 'series' }
                 });
                 legendData.push(s.name);
             });
         } else if (trendData.counts) {
-             series.push({ name: '文章数', type: 'bar', data: trendData.counts, itemStyle: { color: TS_COUNT_COLOR, borderRadius: [5,5,0,0] } });
+             series.push({ name: '文章数', type: 'bar', data: trendData.counts, barMaxWidth: 28, itemStyle: { color: TS_COUNT_COLOR, borderRadius: [4,4,0,0], opacity: 0.9 } });
              legendData.push('文章数');
         } else {
              chartTrend.clear();
@@ -1261,7 +1263,7 @@
             series.push({
                 name: '平均热度', type: 'line', yAxisIndex: 1,
                 data: trendData.avg_heats, itemStyle: { color: TS_HEAT_COLOR },
-                smooth: true, lineStyle: { width: 3, color: TS_HEAT_COLOR }, areaStyle: { opacity: 0.08, color: TS_HEAT_COLOR }, showSymbol: false
+                smooth: true, lineStyle: { width: 2.5, color: TS_HEAT_COLOR }, showSymbol: false
             });
             legendData.push('平均热度');
         }
@@ -1269,8 +1271,11 @@
         chartTrend.setOption({
             tooltip: {
                 trigger: 'axis',
-                backgroundColor: 'rgba(255,255,255,0.96)',
-                borderColor: 'rgba(15,23,42,0.12)',
+                backgroundColor: 'rgba(255,255,255,0.98)',
+                borderColor: 'rgba(15,23,42,0.1)',
+                borderWidth: 1,
+                padding: [10, 12],
+                extraCssText: 'box-shadow:0 12px 30px rgba(15,23,42,0.12);border-radius:12px;',
                 textStyle: { color: '#334155' },
                 formatter: function (params) {
                     let res = params[0].name + '<br/>';
@@ -1287,11 +1292,16 @@
             legend: {
                 data: legendData,
                 bottom: 0,
-                type: isMobile ? 'scroll' : 'plain',
+                type: 'scroll',
+                icon: 'roundRect',
+                itemWidth: 10,
+                itemHeight: 7,
+                textStyle: { color: TS_AXIS_COLOR, fontWeight: 600, fontSize: 11 },
                 padding: isMobile ? [5, 10] : 5
             },
             grid: {
-                bottom: isMobile ? '15%' : '10%',
+                top: 18,
+                bottom: isMobile ? '18%' : '14%',
                 left: isMobile ? '2%' : '3%',
                 right: isMobile ? '2%' : '3%',
                 containLabel: true
@@ -1300,6 +1310,7 @@
                 type: 'category',
                 data: trendData.dates || [],
                 axisLine: { lineStyle: { color: '#e2e8f0' } },
+                axisTick: { show: false },
                 axisLabel: {
                     color: '#64748b',
                     rotate: isMobile ? 45 : 0,
@@ -1307,12 +1318,25 @@
                 }
             },
             yAxis: [
-                { type: 'value', name: isMobile ? '' : '文章数', axisLabel: { color: TS_AXIS_COLOR }, splitLine: { lineStyle: { type: 'dashed', color: TS_GRID_COLOR } } },
-                { type: 'value', name: isMobile ? '' : '热度', axisLabel: { color: TS_AXIS_COLOR }, splitLine: { show: false } }
+                { type: 'value', name: '', axisLabel: { color: TS_AXIS_COLOR }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { lineStyle: { type: 'dashed', color: TS_GRID_COLOR } } },
+                { type: 'value', name: '', axisLabel: { color: TS_AXIS_COLOR }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } }
             ],
             color: TS_CHART_COLORS,
             series: series
         });
+    }
+
+    function getWordCloudTone(word) {
+        const name = String(word?.name || '').trim();
+        const rawType = String(word?.type || word?.category || word?.tag_type || word?.sentiment || '').toLowerCase();
+        const positiveHints = ['正面', '积极', '利好', '上涨', '增长', '创新', '高质量发展', '成功', '突破', '优秀', '复苏'];
+        const negativeHints = ['负面', '消极', '利空', '下跌', '受伤', '死亡', '事故', '关税', '火灾', '诈骗', '停火', '冲突', '风险', '危机'];
+
+        if (rawType.includes('negative') || rawType.includes('负')) return 'negative';
+        if (rawType.includes('positive') || rawType.includes('正')) return 'positive';
+        if (reportNegativeTerms.includes(name) || negativeHints.some(t => name.includes(t))) return 'negative';
+        if (positiveHints.some(t => name.includes(t))) return 'positive';
+        return 'entity';
     }
 
     function renderWordCloud(words) {
@@ -1334,10 +1358,10 @@
 
         // 根据屏幕宽度动态调整热词尺寸。
         const isMobile = isMobileScreen();
-        const minSize = isMobile ? 0.75 : 0.85;
-        const maxSize = isMobile ? 1.8 : 2.5;
-        // 词云容器支持滚动，因此桌面端展示更多热词。
-        const maxWords = isMobile ? 100 : 200;
+        const minSize = isMobile ? 0.76 : 0.82;
+        const maxSize = isMobile ? 1.35 : 1.72;
+        // 控制热词数量，保证视觉密度更专业。
+        const maxWords = isMobile ? 45 : 72;
 
         // 按权重排序后截取头部热词。
         const displayWords = words.sort((a,b) => b.value - a.value).slice(0, maxWords);
@@ -1357,7 +1381,7 @@
 
         displayWords.forEach((w, index) => {
             const span = document.createElement('span');
-            span.className = 'cloud-tag report-clickable-term';
+            span.className = `cloud-tag report-clickable-term tone-${getWordCloudTone(w)}`;
             span.textContent = w.name;
             span.title = '点击查看分析';
             span.dataset.term = w.name;
@@ -1369,7 +1393,6 @@
                 size = minSize + ((w.value - minVal) / (maxVal - minVal)) * (maxSize - minSize);
             }
             span.style.fontSize = size + 'rem';
-            span.style.backgroundColor = colors[index % colors.length];
             container.appendChild(span);
         });
     }
@@ -1381,21 +1404,34 @@
 
         chartSource.setOption({
             color: TS_CHART_COLORS,
-            tooltip: { trigger: 'item' },
+            tooltip: {
+                trigger: 'item',
+                backgroundColor: 'rgba(255,255,255,0.98)',
+                borderColor: 'rgba(15,23,42,0.1)',
+                padding: [10, 12],
+                extraCssText: 'box-shadow:0 12px 30px rgba(15,23,42,0.12);border-radius:12px;'
+            },
             legend: {
+                show: isMobile,
                 type: 'scroll',
-                orient: isMobile ? 'horizontal' : 'vertical',
-                left: isMobile ? 'center' : 'left',
-                bottom: isMobile ? 0 : 'auto',
-                top: isMobile ? 'auto' : 'middle'
+                orient: 'horizontal',
+                left: 'center',
+                bottom: 0,
+                icon: 'circle',
+                itemWidth: 8,
+                itemHeight: 8,
+                textStyle: { color: TS_AXIS_COLOR, fontWeight: 600, fontSize: 11 }
             },
             series: [{
                 name: '来源', type: 'pie',
-                radius: isMobile ? ['35%', '60%'] : ['40%', '70%'],
-                center: isMobile ? ['50%', '45%'] : ['60%', '50%'],
+                radius: isMobile ? ['44%', '68%'] : ['40%', '62%'],
+                center: isMobile ? ['50%', '42%'] : ['50%', '48%'],
+                minAngle: 8,
                 data: sourceData,
-                itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
-                label: { show: !isMobile }
+                itemStyle: { borderRadius: 8, borderColor: '#fff', borderWidth: 4 },
+                label: { show: !isMobile, color: '#334155', fontSize: 11, fontWeight: 700, formatter: '{b}\n{d}%' },
+                labelLine: { show: !isMobile, smooth: true, length: 18, length2: 12, lineStyle: { color: 'rgba(100, 116, 139, 0.5)' } },
+                emphasis: { scale: true, scaleSize: 4 }
             }]
         });
     }
@@ -1407,15 +1443,29 @@
 
         chartSentiment.setOption({
             color: ['#10b981', '#f59e0b', '#ef4444'],
-            tooltip: { trigger: 'item' },
-            legend: { bottom: '0%' },
+            tooltip: {
+                trigger: 'item',
+                backgroundColor: 'rgba(255,255,255,0.98)',
+                borderColor: 'rgba(15,23,42,0.1)',
+                padding: [10, 12],
+                extraCssText: 'box-shadow:0 12px 30px rgba(15,23,42,0.12);border-radius:12px;'
+            },
+            legend: {
+                bottom: '0%',
+                icon: 'circle',
+                itemWidth: 8,
+                itemHeight: 8,
+                textStyle: { color: TS_AXIS_COLOR, fontWeight: 600, fontSize: 11 }
+            },
             series: [{
                 name: '情感', type: 'pie',
-                radius: isMobile ? ['35%', '60%'] : ['40%', '70%'],
-                center: ['50%', '45%'],
+                radius: isMobile ? ['44%', '68%'] : ['50%', '74%'],
+                center: ['50%', '42%'],
+                minAngle: 8,
                 avoidLabelOverlap: false,
+                itemStyle: { borderRadius: 8, borderColor: '#fff', borderWidth: 4 },
                 label: { show: false, position: 'center' },
-                emphasis: { label: { show: true, fontSize: isMobile ? '14' : '18', fontWeight: 'bold' } },
+                emphasis: { label: { show: true, fontSize: isMobile ? '14' : '18', fontWeight: 'bold', color: '#0f172a' }, scale: true, scaleSize: 4 },
                 data: sentimentData
             }]
         });
