@@ -1123,6 +1123,8 @@ body.page-report .table-card { background: var(--bg-card); padding: 0; border-ra
 body.page-report .table-header-wrapper { border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; }
 
 body.page-report .pagination { display: flex; justify-content: center; align-items: center; gap: 8px; margin-top: 24px; padding-bottom: 24px; }
+body.page-report .news-load-status { color: var(--text-secondary); font-size: 0.84rem; font-weight: 700; padding: 8px 14px; border: 1px solid var(--border-color); border-radius: 999px; background: color-mix(in srgb, var(--bg-soft) 72%, transparent);
+}
 body.page-report .page-btn { background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-secondary); padding: 6px 12px; border-radius: 12px; cursor: pointer; font-size: 0.9rem; transition: border 0.2s, background 0.2s, color 0.2s; min-width: 32px; display: flex; justify-content: center; align-items: center; }
 body.page-report .page-btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--border-color) 60%, var(--primary-color)); color: var(--primary-color); background: var(--primary-light); }
 body.page-report .page-btn.active { background: var(--primary-color); color: #fff; border-color: var(--primary-color); }

@@ -25,6 +25,7 @@ from app.models.news import News
 from app.services.report_service import report_service
 from app.services.task_manager import task_manager
 from app.utils.news_query import build_news_query_filters
+from app.utils.news_ranking import sort_news_by_composite_score
 from app.utils.tools import normalize_regions_to_countries
 
 router = APIRouter(prefix="/api/report", tags=["report"])
@@ -230,6 +231,44 @@ async def get_report_analysis(
     )
 
 
+@router.get("/chart-data")
+async def get_report_chart_data(
+    type: str = Query(..., min_length=1, max_length=40),
+    q: Optional[str] = "",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    category: Optional[str] = None,
+    region: Optional[str] = None,
+    source: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """
+    输入:
+    - `type`: 图表类型
+    - `q`/`start_date`/`end_date`/`category`/`region`: 报告筛选条件
+    - `limit`/`offset`: 列表类图表分页参数
+
+    输出:
+    - 指定图表或列表数据
+
+    作用:
+    - 支持报告页单个图表刷新，以及热门舆情列表继续加载。
+    """
+
+    return await report_service.get_chart_data(
+        type=type,
+        q=q or "",
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        region=region,
+        source=source,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/term-analysis")
 async def get_report_term_analysis(
     term: str = Query(..., min_length=1, max_length=80),
@@ -301,7 +340,7 @@ async def get_report_term_analysis(
     for label, count in (await db.execute(sentiment_stmt)).all():
         sentiment_counts[_label_sentiment(label)] += int(count)
 
-    sample_stmt = build_news_query_filters(
+    sample_base_stmt = build_news_query_filters(
         select(
             News.id,
             News.title,
@@ -324,16 +363,25 @@ async def get_report_term_analysis(
         category=category,
         region=region,
         source=source,
-    ).where(term_condition).order_by(desc(News.heat_score), desc(News.publish_date)).limit(2000)
-    sample_rows = [dict(row) for row in (await db.execute(sample_stmt)).mappings().all()]
-    sample_rows.sort(
-        key=lambda item: (
-            _score_term_news(item, query),
-            float(item.get("heat_score") or 0.0),
-            item.get("publish_date") or datetime.min,
-        ),
-        reverse=True,
-    )
+    ).where(term_condition)
+    heat_rows = [
+        dict(row)
+        for row in (
+            await db.execute(sample_base_stmt.order_by(desc(News.heat_score), desc(News.publish_date)).limit(2000))
+        ).mappings().all()
+    ]
+    recent_rows = [
+        dict(row)
+        for row in (
+            await db.execute(sample_base_stmt.order_by(desc(News.publish_date), desc(News.heat_score)).limit(2000))
+        ).mappings().all()
+    ]
+    sample_map: dict[int, dict[str, Any]] = {}
+    for item in heat_rows + recent_rows:
+        news_id = int(item.get("id") or 0)
+        if news_id:
+            sample_map[news_id] = item
+    sample_rows = sort_news_by_composite_score(sample_map.values())
 
     related_news = [_serialize_term_news_row(item) for item in sample_rows[:10]]
     keyword_counter: Counter[str] = Counter()

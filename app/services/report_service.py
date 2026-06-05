@@ -14,7 +14,7 @@ from time import monotonic
 from typing import Any, Dict, List, Optional, Tuple, AsyncIterator
 
 import numpy as np
-from sqlalchemy import and_, case, cast, delete, desc, func, literal, or_, select, true
+from sqlalchemy import and_, case, cast, delete, desc, extract, func, literal, or_, select, true
 from sqlalchemy.orm import defer
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -25,6 +25,7 @@ from app.core.logger import logger
 from app.core.prompts import prompt_manager
 from app.models.news import News
 from app.models.report import ReportCache
+from app.utils.news_ranking import get_news_field, normalize_datetime, sort_news_by_composite_score
 
 settings = get_settings()
 from app.services.ai_service import ai_service
@@ -68,6 +69,160 @@ class ReportService:
         if len(self._chart_cache) > 256:
             sorted_items = sorted(self._chart_cache.items(), key=lambda x: x[1][0])
             self._chart_cache = dict(sorted_items[-128:])
+
+    def _serialize_report_news_item(self, item: Any) -> Dict[str, Any]:
+        """
+        输入:
+        - `item`: News ORM 对象或包含新闻字段的字典/映射
+
+        输出:
+        - 报告页热门新闻卡片使用的字典
+
+        作用:
+        - 统一报告生成和图表列表的新闻字段口径。
+        """
+
+        publish_date = get_news_field(item, "publish_date")
+        return {
+            "id": int(get_news_field(item, "id", 0) or 0),
+            "title": get_news_field(item, "title"),
+            "url": get_news_field(item, "url"),
+            "source": get_news_field(item, "source"),
+            "heat": get_news_field(item, "heat_score"),
+            "time": publish_date.isoformat() if publish_date else None,
+            "summary": get_news_field(item, "summary"),
+            "sources": get_news_field(item, "sources"),
+            "category": get_news_field(item, "category"),
+            "region": get_news_field(item, "region"),
+            "sentiment_label": get_news_field(item, "sentiment_label"),
+            "sentiment_score": get_news_field(item, "sentiment_score"),
+        }
+
+    async def _get_ranked_report_news(
+        self,
+        filters: List[Any],
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        输入:
+        - `filters`: SQLAlchemy 查询过滤条件
+        - `limit`: 返回数量
+        - `offset`: 跳过数量
+
+        输出:
+        - 按“热度 40% + 时间 60%”排序后的新闻列表
+
+        作用:
+        - 在数据库侧按当前筛选集归一化热度和时间后分页排序，避免新新闻因热度偏低被排到末尾。
+        """
+
+        safe_limit = min(max(int(limit or 50), 1), 200)
+        safe_offset = max(int(offset or 0), 0)
+
+        def base_select() -> Any:
+            """
+            输入:
+            - 无
+
+            输出:
+            - 包含报告列表所需字段的 SQLAlchemy 查询
+
+            作用:
+            - 复用字段选择，保持主查询和兼容兜底查询一致。
+            """
+
+            stmt = (
+                select(
+                    News.id,
+                    News.title,
+                    News.url,
+                    News.source,
+                    News.heat_score,
+                    News.publish_date,
+                    News.summary,
+                    News.sources,
+                    News.category,
+                    News.region,
+                    News.sentiment_label,
+                    News.sentiment_score,
+                )
+                .select_from(News)
+            )
+            if filters:
+                stmt = stmt.where(and_(*filters))
+            return stmt
+
+        async with AsyncSessionLocal() as db:
+            stats_stmt = select(
+                func.min(News.heat_score),
+                func.max(News.heat_score),
+                func.min(News.publish_date),
+                func.max(News.publish_date),
+            )
+            if filters:
+                stats_stmt = stats_stmt.where(and_(*filters))
+            min_heat, max_heat, min_date, max_date = (await db.execute(stats_stmt)).one()
+
+            min_heat_value = float(min_heat or 0.0)
+            max_heat_value = float(max_heat or 0.0)
+            heat_expr = literal(1.0)
+            if max_heat_value > min_heat_value:
+                heat_expr = (
+                    (func.coalesce(News.heat_score, 0.0) - min_heat_value)
+                    / (max_heat_value - min_heat_value)
+                )
+
+            min_dt = normalize_datetime(min_date)
+            max_dt = normalize_datetime(max_date)
+            min_ts = min_dt.timestamp() if min_dt else 0.0
+            max_ts = max_dt.timestamp() if max_dt else 0.0
+            time_expr = literal(1.0)
+            if max_ts > min_ts:
+                epoch_expr = extract("epoch", News.publish_date)
+                time_expr = (func.coalesce(epoch_expr, min_ts) - min_ts) / (max_ts - min_ts)
+
+            composite_expr = (heat_expr * 0.4 + time_expr * 0.6).label("composite_score")
+            stmt = (
+                select(
+                    News.id,
+                    News.title,
+                    News.url,
+                    News.source,
+                    News.heat_score,
+                    News.publish_date,
+                    News.summary,
+                    News.sources,
+                    News.category,
+                    News.region,
+                    News.sentiment_label,
+                    News.sentiment_score,
+                )
+                .select_from(News)
+                .order_by(desc(composite_expr), desc(News.publish_date), desc(News.heat_score))
+                .offset(safe_offset)
+                .limit(safe_limit)
+            )
+            if filters:
+                stmt = stmt.where(and_(*filters))
+            try:
+                rows = [dict(row) for row in (await db.execute(stmt)).mappings().all()]
+            except Exception as exc:
+                logger.warning(f"综合分 SQL 排序失败，改用 Python 兜底排序: {exc}")
+                fallback_limit = min(max((safe_limit + safe_offset) * 4, 200), 3000)
+                heat_stmt = base_select().order_by(desc(News.heat_score), desc(News.publish_date)).limit(fallback_limit)
+                time_stmt = base_select().order_by(desc(News.publish_date), desc(News.heat_score)).limit(fallback_limit)
+                heat_rows = [dict(row) for row in (await db.execute(heat_stmt)).mappings().all()]
+                time_rows = [dict(row) for row in (await db.execute(time_stmt)).mappings().all()]
+                merged: Dict[int, Dict[str, Any]] = {}
+                for item in heat_rows + time_rows:
+                    news_id = int(item.get("id") or 0)
+                    if news_id:
+                        merged[news_id] = item
+                rows = sort_news_by_composite_score(merged.values())[safe_offset:safe_offset + safe_limit]
+
+        return [self._serialize_report_news_item(item) for item in rows]
 
     def _build_news_filters(
         self,
@@ -415,7 +570,9 @@ class ReportService:
         end_date: Optional[str] = None,
         category: Optional[str] = None,
         region: Optional[str] = None,
+        source: Optional[str] = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         if not await check_db_connection(verbose=False):
             return []
@@ -427,70 +584,15 @@ class ReportService:
             end_date=end_date,
             category=category,
             region=region,
-            source=None,
+            source=source,
         )
 
-        async with AsyncSessionLocal() as db:
-            stmt = (
-                select(
-                    News.id,
-                    News.title,
-                    News.url,
-                    News.source,
-                    News.heat_score,
-                    News.publish_date,
-                    News.summary,
-                    News.sources,
-                    News.category,
-                    News.region,
-                    News.sentiment_label,
-                    News.sentiment_score,
-                )
-                .select_from(News)
-                .order_by(desc(News.heat_score), desc(News.publish_date))
-                .limit(limit)
-            )
-            if filters:
-                stmt = stmt.where(and_(*filters))
-            result = await db.execute(stmt)
-            rows = result.all()
-
-        data = []
-        for (
-            nid,
-            title,
-            url,
-            source,
-            heat_score,
-            publish_date,
-            summary,
-            sources,
-            cat,
-            reg,
-            sentiment_label,
-            sentiment_score,
-        ) in rows:
-            data.append(
-                {
-                    "id": int(nid),
-                    "title": title,
-                    "url": url,
-                    "source": source,
-                    "heat": heat_score,
-                    "time": publish_date.isoformat() if publish_date else None,
-                    "summary": summary,
-                    "sources": sources,
-                    "category": cat,
-                    "region": reg,
-                    "sentiment_label": sentiment_label,
-                    "sentiment_score": sentiment_score,
-                }
-            )
+        data = await self._get_ranked_report_news(filters, limit=limit, offset=offset)
 
         elapsed = monotonic() - t0
         if elapsed > 0.5:
             logger.info(
-                f"chart-data list 慢查询: {elapsed:.2f}s | items={len(data)} | category={category or ''} | range={start_date or ''}~{end_date or ''}"
+                f"chart-data list 慢查询: {elapsed:.2f}s | items={len(data)} | offset={offset} | category={category or ''} | range={start_date or ''}~{end_date or ''}"
             )
         return data
 
@@ -1621,38 +1723,11 @@ class ReportService:
             }
 
             # -------------------------------------------------------------------------
-            # 7. Top News (Limit 10)
+            # 7. Top News (综合分排序，默认缓存至少 Top 50)
             # -------------------------------------------------------------------------
-            top_stmt = (
-                select(News)
-                .options(defer(News.content), defer(News.embedding))
-                .order_by(desc(News.heat_score))
-                .limit(10)
-            )
-            if filters:
-                top_stmt = top_stmt.where(and_(*filters))
-            
-            top_res = await db.execute(top_stmt)
-            top_news_list = top_res.scalars().all()
-            
-            top_news = []
-            for n in top_news_list:
-                top_news.append(
-                    {
-                        "id": n.id,
-                        "title": n.title,
-                        "url": n.url,
-                        "source": n.source,
-                        "heat": n.heat_score,
-                        "time": n.publish_date.isoformat() if n.publish_date else "",
-                        "summary": n.summary,
-                        "sources": n.sources,
-                        "category": n.category,
-                        "region": n.region,
-                        "sentiment_label": n.sentiment_label,
-                        "sentiment_score": n.sentiment_score,
-                    }
-                )
+            requested_limit = int(limit or 0)
+            top_news_limit = min(max(requested_limit if requested_limit > 0 else 50, 50), 200)
+            top_news = await self._get_ranked_report_news(filters, limit=top_news_limit, offset=0)
 
 
 
@@ -1793,14 +1868,17 @@ class ReportService:
         type: str,
         category: Optional[str] = None,
         region: Optional[str] = None,
+        source: Optional[str] = None,
         q: str = "",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> Any:
         """
         输入:
         - `type`: 图表类型
-        - `category`/`region`: 过滤条件
+        - `category`/`region`/`source`: 过滤条件
         - `q`: 关键词
         - `start_date`/`end_date`: 起止日期
 
@@ -1846,7 +1924,7 @@ class ReportService:
             return data
 
         if type == "list":
-            cache_key = ("list", q or "", start_date or "", end_date or "", category or "", region or "")
+            cache_key = ("list", q or "", start_date or "", end_date or "", category or "", region or "", source or "", limit, offset)
             cached = self._chart_cache.get(cache_key)
             if cached and (monotonic() - cached[0]) < 15:
                 return cached[1]
@@ -1857,7 +1935,9 @@ class ReportService:
                 end_date=end_date,
                 category=category,
                 region=region,
-                limit=50,
+                source=source,
+                limit=limit,
+                offset=offset,
             )
             self._chart_cache[cache_key] = (monotonic(), data)
             self._cleanup_chart_cache()

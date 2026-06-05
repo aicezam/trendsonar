@@ -158,7 +158,7 @@
     <!-- 热门新闻列表 -->
     <div class="table-card is-hidden" id="tableSection">
         <div class="table-header-wrapper">
-            <span class="chart-title chart-title-medium">热门舆情列表 (Top 50)</span>
+            <span class="chart-title chart-title-medium">热门舆情列表</span>
             <select class="chart-filter" id="filter-list" onchange="updateChart('list', this.value)"></select>
         </div>
         <div id="hotNewsList" class="news-list"></div>
@@ -317,6 +317,17 @@
     let reportClickableTerms = [];
     let reportNegativeTerms = [];
     let reportPositiveTerms = [];
+    const HOT_NEWS_BATCH_SIZE = 10;
+    const HOT_NEWS_FETCH_SIZE = 50;
+    let hotNewsState = {
+        items: [],
+        rendered: 0,
+        offset: 0,
+        hasMore: false,
+        loading: false,
+        category: 'all',
+        observer: null
+    };
     let activeTermAnalysis = { term: "", range: "year" };
     let termAnalysisAbortController = null;
     let termAnalysisRequestId = 0;
@@ -340,6 +351,11 @@
             .replace(/>/g, "&gt;")
             .replace(/"/g, "&quot;")
             .replace(/'/g, "&#39;");
+    }
+
+    function normalFilterValue(value) {
+        const text = String(value || '').trim();
+        return text && text !== 'all' ? text : '';
     }
 
     function escapeRegExp(text) {
@@ -1065,15 +1081,22 @@
         const keyword = document.getElementById('keyword').value.trim();
         const start = document.getElementById('startDate').value;
         const end = document.getElementById('endDate').value;
+        const p = window.currentReportParams || {};
 
         try {
              const params = new URLSearchParams({
                 type: type,
-                q: keyword,
-                start_date: start,
-                end_date: end,
-                category: category
+                q: p.keyword || keyword,
+                start_date: p.start_date || start || '',
+                end_date: p.end_date || end || '',
+                category: normalFilterValue(category),
+                region: normalFilterValue(p.region) || getCheckedValues('reg-cb', 'reg-all') || '',
+                source: normalFilterValue(p.source) || getCheckedValues('src-cb', 'src-all') || ''
             });
+            if (type === 'list') {
+                params.set('limit', String(HOT_NEWS_FETCH_SIZE));
+                params.set('offset', '0');
+            }
             const res = await fetch(`/api/report/chart-data?${params.toString()}`);
             const data = await res.json();
 
@@ -1089,7 +1112,7 @@
                 const negEl = document.getElementById('negKeywords');
                 if (negEl) negEl.innerText = reportNegativeTerms.join(', ');
             }
-            else if (type === 'list') renderNewsList(data);
+            else if (type === 'list') renderNewsList(data, { category, reset: true, hasMore: Array.isArray(data) && data.length >= HOT_NEWS_FETCH_SIZE });
 
         } catch (e) {
             console.error("Update chart failed", e);
@@ -1164,7 +1187,8 @@
             renderSentimentTrendChart(charts.sentiment_trend);
         }
 
-        renderNewsList(data.top_news);
+        const initialTopNews = Array.isArray(data.top_news) ? data.top_news : [];
+        renderNewsList(initialTopNews, { category: 'all', hasMore: initialTopNews.length >= HOT_NEWS_FETCH_SIZE });
         updateInfoCard(data, mode);
     }
 
@@ -2368,7 +2392,152 @@
         }
     };
 
-    function renderNewsList(newsList) {
+    function renderNewsCard(news, index) {
+        const card = document.createElement('div');
+        card.className = 'news-card';
+        card.style.setProperty('--card-index', String(index));
+
+        // 判断情感标签样式。
+        const sentiment = (news.sentiment_label || news.sentiment || '中立').trim();
+        let sentimentClass = 'sent-neu';
+
+        if (sentiment === '正面') sentimentClass = 'sent-pos';
+        else if (sentiment === '负面') sentimentClass = 'sent-neg';
+
+        const heatValue = Number(news.heat || 0);
+        const heat = Number.isFinite(heatValue) ? heatValue.toFixed(1) : (news.heat || 0);
+
+        // 格式化新闻时间。
+        const timeStr = formatReportNewsCardTime(news.time || news.created_at);
+
+        card.innerHTML = `
+            <div class="card-body">
+                <div class="content">
+                    <div class="news-head">
+                        <button class="news-title news-title-btn" type="button" onclick="openNewsDetail(${news.id})">${escapeHtml(news.title || '(无标题)')}</button>
+                    </div>
+
+                    <div class="meta-row news-meta-row">
+                        <div class="meta-left">
+                            <span class="news-meta-item meta-category">${escapeHtml(news.category || '其他')}</span>
+                            <span class="news-meta-item meta-heat">热度 ${heat || 0}</span>
+                            <span class="news-meta-item meta-sentiment ${sentimentClass}">
+                                ${escapeHtml(sentiment)}${news.sentiment_score !== undefined ? '：' + escapeHtml(news.sentiment_score) : ''}
+                            </span>
+                            ${Array.isArray(news.sources) && news.sources.length > 1 ? `<span class="news-meta-item meta-source">来源 ${news.sources.length} 个</span>` : ''}
+                            ${news.region && news.region !== '其他' ? `<span class="news-meta-item meta-region">${escapeHtml(news.region)}</span>` : ''}
+                        </div>
+                        <div class="meta-right">
+                            <span class="news-meta-item meta-time">${timeStr}</span>
+                            <span class="news-meta-item meta-action" role="button" tabindex="0" onclick="openNewsDetail(${news.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openNewsDetail(${news.id})}">详情</span>
+                        </div>
+                    </div>
+
+                    <div class="summary-box" id="summary-${news.id}">
+                        ${renderSummaryHtml(news.summary, news.id)}
+                    </div>
+                </div>
+            </div>
+        `;
+        return card;
+    }
+
+    function resetHotNewsObserver() {
+        if (hotNewsState.observer) {
+            hotNewsState.observer.disconnect();
+            hotNewsState.observer = null;
+        }
+    }
+
+    function renderHotNewsSentinel() {
+        const paginationContainer = document.getElementById('newsPagination');
+        if (!paginationContainer) return;
+        paginationContainer.innerHTML = '';
+        const loaded = Math.min(hotNewsState.rendered, hotNewsState.items.length);
+        if (!hotNewsState.hasMore && loaded >= hotNewsState.items.length) {
+            if (loaded > HOT_NEWS_BATCH_SIZE) {
+                paginationContainer.innerHTML = '<div class="news-load-status">已显示全部</div>';
+            }
+            resetHotNewsObserver();
+            return;
+        }
+        paginationContainer.innerHTML = `<div id="hotNewsLoadMore" class="news-load-status">${hotNewsState.loading ? '加载中...' : '继续下滑加载更多'}</div>`;
+        const sentinel = document.getElementById('hotNewsLoadMore');
+        if (!sentinel) return;
+        resetHotNewsObserver();
+        hotNewsState.observer = new IntersectionObserver((entries) => {
+            if (entries.some(entry => entry.isIntersecting)) loadMoreHotNews();
+        }, { rootMargin: '160px 0px' });
+        hotNewsState.observer.observe(sentinel);
+    }
+
+    function appendHotNewsItems(count = HOT_NEWS_BATCH_SIZE) {
+        const container = document.getElementById('hotNewsList');
+        if (!container) return;
+        const nextItems = hotNewsState.items.slice(hotNewsState.rendered, hotNewsState.rendered + count);
+        nextItems.forEach((news, index) => {
+            container.appendChild(renderNewsCard(news, hotNewsState.rendered + index));
+        });
+        hotNewsState.rendered += nextItems.length;
+        renderHotNewsSentinel();
+    }
+
+    async function fetchMoreHotNews() {
+        if (hotNewsState.loading || !hotNewsState.hasMore) return;
+        hotNewsState.loading = true;
+        renderHotNewsSentinel();
+        try {
+            const p = window.currentReportParams || {};
+            const keyword = document.getElementById('keyword').value.trim();
+            const start = document.getElementById('startDate').value;
+            const end = document.getElementById('endDate').value;
+            const params = new URLSearchParams({
+                type: 'list',
+                q: p.keyword || keyword,
+                start_date: p.start_date || start || '',
+                end_date: p.end_date || end || '',
+                category: normalFilterValue(hotNewsState.category) || normalFilterValue(p.category) || getCheckedValues('cat-cb', 'cat-all') || '',
+                region: normalFilterValue(p.region) || getCheckedValues('reg-cb', 'reg-all') || '',
+                source: normalFilterValue(p.source) || getCheckedValues('src-cb', 'src-all') || '',
+                limit: String(HOT_NEWS_FETCH_SIZE),
+                offset: String(hotNewsState.offset)
+            });
+            const res = await fetch(`/api/report/chart-data?${params.toString()}`);
+            if (!res.ok) throw new Error('热门舆情加载失败');
+            const data = await res.json();
+            const moreItems = Array.isArray(data) ? data : [];
+            const seen = new Set(hotNewsState.items.map(item => Number(item.id || 0)));
+            moreItems.forEach(item => {
+                const id = Number(item.id || 0);
+                if (id && !seen.has(id)) {
+                    seen.add(id);
+                    hotNewsState.items.push(item);
+                }
+            });
+            hotNewsState.offset += moreItems.length;
+            hotNewsState.hasMore = moreItems.length >= HOT_NEWS_FETCH_SIZE;
+        } catch (e) {
+            console.error('Load more hot news failed', e);
+            hotNewsState.hasMore = false;
+        } finally {
+            hotNewsState.loading = false;
+        }
+    }
+
+    async function loadMoreHotNews() {
+        if (hotNewsState.rendered < hotNewsState.items.length) {
+            appendHotNewsItems(HOT_NEWS_BATCH_SIZE);
+            return;
+        }
+        if (hotNewsState.hasMore) {
+            await fetchMoreHotNews();
+            appendHotNewsItems(HOT_NEWS_BATCH_SIZE);
+            return;
+        }
+        renderHotNewsSentinel();
+    }
+
+    function renderNewsList(newsList, options = {}) {
         const container = document.getElementById('hotNewsList');
         // 清空上一轮分页，避免切换报告后显示旧页码。
         const paginationContainer = document.getElementById('newsPagination');
@@ -2377,61 +2546,24 @@
         if (!container) return;
 
         container.innerHTML = '';
+        resetHotNewsObserver();
 
         if (!newsList || newsList.length === 0) {
             container.innerHTML = '<div class="center-empty">暂无热门舆情数据</div>';
             return;
         }
 
-        newsList.forEach((news, index) => {
-            const card = document.createElement('div');
-            card.className = 'news-card';
-            card.style.setProperty('--card-index', String(index));
-
-            // 判断情感标签样式。
-            const sentiment = (news.sentiment_label || news.sentiment || '中立').trim();
-            let sentimentClass = 'sent-neu';
-
-            if (sentiment === '正面') sentimentClass = 'sent-pos';
-            else if (sentiment === '负面') sentimentClass = 'sent-neg';
-
-            const heatValue = Number(news.heat || 0);
-            const heat = Number.isFinite(heatValue) ? heatValue.toFixed(1) : (news.heat || 0);
-
-            // 格式化新闻时间。
-            const timeStr = formatReportNewsCardTime(news.time || news.created_at);
-
-            card.innerHTML = `
-                <div class="card-body">
-                    <div class="content">
-                        <div class="news-head">
-                            <button class="news-title news-title-btn" type="button" onclick="openNewsDetail(${news.id})">${news.title}</button>
-                        </div>
-
-                        <div class="meta-row news-meta-row">
-                            <div class="meta-left">
-                                <span class="news-meta-item meta-category">${news.category || '其他'}</span>
-                                <span class="news-meta-item meta-heat">热度 ${heat || 0}</span>
-                                <span class="news-meta-item meta-sentiment ${sentimentClass}">
-                                    ${sentiment}${news.sentiment_score !== undefined ? '：' + news.sentiment_score : ''}
-                                </span>
-                                ${Array.isArray(news.sources) && news.sources.length > 1 ? `<span class="news-meta-item meta-source">来源 ${news.sources.length} 个</span>` : ''}
-                                ${news.region && news.region !== '其他' ? `<span class="news-meta-item meta-region">${escapeHtml(news.region)}</span>` : ''}
-                            </div>
-                            <div class="meta-right">
-                                <span class="news-meta-item meta-time">${timeStr}</span>
-                                <span class="news-meta-item meta-action" role="button" tabindex="0" onclick="openNewsDetail(${news.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openNewsDetail(${news.id})}">详情</span>
-                            </div>
-                        </div>
-
-                        <div class="summary-box" id="summary-${news.id}">
-                            ${renderSummaryHtml(news.summary, news.id)}
-                        </div>
-                    </div>
-                </div>
-            `;
-            container.appendChild(card);
-        });
+        const items = Array.isArray(newsList) ? newsList : [];
+        hotNewsState = {
+            ...hotNewsState,
+            items,
+            rendered: 0,
+            offset: items.length,
+            hasMore: Boolean(options.hasMore),
+            loading: false,
+            category: options.category || 'all'
+        };
+        appendHotNewsItems(HOT_NEWS_BATCH_SIZE);
     }
 
     window.onresize = () => {
