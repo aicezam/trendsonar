@@ -59,6 +59,15 @@ def build_news_query_filters(
             if date == "24h":
                 start = now - timedelta(hours=24)
                 stmt = stmt.where(News.publish_date >= start)
+            elif date == "today":
+                start = datetime.combine(now.date(), time.min)
+                end = datetime.combine(now.date(), time.max)
+                stmt = stmt.where(News.publish_date >= start, News.publish_date <= end)
+            elif date == "yesterday":
+                target = now.date() - timedelta(days=1)
+                start = datetime.combine(target, time.min)
+                end = datetime.combine(target, time.max)
+                stmt = stmt.where(News.publish_date >= start, News.publish_date <= end)
             elif date == "3d":
                 start = now - timedelta(days=3)
                 stmt = stmt.where(News.publish_date >= start)
@@ -134,4 +143,6 @@ def serialize_news_item(news: News) -> dict[str, Any]:
         "region": normalize_regions_to_countries(news.region),
         "sentiment_label": news.sentiment_label,
         "sentiment_score": news.sentiment_score,
+        "keywords": news.keywords or [],
+        "entities": news.entities or [],
     }
