@@ -796,6 +796,10 @@ body.modal-open { overflow: hidden; }
 }
 :is(body.page-index, body.page-report) .news-detail-title { color: var(--text-main); font-size: 1.1rem; font-weight: 850; line-height: 1.45;
 }
+:is(body.page-index, body.page-report) .news-detail-title-link { color: inherit; text-decoration: none;
+}
+:is(body.page-index, body.page-report) .news-detail-title-link:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
+}
 :is(body.page-index, body.page-report) .news-detail-close { width: 34px; height: 34px; flex: 0 0 auto; border-radius: 999px; color: var(--text-secondary); font-size: 1.45rem; line-height: 1;
 }
 :is(body.page-index, body.page-report) .news-detail-close:hover { background: var(--bg-card); color: var(--text-main); }
@@ -810,9 +814,15 @@ body.modal-open { overflow: hidden; }
 }
 :is(body.page-index, body.page-report) .detail-meta-line { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; color: var(--text-secondary); font-size: 0.84rem;
 }
-:is(body.page-index, body.page-report) .detail-meta-line > span { padding: 0; border-radius: 0; border: none; background: transparent;
+:is(body.page-index, body.page-report) .detail-meta-line > span,
+:is(body.page-index, body.page-report) .detail-meta-line > a { padding: 0; border-radius: 0; border: none; background: transparent;
 }
-:is(body.page-index, body.page-report) .detail-meta-line > span:not(:last-child)::after { content: '·'; margin-left: 12px; color: var(--text-light);
+:is(body.page-index, body.page-report) .detail-meta-line > span:not(:last-child)::after,
+:is(body.page-index, body.page-report) .detail-meta-line > a:not(:last-child)::after { content: '·'; margin-left: 12px; color: var(--text-light);
+}
+:is(body.page-index, body.page-report) .detail-source-link { color: #2563eb; font-weight: 700; text-decoration: none;
+}
+:is(body.page-index, body.page-report) .detail-source-link:hover { color: #1d4ed8; text-decoration: underline; text-underline-offset: 3px;
 }
 :is(body.page-index, body.page-report) .detail-meta-line .meta-heat-val { color: var(--heat-hot); font-weight: 650;
 }

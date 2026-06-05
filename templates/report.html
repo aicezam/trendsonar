@@ -2062,6 +2062,32 @@
         `).join('');
     }
 
+    function safeExternalUrl(url) {
+        const raw = typeof url === 'string' ? url.trim() : '';
+        if (!raw || raw === '#' || raw.startsWith('#')) return '';
+        const candidate = raw.startsWith('www.') ? `https://${raw}` : raw;
+        try {
+            const parsed = new URL(candidate, window.location.origin);
+            return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function renderDetailSourceLink(source, url) {
+        const label = escapeHtml(source || '未知来源');
+        return url
+            ? `<a class="detail-source-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`
+            : `<span>${label}</span>`;
+    }
+
+    function renderDetailTitleLink(title, url) {
+        const label = escapeHtml(title || '新闻详情');
+        return url
+            ? `<a class="news-detail-title-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`
+            : label;
+    }
+
     function renderRelatedTopics(items) {
         if (!items || !items.length) return '<div class="detail-empty">暂未关联专题</div>';
         return items.map(item => `
@@ -2077,6 +2103,8 @@
         const news = data.news || {};
         const status = data.content_status || {};
         const time = news.time ? new Date(news.time).toLocaleString('zh-CN') : '-';
+        const newsUrl = safeExternalUrl(news.url);
+        const sourceHtml = renderDetailSourceLink(news.source, newsUrl);
         const summary = news.summary ? marked.parse(news.summary) : '<div class="detail-empty">暂无摘要，可在新闻卡片中生成摘要。</div>';
         const similarSection = `
             <div class="detail-section" id="similarNewsSection">
@@ -2099,16 +2127,16 @@
             </div>
         ` : '';
 
-        detailEls.title.textContent = news.title || '新闻详情';
+        detailEls.title.innerHTML = renderDetailTitleLink(news.title, newsUrl);
         detailEls.body.innerHTML = `
             <div class="detail-meta-line">
-                <span>${escapeHtml(news.source || '未知来源')}</span>
+                ${sourceHtml}
                 <span>${time}</span>
                 <span>热度 ${Number(news.heat || 0).toFixed(1)}</span>
                 <span class="sentiment-pill ${sentimentClass(news.sentiment_label)}">${escapeHtml(news.sentiment_label || '未分析')}${news.sentiment_score !== undefined ? '：' + news.sentiment_score : ''}</span>
             </div>
             <div class="detail-actions">
-                <a class="detail-primary-link" href="${escapeHtml(news.url || '#')}" target="_blank" rel="noopener noreferrer">查看原文</a>
+                <a class="detail-primary-link" href="${escapeHtml(newsUrl || '#')}" target="_blank" rel="noopener noreferrer">查看原文</a>
                 <button class="btn-link" onclick="genSummary(${news.id})">重新生成摘要</button>
             </div>
             <div class="detail-status-grid">
