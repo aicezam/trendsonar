@@ -27,6 +27,7 @@ from pydantic_ai.run import AgentRunResultEvent
 
 from app.core.config import get_settings
 from app.core.logger import setup_logger
+from app.core.prompts import prompt_manager
 from app.services.agent_tool_service import agent_tool_service
 
 logger = setup_logger("AgentService")
@@ -36,11 +37,14 @@ AGENT_SYSTEM_PROMPT = """
 
 工作原则:
 1. 回答必须使用中文，优先基于工具返回的事实，不编造新闻、专题、报告 ID 或链接。
-2. 用户问“今天”“昨日”“本周”等相对日期时，优先调用新闻或报告工具确认数据。
-3. 需要创建报告或专题时，必须先调用对应工具完成查重；工具会负责发现已存在记录时避免重复创建。
-4. 如果需要同时了解新闻、专题、报告或词项趋势，可以连续调用多个工具，最后给出整合结论。
-5. 当工具返回数据为空时，要说明没有查到，并给出下一步可尝试的筛选条件。
-6. 最终回复要简洁、可执行；涉及列表时保留标题、来源、时间、热度或 ID 等关键信息。
+2. 用户问“今天”“昨日”“本周”等相对日期时，优先调用新闻或报告工具确认数据；“今天有哪些热点新闻”默认使用 get_top_news(date="today", limit=20)，不要自行降到 10 条。
+3. 列出新闻时必须尽量写出标题、来源、时间、热度、摘要和引用标记；引用格式使用 [新闻:ID]，其中 ID 必须来自工具返回。
+4. 如果新闻工具返回 summary 字段，回答必须输出摘要；summary 为空时才写“暂无摘要”。
+5. 需要创建报告或专题时，必须先调用对应工具完成查重；工具会负责发现已存在记录时避免重复创建。
+6. 如果需要同时了解新闻、专题、报告或词项趋势，可以连续调用多个工具，最后给出整合结论。
+7. 当工具返回数据为空时，要说明没有查到，并给出下一步可尝试的筛选条件。
+8. 如果要给出可点击的下一步建议，请在回答末尾单独输出一段“下一步建议：”，每条建议使用 <<建议:建议文本>> 标记，不要把建议混在正文里。
+9. 最终回复要简洁、可执行；涉及列表时保留标题、来源、时间、热度或 ID 等关键信息。
 """
 
 
@@ -176,13 +180,28 @@ class AgentService:
         agent: Agent[AgentDeps, str] = Agent(
             self._build_model(use_backup),
             deps_type=AgentDeps,
-            instructions=AGENT_SYSTEM_PROMPT,
+            instructions=self._get_system_prompt(),
             tool_timeout=180,
             retries=1,
             max_concurrency=4,
         )
         self._register_tools(agent)
         return agent
+
+    def _get_system_prompt(self) -> str:
+        """
+        输入:
+        - 无
+
+        输出:
+        - 智能体系统提示词
+
+        作用:
+        - 优先使用管理端可编辑提示词，缺失时回退到代码内置默认值。
+        """
+
+        prompt = prompt_manager.get_system_prompt("agent_system").strip()
+        return prompt or AGENT_SYSTEM_PROMPT
 
     def _register_tools(self, agent: Agent[AgentDeps, str]) -> None:
         """
@@ -363,6 +382,7 @@ class AgentService:
 
         cid = conversation_id or self.create_conversation_id()
         conv = self._get_conversation(cid)
+        logger.info(f"智能体收到对话请求: conversation_id={cid}, query={user_query}, use_backup={use_backup}")
         yield {"type": "conversation", "conversation_id": cid}
 
         try:
@@ -370,6 +390,7 @@ class AgentService:
             deps = AgentDeps(conversation_id=cid)
             answer_parts: List[str] = []
             final_output = ""
+            emitted_meta: Dict[str, Any] = {"references": [], "terms": []}
             async with agent.run_stream_events(
                 user_query,
                 deps=deps,
@@ -378,6 +399,12 @@ class AgentService:
             ) as stream:
                 async for event in stream:
                     for payload in self._convert_event(event):
+                        if payload.get("type") == "tool_result":
+                            emitted_meta = self._merge_meta_payload(emitted_meta, payload.get("meta"))
+                            emitted_meta = self._merge_tool_meta(emitted_meta, payload.get("content"))
+                            meta_event = self._build_meta_event(emitted_meta)
+                            if meta_event:
+                                yield meta_event
                         if payload.get("type") == "answer_delta":
                             answer_parts.append(str(payload.get("content") or ""))
                         if payload.get("type") == "agent_result":
@@ -386,9 +413,17 @@ class AgentService:
                             if isinstance(messages, list):
                                 conv.messages = messages
                                 conv.turn_count += 1
+                            logger.info(
+                                f"智能体对话完成: conversation_id={cid}, turns={conv.turn_count}, "
+                                f"answer_length={len(final_output or ''.join(answer_parts))}"
+                            )
                             continue
                         yield payload
-            yield {"type": "answer_done", "content": final_output or "".join(answer_parts)}
+            final_answer = final_output or "".join(answer_parts)
+            final_meta = self._build_meta_event(emitted_meta)
+            if final_meta:
+                yield final_meta
+            yield {"type": "answer_done", "content": final_answer}
         except Exception as exc:
             logger.error(f"智能体对话失败: {exc}", exc_info=True)
             yield {"type": "error", "message": str(exc)}
@@ -407,6 +442,7 @@ class AgentService:
 
         if isinstance(event, FunctionToolCallEvent):
             part = event.part
+            logger.info(f"智能体调用工具: name={part.tool_name}, call_id={part.tool_call_id}, args={self._json_safe(part.args, max_chars=2000)}")
             return [
                 {
                     "type": "tool_call",
@@ -421,12 +457,16 @@ class AgentService:
             part = event.part
             if not part:
                 return []
+            preview = self._json_safe(part.content, max_chars=1200)
+            logger.info(f"智能体工具返回: name={part.tool_name}, call_id={part.tool_call_id}, outcome={getattr(part, 'outcome', 'success')}, preview={preview}")
+            raw_meta = self._merge_tool_meta({"references": [], "terms": []}, part.content)
             return [
                 {
                     "type": "tool_result",
                     "tool_name": part.tool_name,
                     "tool_call_id": part.tool_call_id,
                     "content": self._json_safe(part.content),
+                    "meta": raw_meta,
                     "outcome": getattr(part, "outcome", "success"),
                 }
             ]
@@ -445,7 +485,7 @@ class AgentService:
 
         return []
 
-    def _json_safe(self, value: Any) -> Any:
+    def _json_safe(self, value: Any, max_chars: int = 12000) -> Any:
         """
         输入:
         - `value`: 任意工具返回值
@@ -461,12 +501,152 @@ class AgentService:
             text = json.dumps(value, ensure_ascii=False, default=str)
         except TypeError:
             text = str(value)
-        if len(text) > 12000:
-            text = text[:12000] + "...(已截断)"
+        if max_chars > 0 and len(text) > max_chars:
+            try:
+                return {
+                    "preview": text[:max_chars],
+                    "truncated": True,
+                    "original_length": len(text),
+                    "message": "工具结果较长，前端仅展示预览；模型侧已收到完整工具结果。",
+                }
+            except Exception:
+                text = text[:max_chars] + "...(已截断)"
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             return text
+
+    def _merge_meta_payload(self, current: Dict[str, Any], meta: Any) -> Dict[str, Any]:
+        """
+        输入:
+        - `current`: 已累计元数据
+        - `meta`: 单次工具事件携带的元数据
+
+        输出:
+        - 去重合并后的元数据
+
+        作用:
+        - 合并直接从原始工具返回中抽取的引用与词项，避免前端预览截断影响点击能力。
+        """
+
+        if not isinstance(meta, dict):
+            return current
+        merged = {
+            "references": list(current.get("references") or []),
+            "terms": list(current.get("terms") or []),
+        }
+        seen_refs = {str(item.get("id")) for item in merged["references"] if item.get("id") is not None}
+        for item in meta.get("references") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("id"))
+            if not key or key in seen_refs:
+                continue
+            merged["references"].append(item)
+            seen_refs.add(key)
+
+        seen_terms = {str(item.get("term") or "").lower() for item in merged["terms"]}
+        for item in meta.get("terms") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("term") or "").strip().lower()
+            if not key or key in seen_terms:
+                continue
+            merged["terms"].append(item)
+            seen_terms.add(key)
+        return {"references": merged["references"][:80], "terms": merged["terms"][:120]}
+
+    def _merge_tool_meta(self, current: Dict[str, Any], content: Any) -> Dict[str, Any]:
+        """
+        输入:
+        - `current`: 已累计的元数据
+        - `content`: 工具返回内容
+
+        输出:
+        - 合并后的引用与词项元数据
+
+        作用:
+        - 从新闻类工具结果里抽取可点击引用和词项，供前端即时增强回答。
+        """
+
+        references = list(current.get("references") or [])
+        terms = list(current.get("terms") or [])
+        seen_refs = {str(item.get("id")) for item in references if item.get("id") is not None}
+        seen_terms = {str(item.get("term") or "").lower() for item in terms}
+
+        def add_news(item: Any) -> None:
+            if not isinstance(item, dict):
+                return
+            news_id = item.get("id")
+            if news_id is None or str(news_id) in seen_refs:
+                return
+            references.append(
+                {
+                    "id": news_id,
+                    "title": item.get("title") or "",
+                    "source": item.get("source") or "",
+                    "time": item.get("time") or item.get("publish_date"),
+                    "url": item.get("url") or "",
+                    "summary": item.get("summary") or "",
+                }
+            )
+            seen_refs.add(str(news_id))
+
+        def add_term(value: Any, term_type: str) -> None:
+            if not isinstance(value, str):
+                return
+            text = value.strip()
+            if len(text) < 2:
+                return
+            key = text.lower()
+            if key in seen_terms:
+                return
+            terms.append({"term": text, "type": term_type})
+            seen_terms.add(key)
+
+        if isinstance(content, dict):
+            for item in content.get("items") or []:
+                add_news(item)
+                if isinstance(item, dict):
+                    for kw in item.get("keywords") or []:
+                        add_term(kw, "keyword")
+                    for entity in item.get("entities") or []:
+                        add_term(entity, "entity")
+
+            news = content.get("news")
+            if isinstance(news, dict):
+                add_news(news)
+                for kw in news.get("keywords") or []:
+                    add_term(kw, "keyword")
+                for entity in news.get("entities") or []:
+                    add_term(entity, "entity")
+
+            for item in content.get("related_news") or []:
+                add_news(item)
+
+        return {"references": references[:80], "terms": terms[:120]}
+
+    def _build_meta_event(self, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        输入:
+        - `meta`: 引用与词项元数据
+
+        输出:
+        - 前端可消费的元数据事件或 None
+
+        作用:
+        - 统一构造智能体回答增强信息，减少前端从工具 JSON 中重复解析。
+        """
+
+        references = meta.get("references") or []
+        terms = meta.get("terms") or []
+        if not references and not terms:
+            return None
+        return {
+            "type": "agent_meta",
+            "references": references,
+            "terms": terms,
+        }
 
 
 agent_service = AgentService()

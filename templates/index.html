@@ -2,6 +2,7 @@
 {% extends "base.html" %}
 {% block title %}TrendSonar{% endblock %}
 {% block head %}
+    <script src="/static/echarts.min.js"></script>
 {% endblock %}
 {% block content %}
 
@@ -150,6 +151,21 @@
         </div>
     </div>
 
+    <div id="termAnalysisModal" class="term-analysis-modal" aria-hidden="true">
+        <div class="term-analysis-panel">
+            <div class="term-analysis-head">
+                <div>
+                    <div class="term-analysis-kicker">词项分析</div>
+                    <div id="termAnalysisTitle" class="term-analysis-title"></div>
+                </div>
+                <button id="termAnalysisCloseBtn" class="term-analysis-close" type="button">×</button>
+            </div>
+            <div id="termAnalysisBody" class="term-analysis-body">
+                <div class="detail-loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+
 {% endblock %}
 {% block scripts %}
     <script src="/static/marked.min.js"></script>
@@ -265,6 +281,17 @@
             title: document.getElementById('detailTitle'),
             body: document.getElementById('detailBody')
         };
+
+        const termEls = {
+            modal: document.getElementById('termAnalysisModal'),
+            closeBtn: document.getElementById('termAnalysisCloseBtn'),
+            title: document.getElementById('termAnalysisTitle'),
+            body: document.getElementById('termAnalysisBody')
+        };
+
+        let activeTermAnalysis = { term: "", range: "year" };
+        let termAnalysisAbortController = null;
+        let termAnalysisRequestId = 0;
 
         class MultiSelect {
             constructor(containerIdOrElement, placeholder, options, selectedValues, onChange) {
@@ -677,7 +704,9 @@
                     answer: '',
                     status: '智能体思考中...',
                     tools: [],
-                    toolMap: new Map()
+                    toolMap: new Map(),
+                    references: new Map(),
+                    terms: new Map()
                 };
                 renderAgentMessage(aiMsgEl, renderState);
 
@@ -775,7 +804,13 @@
                         status: event.outcome === 'success' ? 'done' : 'failed'
                     });
                 }
+                mergeAgentMeta(renderState, event);
                 renderState.status = '工具调用完成，正在整理答案...';
+                return;
+            }
+
+            if (event.type === 'agent_meta') {
+                mergeAgentMeta(renderState, event);
                 return;
             }
 
@@ -807,10 +842,209 @@
                 ? `<div class="agent-status"><span class="inline-loading">${escapeHtml(renderState.status)}</span></div>`
                 : '';
             const answerHtml = renderState.answer
-                ? `<div class="agent-answer markdown-body">${marked.parse(renderState.answer)}</div>`
+                ? `<div class="agent-answer markdown-body">${renderAgentAnswer(renderState.answer, renderState)}</div>`
                 : '';
-            container.innerHTML = `${statusHtml}${toolsHtml}${answerHtml}`;
+            const referencesHtml = renderAgentReferences(renderState);
+            const termsHtml = renderAgentTerms(renderState);
+            container.innerHTML = `${statusHtml}${toolsHtml}${answerHtml}${referencesHtml}${termsHtml}`;
+            bindAgentMessageActions(container);
             els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+        }
+
+        function mergeAgentMeta(renderState, event) {
+            const meta = event && typeof event.meta === 'object' && event.meta ? event.meta : {};
+            const refs = [
+                ...(Array.isArray(event.references) ? event.references : []),
+                ...(Array.isArray(meta.references) ? meta.references : [])
+            ];
+            refs.forEach(ref => {
+                const id = Number(ref && ref.id);
+                if (!id) return;
+                renderState.references.set(String(id), {
+                    id,
+                    title: String(ref.title || ''),
+                    source: String(ref.source || ''),
+                    time: ref.time || '',
+                    url: String(ref.url || ''),
+                    summary: String(ref.summary || '')
+                });
+            });
+
+            const terms = [
+                ...(Array.isArray(event.terms) ? event.terms : []),
+                ...(Array.isArray(meta.terms) ? meta.terms : [])
+            ];
+            terms.forEach(item => {
+                const term = String(item && item.term || '').trim();
+                if (term.length < 2) return;
+                renderState.terms.set(term.toLowerCase(), {
+                    term,
+                    type: String(item.type || 'keyword')
+                });
+            });
+        }
+
+        function renderAgentAnswer(answer, renderState) {
+            const parsed = marked.parse(extractSuggestionsFromAnswer(answer).body);
+            const withCitations = enhanceAgentCitations(parsed, renderState);
+            const withTerms = enhanceAgentTerms(withCitations, renderState);
+            return withTerms + renderAgentSuggestions(answer);
+        }
+
+        function extractSuggestionsFromAnswer(answer) {
+            const text = String(answer || '');
+            const suggestions = [];
+            const body = text.replace(/<<建议:([^<>]+)>>/g, (_, suggestion) => {
+                const clean = String(suggestion || '').trim();
+                if (clean) suggestions.push(clean);
+                return '';
+            }).trim();
+            return { body, suggestions };
+        }
+
+        function renderAgentSuggestions(answer) {
+            const suggestions = extractSuggestionsFromAnswer(answer).suggestions;
+            if (!suggestions.length) return '';
+            return `
+                <div class="agent-suggestions">
+                    ${suggestions.map(s => `<button type="button" class="agent-suggestion" data-suggestion="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}
+                </div>
+            `;
+        }
+
+        function enhanceAgentCitations(html, renderState) {
+            if (!html) return '';
+            const box = document.createElement('div');
+            box.innerHTML = html;
+            const pattern = /\[新闻:(\d+)\]/g;
+            const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT, {
+                acceptNode(node) {
+                    const parent = node.parentElement;
+                    if (!parent || parent.closest('a,button,script,style')) return NodeFilter.FILTER_REJECT;
+                    pattern.lastIndex = 0;
+                    return pattern.test(node.nodeValue || '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                }
+            });
+            const textNodes = [];
+            while (walker.nextNode()) textNodes.push(walker.currentNode);
+            textNodes.forEach(node => {
+                pattern.lastIndex = 0;
+                const text = node.nodeValue || '';
+                const frag = document.createDocumentFragment();
+                let last = 0;
+                text.replace(pattern, (match, id, offset) => {
+                    if (offset > last) frag.appendChild(document.createTextNode(text.slice(last, offset)));
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'agent-citation';
+                    btn.dataset.newsId = id;
+                    btn.textContent = `[${id}]`;
+                    btn.title = renderState.references.get(String(id))?.title || '查看引用新闻';
+                    frag.appendChild(btn);
+                    last = offset + match.length;
+                    return match;
+                });
+                if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+                node.parentNode.replaceChild(frag, node);
+            });
+            return box.innerHTML;
+        }
+
+        function enhanceAgentTerms(html, renderState) {
+            const terms = Array.from(renderState.terms.values())
+                .map(item => item.term)
+                .filter(term => term && term.length >= 2)
+                .sort((a, b) => b.length - a.length)
+                .slice(0, 80);
+            if (!html || !terms.length) return html || '';
+            const box = document.createElement('div');
+            box.innerHTML = html;
+            const pattern = new RegExp(`(${terms.map(escapeRegExp).join('|')})`, 'g');
+            const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT, {
+                acceptNode(node) {
+                    const parent = node.parentElement;
+                    if (!parent || parent.closest('a,button,code,pre,.agent-clickable-term,script,style')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    pattern.lastIndex = 0;
+                    return pattern.test(node.nodeValue || '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                }
+            });
+            const textNodes = [];
+            while (walker.nextNode()) textNodes.push(walker.currentNode);
+            textNodes.forEach(node => {
+                pattern.lastIndex = 0;
+                const frag = document.createDocumentFragment();
+                const text = node.nodeValue || '';
+                let last = 0;
+                text.replace(pattern, (match, _g, offset) => {
+                    if (offset > last) frag.appendChild(document.createTextNode(text.slice(last, offset)));
+                    const span = document.createElement('span');
+                    span.className = 'agent-clickable-term';
+                    span.textContent = match;
+                    span.dataset.term = match;
+                    span.title = '点击查看词项分析';
+                    span.setAttribute('role', 'button');
+                    span.tabIndex = 0;
+                    frag.appendChild(span);
+                    last = offset + match.length;
+                    return match;
+                });
+                if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+                node.parentNode.replaceChild(frag, node);
+            });
+            return box.innerHTML;
+        }
+
+        function renderAgentReferences(renderState) {
+            const refs = Array.from(renderState.references.values()).slice(0, 12);
+            if (!refs.length) return '';
+            return `
+                <div class="agent-reference-list">
+                    <div class="agent-reference-title">引用新闻</div>
+                    ${refs.map(ref => `
+                        <button type="button" class="agent-reference-item" data-news-id="${ref.id}">
+                            <span class="agent-reference-index">[${ref.id}]</span>
+                            <span>${escapeHtml(ref.title || '未命名新闻')}</span>
+                        </button>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        function renderAgentTerms(renderState) {
+            const terms = Array.from(renderState.terms.values()).slice(0, 18);
+            if (!terms.length) return '';
+            return `
+                <div class="agent-term-list">
+                    ${terms.map(item => `<button type="button" class="agent-term-chip" data-term="${escapeHtml(item.term)}">${escapeHtml(item.term)}</button>`).join('')}
+                </div>
+            `;
+        }
+
+        function bindAgentMessageActions(container) {
+            container.querySelectorAll('[data-news-id]').forEach(el => {
+                el.onclick = () => openNewsDetail(Number(el.dataset.newsId || 0));
+            });
+            container.querySelectorAll('[data-term]').forEach(el => {
+                el.onclick = () => openTermAnalysis(el.dataset.term || el.textContent);
+                el.onkeydown = (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openTermAnalysis(el.dataset.term || el.textContent);
+                    }
+                };
+            });
+            container.querySelectorAll('[data-suggestion]').forEach(el => {
+                el.onclick = () => {
+                    els.chatInput.value = el.dataset.suggestion || '';
+                    els.chatInput.focus();
+                };
+            });
+        }
+
+        function escapeRegExp(text) {
+            return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         }
 
         function renderToolTrace(item) {
@@ -833,15 +1067,30 @@
 
         function compactToolOutput(value) {
             if (value === null || value === undefined) return null;
+            if (value && value.truncated && value.preview) {
+                return {
+                    message: value.message || '工具结果较长，前端仅展示预览。',
+                    truncated: true,
+                    original_length: value.original_length,
+                    preview: value.preview
+                };
+            }
             try {
                 const text = JSON.stringify(value, null, 2);
                 if (text.length > 5000) {
-                    return `${text.slice(0, 5000)}...(已截断)`;
+                    return {
+                        message: '工具结果较长，前端仅展示前 5000 字预览。',
+                        truncated: true,
+                        original_length: text.length,
+                        preview: text.slice(0, 5000)
+                    };
                 }
                 return value;
             } catch (e) {
                 const text = String(value || '');
-                return text.length > 5000 ? `${text.slice(0, 5000)}...(已截断)` : text;
+                return text.length > 5000
+                    ? { message: '工具结果较长，前端仅展示预览。', truncated: true, original_length: text.length, preview: text.slice(0, 5000) }
+                    : text;
             }
         }
 
@@ -856,6 +1105,212 @@
             return id;
         }
 
+        function formatLocalDate(date) {
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+        }
+
+        function getDefaultTermDateRange(range = "year") {
+            if (range === "all") return { start_date: "", end_date: "" };
+            const end = new Date();
+            const start = new Date(end);
+            if (range === "year") start.setFullYear(start.getFullYear() - 1);
+            else start.setDate(start.getDate() - 30);
+            return {
+                start_date: formatLocalDate(start),
+                end_date: formatLocalDate(end)
+            };
+        }
+
+        function closeTermAnalysis() {
+            if (termAnalysisAbortController) {
+                termAnalysisAbortController.abort();
+                termAnalysisAbortController = null;
+            }
+            termEls.modal.classList.remove('show');
+            termEls.modal.setAttribute('aria-hidden', 'true');
+            document.body.classList.remove('modal-open');
+        }
+
+        async function openTermAnalysis(term) {
+            const cleanTerm = String(term || '').trim();
+            if (!cleanTerm) return;
+            activeTermAnalysis = { term: cleanTerm, range: "year" };
+            await loadTermAnalysis(cleanTerm, "year", true);
+        }
+
+        async function loadTermAnalysis(term, range = "year", openModal = false) {
+            const cleanTerm = String(term || '').trim();
+            if (!cleanTerm) return;
+            activeTermAnalysis = { term: cleanTerm, range };
+            const requestId = ++termAnalysisRequestId;
+            termEls.title.textContent = cleanTerm;
+            if (termAnalysisAbortController) {
+                termAnalysisAbortController.abort();
+                termAnalysisAbortController = null;
+            }
+            renderTermAnalysisShell(true);
+            if (openModal || !termEls.modal.classList.contains('show')) {
+                termEls.modal.classList.add('show');
+                termEls.modal.setAttribute('aria-hidden', 'false');
+                document.body.classList.add('modal-open');
+            }
+
+            try {
+                const params = new URLSearchParams({ term: cleanTerm, range });
+                const defaultRange = getDefaultTermDateRange(range);
+                if (defaultRange.start_date) params.append('start_date', defaultRange.start_date);
+                if (defaultRange.end_date) params.append('end_date', defaultRange.end_date);
+                termAnalysisAbortController = new AbortController();
+                const resp = await fetch(`/api/report/term-analysis?${params.toString()}`, {
+                    cache: 'no-store',
+                    signal: termAnalysisAbortController.signal
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                if (requestId !== termAnalysisRequestId) return;
+                renderTermAnalysis(data);
+            } catch (e) {
+                if (e.name === 'AbortError') return;
+                if (requestId !== termAnalysisRequestId) return;
+                termEls.body.innerHTML = `<div class="detail-empty">加载失败：${escapeHtml(e.message)}</div>`;
+            } finally {
+                if (requestId === termAnalysisRequestId) termAnalysisAbortController = null;
+            }
+        }
+
+        window.changeIndexTermAnalysisRange = function(range) {
+            if (!activeTermAnalysis.term) return;
+            loadTermAnalysis(activeTermAnalysis.term, range, false);
+        };
+
+        function renderTermAnalysisShell(loading = false) {
+            termEls.body.innerHTML = `
+                <div class="term-range-toolbar">
+                    <button type="button" class="${activeTermAnalysis.range === '30d' ? 'active' : ''}" onclick="changeIndexTermAnalysisRange('30d')">最近30天</button>
+                    <button type="button" class="${activeTermAnalysis.range === 'year' ? 'active' : ''}" onclick="changeIndexTermAnalysisRange('year')">1年内</button>
+                    <button type="button" class="${activeTermAnalysis.range === 'all' ? 'active' : ''}" onclick="changeIndexTermAnalysisRange('all')">所有时间</button>
+                </div>
+                <div class="term-analysis-status ${loading ? 'loading' : ''}">${loading ? '正在汇总词项数据...' : ''}</div>
+                <div id="termMetrics" class="term-metrics">
+                    <div><strong>-</strong><span>相关报道</span></div>
+                    <div><strong>-</strong><span>总热度</span></div>
+                    <div><strong>-</strong><span>情绪均值</span></div>
+                </div>
+                <div class="term-analysis-grid">
+                    <div class="term-chart-card">
+                        <div class="term-section-title">热度与报道量</div>
+                        <div id="termTrendChart" class="term-chart"></div>
+                    </div>
+                    <div class="term-chart-card">
+                        <div class="term-section-title">情绪变化</div>
+                        <div id="termSentimentChart" class="term-chart"></div>
+                    </div>
+                    <div class="term-chart-card full">
+                        <div class="term-section-title">关键词共现关系图谱</div>
+                        <div id="termCooccurrenceChart" class="term-chart large"></div>
+                    </div>
+                </div>
+                <div class="term-news-section">
+                    <div class="term-section-title">相关报道</div>
+                    <div id="termNewsList" class="term-news-list"><div class="detail-empty">等待数据...</div></div>
+                </div>
+            `;
+        }
+
+        function renderTermAnalysis(data) {
+            const summary = data.summary || {};
+            const status = termEls.body.querySelector('.term-analysis-status');
+            if (status) {
+                status.classList.remove('loading');
+                status.textContent = `分析完成${summary.elapsed_ms ? `（${summary.elapsed_ms}ms）` : ''}`;
+            }
+            const metrics = document.getElementById('termMetrics');
+            if (metrics) {
+                metrics.innerHTML = `
+                    <div><strong>${Number(summary.related_count || 0)}</strong><span>相关报道</span></div>
+                    <div><strong>${Number(summary.total_heat || 0).toFixed(1)}</strong><span>总热度</span></div>
+                    <div><strong>${Number(summary.avg_sentiment || 0).toFixed(1)}</strong><span>情绪均值</span></div>
+                `;
+            }
+            const newsList = document.getElementById('termNewsList');
+            if (newsList) newsList.innerHTML = renderTermNewsList(data.related_news || []);
+            setTimeout(() => {
+                renderTermTrendChart(data.trend || {});
+                renderTermSentimentChart(data.sentiment_trend || {});
+                renderTermCooccurrenceChart(data.cooccurrence || {});
+            }, 30);
+        }
+
+        function renderTermNewsList(items) {
+            if (!items.length) return '<div class="detail-empty">暂无相关报道</div>';
+            return items.map(item => {
+                const time = item.time ? new Date(item.time).toLocaleString('zh-CN') : '-';
+                return `
+                    <div class="term-news-item">
+                        <button type="button" class="detail-inline-link" onclick="openNewsDetail(${Number(item.id || 0)})">${escapeHtml(item.title || '(无标题)')}</button>
+                        <div class="term-news-meta">
+                            <span>${escapeHtml(item.source || '未知来源')}</span>
+                            <span>${time}</span>
+                            <span>热度 ${Number(item.heat || 0).toFixed(1)}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderTermTrendChart(data) {
+            const el = document.getElementById('termTrendChart');
+            if (!el || !window.echarts) return;
+            const chart = echarts.init(el);
+            chart.setOption({
+                color: ['#60a5fa', '#f59e0b'],
+                tooltip: { trigger: 'axis' },
+                legend: { bottom: 0 },
+                grid: { left: 36, right: 42, top: 24, bottom: 48 },
+                xAxis: { type: 'category', data: data.dates || [] },
+                yAxis: [{ type: 'value', name: '报道量' }, { type: 'value', name: '热度' }],
+                series: [
+                    { name: '报道量', type: 'bar', data: data.count || [], itemStyle: { borderRadius: [5, 5, 0, 0] } },
+                    { name: '热度', type: 'line', yAxisIndex: 1, smooth: true, data: data.heat || [] }
+                ]
+            });
+        }
+
+        function renderTermSentimentChart(data) {
+            const el = document.getElementById('termSentimentChart');
+            if (!el || !window.echarts) return;
+            const chart = echarts.init(el);
+            chart.setOption({
+                color: ['#10b981'],
+                tooltip: { trigger: 'axis' },
+                grid: { left: 36, right: 20, top: 24, bottom: 36 },
+                xAxis: { type: 'category', data: data.dates || [] },
+                yAxis: { type: 'value', min: 0, max: 100 },
+                series: data.series || []
+            });
+        }
+
+        function renderTermCooccurrenceChart(data) {
+            const el = document.getElementById('termCooccurrenceChart');
+            if (!el || !window.echarts) return;
+            const chart = echarts.init(el);
+            chart.setOption({
+                tooltip: {},
+                series: [{
+                    type: 'graph',
+                    layout: 'force',
+                    roam: true,
+                    draggable: true,
+                    force: { repulsion: 110, edgeLength: [55, 120] },
+                    label: { show: true, fontWeight: 700 },
+                    data: (data.nodes || []).map(node => ({ ...node, symbolSize: Math.max(24, Math.min(58, Number(node.value || 1) * 5)) })),
+                    links: data.links || [],
+                    lineStyle: { color: 'source', opacity: 0.42 }
+                }]
+            });
+        }
+
 
         function closeNewsDetail() {
             detailEls.modal.classList.remove('show');
@@ -866,7 +1321,7 @@
         function renderDetailTags(items, emptyText) {
             const values = (items || []).filter(x => typeof x === 'string' && x.trim()).slice(0, 16);
             if (!values.length) return `<div class="detail-empty">${emptyText}</div>`;
-            return values.map(x => `<span class="detail-chip">${escapeHtml(x)}</span>`).join('');
+            return values.map(x => `<button type="button" class="detail-chip detail-chip-btn" data-term="${escapeHtml(x)}">${escapeHtml(x)}</button>`).join('');
         }
 
         function renderDetailNewsList(items, emptyText) {
@@ -1034,6 +1489,9 @@
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
                 renderNewsDetail(data);
+                detailEls.body.querySelectorAll('[data-term]').forEach(el => {
+                    el.onclick = () => openTermAnalysis(el.dataset.term || el.textContent);
+                });
                 loadSimilarNews(id);
             } catch (e) {
                 detailEls.body.innerHTML = `<div class="detail-empty">加载失败：${escapeHtml(e.message)}</div>`;
@@ -1046,8 +1504,13 @@
         detailEls.modal.onclick = (e) => {
             if (e.target === detailEls.modal) closeNewsDetail();
         };
+        termEls.closeBtn.onclick = closeTermAnalysis;
+        termEls.modal.onclick = (e) => {
+            if (e.target === termEls.modal) closeTermAnalysis();
+        };
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && detailEls.modal.classList.contains('show')) closeNewsDetail();
+            if (e.key === 'Escape' && termEls.modal.classList.contains('show')) closeTermAnalysis();
         });
 
 

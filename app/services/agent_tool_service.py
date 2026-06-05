@@ -24,10 +24,123 @@ from app.models.topic import Topic, TopicTimelineItem
 from app.services.report_service import report_service
 from app.services.task_manager import task_manager
 from app.services.topic_service import topic_service
+from app.utils.agent_tool_config import delete_custom_agent_tool, load_custom_agent_tools, save_custom_agent_tool
 from app.utils.news_query import build_news_query_filters, serialize_news_item
 from app.utils.tools import normalize_regions_to_countries
 
 logger = setup_logger("AgentToolService")
+
+
+BUILTIN_AGENT_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "get_top_news",
+        "title": "热点新闻查询",
+        "description": "查询指定时间范围内的热点新闻 TopN。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "limit": {"type": "integer", "default": 20, "description": "返回数量，默认 20。"},
+            "date": {"type": "string", "default": "today", "description": "today/24h/3d/7d/week/month/year/all。"},
+            "sort_by": {"type": "string", "default": "heat", "description": "heat 或 date。"},
+            "category": {"type": "string", "default": "", "description": "可选分类。"},
+            "region": {"type": "string", "default": "", "description": "可选地区。"},
+            "source": {"type": "string", "default": "", "description": "可选来源。"},
+        },
+    },
+    {
+        "name": "search_news",
+        "title": "关键词新闻搜索",
+        "description": "按关键词搜索新闻并支持时间、分类、地区和来源筛选。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "q": {"type": "string", "default": "", "description": "搜索关键词。"},
+            "limit": {"type": "integer", "default": 20, "description": "返回数量。"},
+            "date": {"type": "string", "default": "all", "description": "时间范围。"},
+            "sort_by": {"type": "string", "default": "heat", "description": "heat 或 date。"},
+        },
+    },
+    {
+        "name": "get_news_detail",
+        "title": "新闻详情读取",
+        "description": "读取指定新闻 ID 的详情、摘要、来源、关键词和实体。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {"news_id": {"type": "integer", "default": 0, "description": "新闻 ID。"}},
+    },
+    {
+        "name": "list_topics",
+        "title": "专题列表查询",
+        "description": "查询已有活跃专题。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "q": {"type": "string", "default": "", "description": "专题关键词。"},
+            "limit": {"type": "integer", "default": 20, "description": "返回数量。"},
+            "date": {"type": "string", "default": "all", "description": "时间范围。"},
+            "sort_by": {"type": "string", "default": "updated", "description": "updated 或 heat。"},
+        },
+    },
+    {
+        "name": "get_topic_detail",
+        "title": "专题详情读取",
+        "description": "读取指定专题 ID 的详情、时间轴和相关新闻。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "topic_id": {"type": "integer", "default": 0, "description": "专题 ID。"},
+            "timeline_limit": {"type": "integer", "default": 80, "description": "时间轴节点数量。"},
+        },
+    },
+    {
+        "name": "get_report_analysis",
+        "title": "报告分析数据",
+        "description": "获取报告摘要、图表、词云和 Top 新闻。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "q": {"type": "string", "default": "", "description": "关键词，留空为全局。"},
+            "limit": {"type": "integer", "default": 50, "description": "分析样本数量。"},
+            "generate_ai": {"type": "boolean", "default": False, "description": "测试时建议保持 false。"},
+        },
+    },
+    {
+        "name": "create_keyword_report",
+        "title": "创建关键词报告",
+        "description": "生成指定关键词的报告缓存，属于写操作。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": False,
+        "parameters": {"keyword": {"type": "string", "default": "", "description": "报告关键词。"}},
+    },
+    {
+        "name": "create_event_topic",
+        "title": "创建事件专题",
+        "description": "创建某个新闻事件专题，属于写操作。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": False,
+        "parameters": {"name": {"type": "string", "default": "", "description": "专题名称。"}},
+    },
+    {
+        "name": "get_term_analysis",
+        "title": "词项分析",
+        "description": "查询关键词或实体的趋势、相关新闻、情感和共现词。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "term": {"type": "string", "default": "", "description": "词项名称。"},
+            "range": {"type": "string", "default": "year", "description": "30d/year/all。"},
+        },
+    },
+]
 
 
 def _safe_limit(value: int, *, default: int, minimum: int = 1, maximum: int = 100) -> int:
@@ -65,6 +178,54 @@ def _clean_optional_text(value: Optional[str]) -> Optional[str]:
 
     text = str(value or "").strip()
     return text or None
+
+
+def _date_label(date: str, start_date: Optional[str], end_date: Optional[str]) -> str:
+    """
+    输入:
+    - `date`: 快捷时间范围
+    - `start_date`/`end_date`: 自定义日期
+
+    输出:
+    - 可读的时间范围说明
+
+    作用:
+    - 让智能体工具返回明确说明，避免用户误以为“今天”和“24 小时”相同。
+    """
+
+    if start_date or end_date:
+        return f"{start_date or '不限'} 至 {end_date or '不限'}"
+    labels = {
+        "today": "今天",
+        "yesterday": "昨天",
+        "24h": "最近24小时",
+        "3d": "最近3天",
+        "7d": "最近7天",
+        "week": "本周",
+        "month": "本月",
+        "year": "今年",
+        "all": "所有时间",
+    }
+    return labels.get(str(date or "").strip(), str(date or "24h"))
+
+
+def _summarize_rows(rows: list[News]) -> dict[str, Any]:
+    """
+    输入:
+    - `rows`: 新闻 ORM 列表
+
+    输出:
+    - 工具结果统计说明
+
+    作用:
+    - 为智能体提供摘要覆盖率和结果数量，帮助其解释输出范围。
+    """
+
+    return {
+        "returned": len(rows),
+        "summary_available": sum(1 for row in rows if bool(row.summary)),
+        "summary_missing": sum(1 for row in rows if not row.summary),
+    }
 
 
 def _serialize_topic(topic: Topic, effective_updated_time: Optional[datetime] = None) -> Dict[str, Any]:
@@ -131,6 +292,171 @@ class AgentToolService:
     - 将项目已有接口和服务包装成低耦合、可审计、可复用的智能体工具。
     """
 
+    def list_tool_definitions(self) -> Dict[str, Any]:
+        """
+        输入:
+        - 无
+
+        输出:
+        - 内置工具与自定义工具元数据
+
+        作用:
+        - 为管理端提供工具查看、提示词编辑入口和新增工具草案列表。
+        """
+
+        custom_tools = load_custom_agent_tools()
+        return {
+            "builtin_tools": BUILTIN_AGENT_TOOLS,
+            "custom_tools": custom_tools,
+            "total": len(BUILTIN_AGENT_TOOLS) + len(custom_tools),
+        }
+
+    async def test_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        输入:
+        - `name`: 工具名称
+        - `args`: 测试入参
+
+        输出:
+        - 测试执行结果或阻止原因
+
+        作用:
+        - 为管理端提供只读工具测试，避免误触发报告/专题创建等写操作。
+        """
+
+        tool_name = str(name or "").strip()
+        meta = next((item for item in BUILTIN_AGENT_TOOLS if item.get("name") == tool_name), None)
+        if not meta:
+            custom_tool = next((item for item in load_custom_agent_tools() if item.get("name") == tool_name), None)
+            if custom_tool:
+                return {
+                    "ok": True,
+                    "dry_run": True,
+                    "message": "自定义工具当前作为草案保存，尚未绑定后端执行器。",
+                    "tool": custom_tool,
+                    "args": args or {},
+                }
+            return {"ok": False, "message": "工具不存在"}
+
+        if not meta.get("safe_to_test"):
+            return {"ok": False, "message": "该工具会产生写入或后台任务，管理端测试已阻止。"}
+
+        started = datetime.now()
+        try:
+            result = await self._execute_builtin_test_tool(tool_name, args or {})
+            elapsed_ms = round((datetime.now() - started).total_seconds() * 1000, 1)
+            return {"ok": True, "tool": tool_name, "elapsed_ms": elapsed_ms, "result": result}
+        except Exception as exc:
+            logger.error(f"智能体工具测试失败: tool={tool_name}, error={exc}", exc_info=True)
+            return {"ok": False, "tool": tool_name, "message": str(exc)}
+
+    async def _execute_builtin_test_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        输入:
+        - `name`: 内置工具名称
+        - `args`: 测试参数
+
+        输出:
+        - 工具返回结果
+
+        作用:
+        - 集中路由管理端工具测试调用，限制只读工具的参数规模。
+        """
+
+        if name == "get_top_news":
+            return await self.get_top_news(
+                limit=_safe_limit(args.get("limit", 20), default=20, maximum=30),
+                date=str(args.get("date") or "today"),
+                start_date=_clean_optional_text(args.get("start_date")),
+                end_date=_clean_optional_text(args.get("end_date")),
+                sort_by=str(args.get("sort_by") or "heat"),
+                category=_clean_optional_text(args.get("category")),
+                region=_clean_optional_text(args.get("region")),
+                source=_clean_optional_text(args.get("source")),
+            )
+        if name == "search_news":
+            return await self.search_news(
+                q=str(args.get("q") or "").strip(),
+                limit=_safe_limit(args.get("limit", 20), default=20, maximum=30),
+                date=str(args.get("date") or "all"),
+                start_date=_clean_optional_text(args.get("start_date")),
+                end_date=_clean_optional_text(args.get("end_date")),
+                sort_by=str(args.get("sort_by") or "heat"),
+                category=_clean_optional_text(args.get("category")),
+                region=_clean_optional_text(args.get("region")),
+                source=_clean_optional_text(args.get("source")),
+            )
+        if name == "get_news_detail":
+            return await self.get_news_detail(news_id=int(args.get("news_id") or 0))
+        if name == "list_topics":
+            return await self.list_topics(
+                q=str(args.get("q") or ""),
+                limit=_safe_limit(args.get("limit", 20), default=20, maximum=30),
+                date=str(args.get("date") or "all"),
+                min_heat=float(args.get("min_heat") or 0.0),
+                sort_by=str(args.get("sort_by") or "updated"),
+            )
+        if name == "get_topic_detail":
+            return await self.get_topic_detail(
+                topic_id=int(args.get("topic_id") or 0),
+                timeline_limit=_safe_limit(args.get("timeline_limit", 80), default=80, maximum=120),
+            )
+        if name == "get_report_analysis":
+            return await self.get_report_analysis(
+                q=str(args.get("q") or ""),
+                start_date=_clean_optional_text(args.get("start_date")),
+                end_date=_clean_optional_text(args.get("end_date")),
+                category=_clean_optional_text(args.get("category")),
+                region=_clean_optional_text(args.get("region")),
+                source=_clean_optional_text(args.get("source")),
+                limit=_safe_limit(args.get("limit", 50), default=50, maximum=80),
+                generate_ai=False,
+            )
+        if name == "get_term_analysis":
+            return await self.get_term_analysis(
+                term=str(args.get("term") or "").strip(),
+                start_date=_clean_optional_text(args.get("start_date")),
+                end_date=_clean_optional_text(args.get("end_date")),
+                category=_clean_optional_text(args.get("category")),
+                region=_clean_optional_text(args.get("region")),
+                source=_clean_optional_text(args.get("source")),
+                range=str(args.get("range") or "year"),
+            )
+        return {"message": "工具未实现测试路由"}
+
+    def save_custom_tool(self, tool: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        输入:
+        - `tool`: 自定义工具配置
+
+        输出:
+        - 保存后的工具配置
+
+        作用:
+        - 为管理端新增工具提供持久化入口。
+        """
+
+        saved = save_custom_agent_tool(tool)
+        logger.info(f"保存自定义智能体工具: name={saved.get('name')}, enabled={saved.get('enabled')}")
+        return saved
+
+    def delete_custom_tool(self, name: str) -> bool:
+        """
+        输入:
+        - `name`: 自定义工具名称
+
+        输出:
+        - 是否删除成功
+
+        作用:
+        - 为管理端删除自定义工具草案。
+        """
+
+        ok = delete_custom_agent_tool(name)
+        if ok:
+            logger.info(f"删除自定义智能体工具: name={name}")
+        return ok
+
     async def get_top_news(
         self,
         *,
@@ -171,10 +497,16 @@ class AgentToolService:
                 stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date))
 
             rows = (await db.execute(stmt.limit(safe_limit))).scalars().all()
+            logger.info(
+                f"智能体工具 get_top_news 完成: date={date}, start={start_date}, end={end_date}, "
+                f"limit={safe_limit}, returned={len(rows)}, sort_by={sort_by}"
+            )
             return {
                 "total": len(rows),
                 "limit": safe_limit,
                 "date": date,
+                "time_range_label": _date_label(date or "24h", start_date, end_date),
+                "stats": _summarize_rows(rows),
                 "items": [serialize_news_item(row) for row in rows],
             }
 
@@ -242,10 +574,16 @@ class AgentToolService:
             else:
                 stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date))
             rows = (await db.execute(stmt.limit(safe_limit))).scalars().all()
+            logger.info(
+                f"智能体工具 search_news 完成: q={query}, date={date}, limit={safe_limit}, "
+                f"returned={len(rows)}, sort_by={sort_by}"
+            )
             return {
                 "q": query,
                 "total": len(rows),
                 "limit": safe_limit,
+                "time_range_label": _date_label(date or "all", start_date, end_date),
+                "stats": _summarize_rows(rows),
                 "items": [serialize_news_item(row) for row in rows],
             }
 

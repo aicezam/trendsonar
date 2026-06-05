@@ -25,6 +25,7 @@
             <button id="tabConfigBtn" class="admin-tab active" data-tab="config">配置</button>
             <button id="tabSourcesBtn" class="admin-tab" data-tab="sources">新闻源</button>
             <button id="tabPromptsBtn" class="admin-tab" data-tab="prompts">提示词</button>
+            <button id="tabToolsBtn" class="admin-tab" data-tab="tools">工具</button>
             <button id="tabLogsBtn" class="admin-tab" data-tab="logs">日志</button>
         </div>
         <div class="admin-panels">
@@ -68,6 +69,16 @@
                 </div>
                 <div id="promptsGroups" class="admin-subtabs"></div>
                 <div id="promptsGrid" class="prompts-grid"></div>
+            </div>
+            <div id="panelTools" class="admin-panel">
+                <div class="admin-log-toolbar">
+                    <div class="admin-hint admin-hint-fluid">查看智能体可调用工具，测试只读工具，维护自定义工具草案。</div>
+                    <button id="editAgentPromptBtn" class="admin-btn">编辑智能体提示词</button>
+                    <button id="addAgentToolBtn" class="admin-btn">新增工具</button>
+                    <button id="refreshAgentToolsBtn" class="admin-btn">刷新</button>
+                </div>
+                <div id="agentToolsGrid" class="prompts-grid tools-grid"></div>
+                <div id="agentToolTestOutput" class="tool-test-output is-hidden"></div>
             </div>
         </div>
         <div id="adminStatus" class="admin-status"></div>
@@ -151,6 +162,45 @@
             </div>
         </div>
     </div>
+    <div id="agentToolModal" class="modal-overlay is-hidden">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="agentToolModalTitle">新增工具</h3>
+                <button class="modal-close" onclick="closeAgentToolModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>工具名称</label>
+                    <input type="text" id="agentToolName" class="admin-input admin-input-full" placeholder="例如 custom_search">
+                    <div class="form-hint">只能使用字母、数字和下划线，且必须以字母开头。</div>
+                </div>
+                <div class="form-group">
+                    <label>显示标题</label>
+                    <input type="text" id="agentToolTitle" class="admin-input admin-input-full">
+                </div>
+                <div class="form-group">
+                    <label>描述</label>
+                    <textarea id="agentToolDescription" class="admin-textarea" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>参数 JSON Schema</label>
+                    <textarea id="agentToolParameters" class="admin-textarea" rows="7">{}</textarea>
+                </div>
+                <div class="form-group">
+                    <label>提示词说明</label>
+                    <textarea id="agentToolPromptHint" class="admin-textarea" rows="4"></textarea>
+                </div>
+                <label class="source-switch-pill source-switch-inline on">
+                    <input type="checkbox" id="agentToolEnabled" checked>
+                    <span>启用工具草案</span>
+                </label>
+            </div>
+            <div class="modal-footer">
+                <button class="admin-btn" onclick="closeAgentToolModal()">取消</button>
+                <button class="admin-btn primary" onclick="saveAgentTool()">保存</button>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -165,6 +215,8 @@
     let sources = [];
     let sourcePreviewResults = {};
     let sourceContentTestResults = {};
+    let agentToolsData = { builtin_tools: [], custom_tools: [] };
+    let agentToolTestArgs = {};
     let logsTimer = null;
     let activeTab = "config";
 
@@ -1279,21 +1331,25 @@
         const tabSourcesBtn = document.getElementById("tabSourcesBtn");
         const tabLogsBtn = document.getElementById("tabLogsBtn");
         const tabPromptsBtn = document.getElementById("tabPromptsBtn");
+        const tabToolsBtn = document.getElementById("tabToolsBtn");
 
         const panelConfig = document.getElementById("panelConfig");
         const panelSources = document.getElementById("panelSources");
         const panelLogs = document.getElementById("panelLogs");
         const panelPrompts = document.getElementById("panelPrompts");
+        const panelTools = document.getElementById("panelTools");
 
         if (tabConfigBtn) tabConfigBtn.classList.toggle("active", tab === "config");
         if (tabSourcesBtn) tabSourcesBtn.classList.toggle("active", tab === "sources");
         if (tabLogsBtn) tabLogsBtn.classList.toggle("active", tab === "logs");
         if (tabPromptsBtn) tabPromptsBtn.classList.toggle("active", tab === "prompts");
+        if (tabToolsBtn) tabToolsBtn.classList.toggle("active", tab === "tools");
 
         if (panelConfig) panelConfig.classList.toggle("active", tab === "config");
         if (panelSources) panelSources.classList.toggle("active", tab === "sources");
         if (panelLogs) panelLogs.classList.toggle("active", tab === "logs");
         if (panelPrompts) panelPrompts.classList.toggle("active", tab === "prompts");
+        if (panelTools) panelTools.classList.toggle("active", tab === "tools");
 
         if (logsTimer) {
             clearInterval(logsTimer);
@@ -1314,6 +1370,8 @@
             });
         } else if (tab === "prompts") {
             loadPrompts();
+        } else if (tab === "tools") {
+            loadAgentTools();
         } else if (tab === "sources") {
              loadSources();
              // 延迟重算高度，等待面板 DOM 完成切换。
@@ -1466,6 +1524,194 @@
         setStatus(statusEl, "提示词保存成功", "ok");
     };
 
+    // --- 智能体工具管理 ---
+    async function loadAgentTools() {
+        const statusEl = document.getElementById("adminStatus");
+        setStatus(statusEl, "加载工具中...", "");
+        const resp = await fetch("/api/admin/agent_tools", { method: "GET", cache: "no-store" });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            setStatus(statusEl, data.detail || "工具加载失败", "error");
+            return;
+        }
+        agentToolsData = await resp.json();
+        renderAgentTools();
+        setStatus(statusEl, "工具加载完成，共 " + (agentToolsData.total || 0) + " 个。", "ok");
+    }
+
+    function getAllAgentTools() {
+        const builtin = Array.isArray(agentToolsData.builtin_tools) ? agentToolsData.builtin_tools : [];
+        const custom = Array.isArray(agentToolsData.custom_tools) ? agentToolsData.custom_tools : [];
+        return builtin.concat(custom);
+    }
+
+    function renderAgentTools() {
+        const grid = document.getElementById("agentToolsGrid");
+        if (!grid) return;
+        const tools = getAllAgentTools();
+        if (!tools.length) {
+            grid.innerHTML = '<div class="source-empty">暂无工具配置。</div>';
+            return;
+        }
+        grid.innerHTML = tools.map((tool) => renderAgentToolCard(tool)).join("");
+    }
+
+    function renderAgentToolCard(tool) {
+        const name = String(tool.name || "");
+        const safeName = escapeHtml(name);
+        const params = tool.parameters && typeof tool.parameters === "object" ? tool.parameters : {};
+        const paramText = Object.keys(params).length ? Object.keys(params).join("、") : "无参数";
+        const kind = tool.kind === "custom" ? "自定义" : "内置";
+        const safeToTest = tool.safe_to_test !== false;
+        return `
+            <div class="prompt-card tool-card">
+                <h4>${escapeHtml(tool.title || name)} <span class="prompt-key">(${safeName})</span></h4>
+                <div class="prompt-group-name">${kind}工具 · ${tool.enabled === false ? "停用" : "启用"}</div>
+                <p>${escapeHtml(tool.description || "暂无描述")}</p>
+                <div class="tool-param-line">参数：${escapeHtml(paramText)}</div>
+                <div class="prompt-actions">
+                    <button class="admin-btn small" onclick="openAgentToolTest('${safeName}')">${safeToTest ? "测试" : "查看"}</button>
+                    ${tool.kind === "custom" ? `<button class="admin-btn small" onclick="openAgentToolModal('${safeName}')">编辑</button><button class="admin-btn danger small" onclick="deleteAgentTool('${safeName}')">删除</button>` : ""}
+                </div>
+            </div>
+        `;
+    }
+
+    function getAgentToolByName(name) {
+        return getAllAgentTools().find((item) => item.name === name);
+    }
+
+    function buildDefaultToolArgs(tool) {
+        const args = {};
+        const params = tool && tool.parameters && typeof tool.parameters === "object" ? tool.parameters : {};
+        Object.entries(params).forEach(([key, meta]) => {
+            if (meta && typeof meta === "object" && "default" in meta) args[key] = meta.default;
+        });
+        if (tool?.name === "search_news" && !args.q) args.q = "热点";
+        if (tool?.name === "get_news_detail" && !args.news_id) args.news_id = 1;
+        if (tool?.name === "get_topic_detail" && !args.topic_id) args.topic_id = 1;
+        if (tool?.name === "get_term_analysis" && !args.term) args.term = "中国";
+        return args;
+    }
+
+    function openAgentToolTest(name) {
+        const tool = getAgentToolByName(name);
+        const output = document.getElementById("agentToolTestOutput");
+        if (!tool || !output) return;
+        const args = agentToolTestArgs[name] || buildDefaultToolArgs(tool);
+        agentToolTestArgs[name] = args;
+        output.classList.remove("is-hidden");
+        output.innerHTML = `
+            <div class="tool-test-head">
+                <strong>${escapeHtml(tool.title || name)}</strong>
+                <span>${escapeHtml(name)}</span>
+            </div>
+            <textarea id="agentToolTestArgs" class="admin-textarea" rows="8">${escapeHtml(JSON.stringify(args, null, 2))}</textarea>
+            <div class="tool-test-actions">
+                <button class="admin-btn primary" onclick="runAgentToolTest('${escapeHtml(name)}')">${tool.safe_to_test === false ? "查看限制" : "运行测试"}</button>
+            </div>
+            <pre id="agentToolTestResult" class="tool-test-result"></pre>
+        `;
+        output.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    async function runAgentToolTest(name) {
+        const resultEl = document.getElementById("agentToolTestResult");
+        const argsEl = document.getElementById("agentToolTestArgs");
+        if (!resultEl || !argsEl) return;
+        let args = {};
+        try {
+            args = JSON.parse(argsEl.value || "{}");
+        } catch (e) {
+            resultEl.textContent = "参数不是合法 JSON: " + e.message;
+            return;
+        }
+        agentToolTestArgs[name] = args;
+        resultEl.textContent = "测试中...";
+        const resp = await fetch("/api/admin/agent_tools/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, args })
+        });
+        const data = await resp.json().catch(() => ({}));
+        resultEl.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function openAgentToolModal(name = "") {
+        const tool = name ? getAgentToolByName(name) : null;
+        document.getElementById("agentToolModalTitle").textContent = tool ? "编辑工具" : "新增工具";
+        document.getElementById("agentToolName").value = tool?.name || "";
+        document.getElementById("agentToolName").readOnly = !!tool;
+        document.getElementById("agentToolTitle").value = tool?.title || "";
+        document.getElementById("agentToolDescription").value = tool?.description || "";
+        document.getElementById("agentToolParameters").value = JSON.stringify(tool?.parameters || {}, null, 2);
+        document.getElementById("agentToolPromptHint").value = tool?.prompt_hint || "";
+        document.getElementById("agentToolEnabled").checked = tool?.enabled !== false;
+        document.getElementById("agentToolModal").classList.remove("is-hidden");
+    }
+
+    function closeAgentToolModal() {
+        const modal = document.getElementById("agentToolModal");
+        if (modal) modal.classList.add("is-hidden");
+    }
+
+    async function saveAgentTool() {
+        const statusEl = document.getElementById("adminStatus");
+        let parameters = {};
+        try {
+            parameters = JSON.parse(document.getElementById("agentToolParameters")?.value || "{}");
+        } catch (e) {
+            alert("参数 JSON 不合法: " + e.message);
+            return;
+        }
+        const payload = {
+            name: document.getElementById("agentToolName")?.value || "",
+            title: document.getElementById("agentToolTitle")?.value || "",
+            description: document.getElementById("agentToolDescription")?.value || "",
+            parameters,
+            prompt_hint: document.getElementById("agentToolPromptHint")?.value || "",
+            enabled: !!document.getElementById("agentToolEnabled")?.checked,
+        };
+        setStatus(statusEl, "保存工具中...", "");
+        const resp = await fetch("/api/admin/agent_tools/custom", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            setStatus(statusEl, data.detail || "工具保存失败", "error");
+            return;
+        }
+        closeAgentToolModal();
+        setStatus(statusEl, "工具已保存", "ok");
+        await loadAgentTools();
+    }
+
+    async function deleteAgentTool(name) {
+        if (!confirm("确定删除这个自定义工具吗？")) return;
+        const statusEl = document.getElementById("adminStatus");
+        const resp = await fetch("/api/admin/agent_tools/custom/" + encodeURIComponent(name), { method: "DELETE" });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            setStatus(statusEl, data.detail || "删除失败", "error");
+            return;
+        }
+        setStatus(statusEl, "工具已删除", "ok");
+        await loadAgentTools();
+    }
+
+    async function openAgentPromptEditor() {
+        if (!Object.keys(allPrompts || {}).length) {
+            await loadPrompts();
+        }
+        if (allPrompts.agent_system) {
+            editPrompt("agent_system");
+            return;
+        }
+        setStatus(document.getElementById("adminStatus"), "未找到 agent_system 提示词，请检查默认提示词配置。", "error");
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
         if (!authed) {
             document.getElementById("adminLoginBtn")?.addEventListener("click", doLogin);
@@ -1483,8 +1729,12 @@
         document.getElementById("tabSourcesBtn")?.addEventListener("click", () => setTab("sources"));
         document.getElementById("tabLogsBtn")?.addEventListener("click", () => setTab("logs"));
         document.getElementById("tabPromptsBtn")?.addEventListener("click", () => setTab("prompts"));
+        document.getElementById("tabToolsBtn")?.addEventListener("click", () => setTab("tools"));
 
         document.getElementById("refreshPromptsBtn")?.addEventListener("click", loadPrompts);
+        document.getElementById("refreshAgentToolsBtn")?.addEventListener("click", loadAgentTools);
+        document.getElementById("addAgentToolBtn")?.addEventListener("click", () => openAgentToolModal());
+        document.getElementById("editAgentPromptBtn")?.addEventListener("click", openAgentPromptEditor);
 
         document.getElementById("refreshLogsBtn")?.addEventListener("click", async () => {
             await refreshLogFiles(true);

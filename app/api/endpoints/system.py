@@ -15,7 +15,7 @@ import time as perf_time
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import yaml
@@ -36,6 +36,7 @@ from app.schemas.system import AdminAuth
 from app.services.ai_service import ai_service
 from app.services.admin_service import is_admin_request, load_config_yaml_text, save_config_yaml_text, schedule_restart, verify_admin_password
 from app.services.agent_service import agent_service
+from app.services.agent_tool_service import agent_tool_service
 from app.services.pipeline_service import background_analyze_all, reanalyze_all_categories, run_manual
 from app.services.source_health_service import source_health_service
 from app.services.task_manager import task_manager
@@ -224,6 +225,20 @@ class UpdateSourcesStructuredPayload(BaseModel):
 
 class SourceContentTestPayload(BaseModel):
     url: str
+
+
+class AgentToolTestPayload(BaseModel):
+    name: str
+    args: dict[str, Any] = {}
+
+
+class AgentCustomToolPayload(BaseModel):
+    name: str
+    title: str = ""
+    description: str = ""
+    parameters: dict[str, Any] = {}
+    prompt_hint: str = ""
+    enabled: bool = True
 
 
 def _get_news_sources_path() -> Path:
@@ -517,6 +532,85 @@ async def api_test_ai_model(payload: TestAIModelPayload, request: Request):
         result = await _test_chat_model_config(kind, base_url, api_key, model)
     result["model"] = model
     return result
+
+
+@router.get("/admin/agent_tools")
+async def api_get_agent_tools(request: Request):
+    """
+    输入:
+    - `request`: 管理端请求
+
+    输出:
+    - 智能体内置工具与自定义工具配置
+
+    作用:
+    - 为管理页面提供工具查看、测试和新增工具入口。
+    """
+
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    return agent_tool_service.list_tool_definitions()
+
+
+@router.post("/admin/agent_tools/test")
+async def api_test_agent_tool(payload: AgentToolTestPayload, request: Request):
+    """
+    输入:
+    - `payload`: 工具名称与测试参数
+
+    输出:
+    - 工具测试结果
+
+    作用:
+    - 管理端测试只读智能体工具，写操作工具会被服务层阻止。
+    """
+
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    return await agent_tool_service.test_tool(payload.name, payload.args)
+
+
+@router.post("/admin/agent_tools/custom")
+async def api_save_custom_agent_tool(payload: AgentCustomToolPayload, request: Request):
+    """
+    输入:
+    - `payload`: 自定义工具草案配置
+
+    输出:
+    - 保存后的工具配置
+
+    作用:
+    - 允许管理端新增或更新工具元数据，供后续绑定执行器。
+    """
+
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    try:
+        saved = agent_tool_service.save_custom_tool(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "tool": saved}
+
+
+@router.delete("/admin/agent_tools/custom/{name}")
+async def api_delete_custom_agent_tool(name: str, request: Request):
+    """
+    输入:
+    - `name`: 自定义工具名称
+
+    输出:
+    - 删除结果
+
+    作用:
+    - 删除管理端维护的自定义工具草案。
+    """
+
+    if not is_admin_request(request):
+        raise HTTPException(status_code=401, detail="未登录")
+    ok = agent_tool_service.delete_custom_tool(name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="自定义工具不存在")
+    return {"ok": True}
 
 
 @router.get("/admin/logs")
