@@ -27,6 +27,7 @@ from app.services.ai_service import ai_service
 from app.services.admin_service import schedule_restart
 from app.services.cluster_service import cluster_service
 from app.services.crawler_service import crawler_service
+from app.services.news_title_service import refine_news_title_if_needed
 from app.services.report_service import report_service
 from app.services.task_manager import task_manager
 from app.services.topic_service import topic_service
@@ -188,6 +189,7 @@ async def _process_summary_news_item(news_id: int, index: int, total: int) -> bo
 
             news.summary = summary
             news.is_ai_summary = True
+            await refine_news_title_if_needed(news, summary=summary, content=input_content, ai=ai_service)
 
             try:
                 embed_material = content or fallback_content or input_content
@@ -512,6 +514,7 @@ async def auto_generate_summaries_categories_top_n() -> None:
                     if summary:
                         news.summary = summary
                         news.is_ai_summary = True
+                        await refine_news_title_if_needed(news, summary=summary, content=input_content, ai=ai_service)
                         db.add(news)
                 except AIServiceUnavailableError:
                     raise

@@ -27,6 +27,7 @@ from app.core.logger import logger
 from app.models.news import News
 from app.services.ai_service import ai_service
 from app.services.crawler_service import crawler_service
+from app.services.news_title_service import refine_news_title_if_needed
 from app.utils.news_query import build_news_query_filters, serialize_news_item
 from app.utils.summary_material import build_summary_generation_input, get_existing_summary_material
 from app.utils.tools import normalize_regions_to_countries
@@ -668,6 +669,7 @@ async def api_generate_summary(news_id: int, db: AsyncSession = Depends(get_db))
     summary = await ai_service.generate_summary(news.title, full_content)
     news.summary = summary
     news.is_ai_summary = True
+    await refine_news_title_if_needed(news, summary=summary or "", content=full_content, ai=ai_service)
 
     try:
         txt_to_embed = f"{news.title} {summary} {full_content[:1000]}"

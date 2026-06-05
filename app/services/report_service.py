@@ -182,10 +182,11 @@ class ReportService:
 
         sentiment_counts = {"正面": 0, "中立": 0, "负面": 0}
         negative_keywords: List[str] = []
+        positive_keywords: List[str] = []
         for label, kws in rows:
             label_str = label if label in sentiment_counts else "中立"
             sentiment_counts[label_str] += 1
-            if label_str == "负面" and kws and isinstance(kws, list):
+            if label_str in {"正面", "负面"} and kws and isinstance(kws, list):
                 valid_kws = [
                     k.strip()
                     for k in kws
@@ -194,7 +195,10 @@ class ReportService:
                     and k.strip()
                     and k.strip().lower() not in {"无内容", "null", "空", "none", ""}
                 ]
-                negative_keywords.extend(valid_kws)
+                if label_str == "负面":
+                    negative_keywords.extend(valid_kws)
+                else:
+                    positive_keywords.extend(valid_kws)
 
         sentiment_dist = [
             {"name": "正面", "value": sentiment_counts["正面"]},
@@ -202,7 +206,8 @@ class ReportService:
             {"name": "负面", "value": sentiment_counts["负面"]},
         ]
         neg_keywords = [k for k, _ in Counter(negative_keywords).most_common(10)]
-        return {"sentiment_dist": sentiment_dist, "neg_keywords": neg_keywords}, len(rows)
+        pos_keywords = [k for k, _ in Counter(positive_keywords).most_common(10)]
+        return {"sentiment_dist": sentiment_dist, "neg_keywords": neg_keywords, "pos_keywords": pos_keywords}, len(rows)
 
     async def _get_word_cloud_chart_data(
         self,
@@ -320,7 +325,7 @@ class ReportService:
         region: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not await check_db_connection(verbose=False):
-             return {"sentiment_dist": [], "neg_keywords": []}
+             return {"sentiment_dist": [], "neg_keywords": [], "pos_keywords": []}
 
         t0 = monotonic()
         filters = self._build_news_filters(
@@ -369,6 +374,15 @@ class ReportService:
                 stmt_neg = stmt_neg.group_by(kw.c.value).order_by(desc("value")).limit(10)
                 neg_rows = (await db.execute(stmt_neg)).all()
 
+                stmt_pos = select(kw.c.value.label("name"), func.count().label("value")).select_from(News).join(kw, true())
+                if filters:
+                    stmt_pos = stmt_pos.where(and_(*filters))
+                stmt_pos = stmt_pos.where(News.sentiment_label == "正面")
+                stmt_pos = stmt_pos.where(func.length(func.trim(kw.c.value)) > 0)
+                stmt_pos = stmt_pos.where(func.lower(func.trim(kw.c.value)).notin_(["无内容", "null", "空", "none", ""]))
+                stmt_pos = stmt_pos.group_by(kw.c.value).order_by(desc("value")).limit(10)
+                pos_rows = (await db.execute(stmt_pos)).all()
+
             dist_map = {str(name): int(value) for name, value in dist_rows}
             sentiment_dist = [
                 {"name": "正面", "value": int(dist_map.get("正面", 0))},
@@ -376,8 +390,9 @@ class ReportService:
                 {"name": "负面", "value": int(dist_map.get("负面", 0))},
             ]
             neg_keywords = [str(name) for name, _ in neg_rows]
+            pos_keywords = [str(name) for name, _ in pos_rows]
 
-            data = {"sentiment_dist": sentiment_dist, "neg_keywords": neg_keywords}
+            data = {"sentiment_dist": sentiment_dist, "neg_keywords": neg_keywords, "pos_keywords": pos_keywords}
             elapsed = monotonic() - t0
             if elapsed > 0.5:
                 logger.info(
@@ -903,7 +918,7 @@ class ReportService:
         region: Optional[str] = None,
         source: Optional[str] = None,
         limit: Optional[int] = None,
-    ) -> None:
+    ) -> Optional[int]:
         logger.info(f"📄 后台生成报告开始: keyword={keyword or '-'}")
         data = await self._generate_analysis_data(
             keyword=keyword,
@@ -932,7 +947,7 @@ class ReportService:
 
         if not report_id:
             logger.warning("⚠️ 报告缓存写入失败，后台任务结束")
-            return
+            return None
 
         logger.info(f"📄 报告缓存已写入: id={report_id} keyword={keyword or '-'}")
         
@@ -960,6 +975,7 @@ class ReportService:
         # Let's check stream_ai_analysis implementation again.
         
         logger.info(f"📄 后台生成报告结束: id={report_id} keyword={keyword or '-'}")
+        return report_id
 
     async def _stream_ai_analysis_to_cache(self, report_id: int) -> None:
         if not await check_db_connection(verbose=False):
@@ -1880,7 +1896,11 @@ class ReportService:
         if type == "source":
             return charts.get("source", [])
         if type == "sentiment":
-            return {"sentiment_dist": charts.get("sentiment_dist", []), "neg_keywords": charts.get("neg_keywords", [])}
+            return {
+                "sentiment_dist": charts.get("sentiment_dist", []),
+                "neg_keywords": charts.get("neg_keywords", []),
+                "pos_keywords": charts.get("pos_keywords", []),
+            }
         if type == "list":
             return data.get("top_news", [])
         return charts.get(type, {})

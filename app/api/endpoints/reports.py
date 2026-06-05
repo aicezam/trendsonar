@@ -446,6 +446,20 @@ async def generate_report_background(
             limit=limit,
         )
 
+    if q:
+        report_id = await report_service.generate_report_and_stream_ai(
+            keyword=q,
+            start_date=start_date,
+            end_date=end_date,
+            category=category,
+            region=region,
+            source=source,
+            limit=limit,
+        )
+        if not report_id:
+            raise HTTPException(status_code=500, detail="Report generation failed")
+        return {"status": "pending", "report_id": report_id}
+
     status = await task_manager.start_background(
         task_name,
         run_report_task,
@@ -494,5 +508,9 @@ async def stream_ai_report(
     logger.info(f"🚀 开始流式传输: report_id={final_report_id}")
     return StreamingResponse(
         report_service.stream_ai_analysis(final_report_id),
-        media_type="text/plain"
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
     )

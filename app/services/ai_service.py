@@ -22,6 +22,7 @@ from app.core.logger import setup_logger
 from app.core.exceptions import AIConfigurationError, AIServiceUnavailableError
 from app.core.prompts import prompt_manager
 from app.services.concurrency_service import concurrency_service
+from app.utils.title_tools import normalize_refined_title, should_refine_title
 from app.utils.tools import normalize_regions_to_countries
 
 settings = get_settings()
@@ -431,7 +432,12 @@ class AIService:
         )
             
         prefer_backup = self._get_prefer_backup("TOPIC_EVAL")
-        res = await self._call_llm_with_routes(user_prompt, system_prompt, prefer_backup=prefer_backup)
+        res = await self._call_llm_with_routes(
+            user_prompt,
+            system_prompt,
+            prefer_backup=prefer_backup,
+            stop_on_unavailable=False,
+        )
         
         if not res:
             logger.warning("⚠️ 专题质量评估失败，默认全部保留")
@@ -783,6 +789,41 @@ class AIService:
 
         prefer_backup = self._get_prefer_backup("SUMMARY")
         return await self._call_llm_with_routes(user_prompt, system_prompt, prefer_backup=prefer_backup)
+
+    async def refine_title(self, title: str, summary: str = "", content: str = "", max_chars: int = 20) -> Optional[str]:
+        """
+        输入:
+        - `title`: 原始新闻标题
+        - `summary`: 已生成摘要或已有摘要
+        - `content`: 新闻正文素材
+        - `max_chars`: 精简后标题最大字数
+
+        输出:
+        - 精简后的标题；无需精简或失败时返回 None
+
+        作用:
+        - 在摘要生成流程中，将超过 30 字的长标题压缩为适合列表展示的短标题。
+        """
+
+        if not should_refine_title(title):
+            return None
+
+        material = (summary or content or "").strip()
+        system_prompt = prompt_manager.get_system_prompt("title_refinement", max_chars=max_chars)
+        user_prompt = prompt_manager.get_user_prompt(
+            "title_refinement",
+            title=title,
+            summary=material[:800],
+        )
+        if not user_prompt:
+            return None
+
+        prefer_backup = self._get_prefer_backup("SUMMARY")
+        res = await self._call_llm_with_routes(user_prompt, system_prompt, prefer_backup=prefer_backup)
+        refined = normalize_refined_title(res or "", max_chars=max_chars)
+        if not refined or refined == title:
+            return None
+        return refined
 
     async def _call_llm_with_routes(
         self,

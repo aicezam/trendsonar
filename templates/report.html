@@ -316,6 +316,7 @@
     let chartTermTrend = null, chartTermSentiment = null, chartTermCooccurrence = null;
     let reportClickableTerms = [];
     let reportNegativeTerms = [];
+    let reportPositiveTerms = [];
     let activeTermAnalysis = { term: "", range: "year" };
     let termAnalysisAbortController = null;
     let termAnalysisRequestId = 0;
@@ -326,6 +327,11 @@
     const TS_COUNT_COLOR = '#60a5fa';
     const TS_AXIS_COLOR = 'rgba(71, 85, 105, 0.76)';
     const TS_GRID_COLOR = 'rgba(148, 163, 184, 0.18)';
+    const TERM_TONE_COLORS = {
+        entity: { main: '#2563eb', soft: 'rgba(37, 99, 235, 0.13)', stroke: 'rgba(37, 99, 235, 0.32)' },
+        negative: { main: '#ef4444', soft: 'rgba(239, 68, 68, 0.13)', stroke: 'rgba(239, 68, 68, 0.32)' },
+        positive: { main: '#10b981', soft: 'rgba(16, 185, 129, 0.13)', stroke: 'rgba(16, 185, 129, 0.32)' }
+    };
 
     function escapeHtml(text) {
         return String(text || "")
@@ -338,6 +344,59 @@
 
     function escapeRegExp(text) {
         return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function normalizeTermName(value) {
+        return String(value || '').trim();
+    }
+
+    function getTermTone(word, negativeTerms = reportNegativeTerms, positiveTerms = reportPositiveTerms) {
+        const name = normalizeTermName(typeof word === 'string' ? word : word?.name);
+        const rawType = String(typeof word === 'object' ? (word?.type || word?.category || word?.tag_type || word?.sentiment || '') : '').toLowerCase();
+        const positiveHints = ['正面', '积极', '利好', '上涨', '增长', '创新', '高质量发展', '成功', '突破', '优秀', '复苏', '增长', '合作'];
+        const negativeHints = ['负面', '消极', '利空', '下跌', '受伤', '死亡', '事故', '关税', '火灾', '诈骗', '冲突', '风险', '危机', '制裁', '爆炸', '违法'];
+
+        if (rawType.includes('negative') || rawType.includes('负')) return 'negative';
+        if (rawType.includes('positive') || rawType.includes('正')) return 'positive';
+        if ((negativeTerms || []).includes(name) || negativeHints.some(t => name.includes(t))) return 'negative';
+        if ((positiveTerms || []).includes(name) || positiveHints.some(t => name.includes(t))) return 'positive';
+        return 'entity';
+    }
+
+    function buildCooccurrenceSymbol(tone) {
+        const palette = TERM_TONE_COLORS[tone] || TERM_TONE_COLORS.entity;
+        const svg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+                <circle cx="32" cy="32" r="28" fill="${palette.soft}" stroke="${palette.stroke}" stroke-width="2"/>
+                <circle cx="32" cy="32" r="6" fill="${palette.main}"/>
+            </svg>
+        `.trim();
+        return `image://data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    }
+
+    function styleCooccurrenceNodes(nodes, negativeTerms = reportNegativeTerms, positiveTerms = reportPositiveTerms) {
+        return (nodes || []).map(node => {
+            const tone = getTermTone(node, negativeTerms, positiveTerms);
+            const palette = TERM_TONE_COLORS[tone] || TERM_TONE_COLORS.entity;
+            const rawSize = Number(node.symbolSize || node.value || 32);
+            const symbolSize = Math.max(26, Math.min(58, rawSize));
+            return {
+                ...node,
+                symbol: buildCooccurrenceSymbol(tone),
+                symbolSize,
+                itemStyle: {
+                    ...(node.itemStyle || {}),
+                    color: palette.main,
+                    borderColor: palette.stroke,
+                    shadowBlur: 0
+                },
+                label: {
+                    ...(node.label || {}),
+                    color: palette.main,
+                    fontWeight: 750
+                }
+            };
+        });
     }
 
     // 初始化筛选项与历史记录。
@@ -729,18 +788,44 @@
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder("utf-8");
-            let fullText = "";
+            let renderedText = "";
+            let pendingText = "";
             let hasData = false;
+            let streamEnded = false;
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value, { stream: true });
-                fullText += chunk;
-                if (fullText.trim()) {
-                    hasData = true;
-                    aiContent.innerHTML = enhanceClickableAnalysis(marked.parse(fullText));
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            const renderPendingText = async () => {
+                while (!streamEnded || pendingText.length > 0) {
+                    if (signal.aborted) return;
+                    if (!pendingText.length) {
+                        await sleep(30);
+                        continue;
+                    }
+
+                    const step = pendingText.length > 1000 ? 96 : (pendingText.length > 300 ? 48 : 18);
+                    renderedText += pendingText.slice(0, step);
+                    pendingText = pendingText.slice(step);
+
+                    if (renderedText.trim()) {
+                        hasData = true;
+                        aiContent.innerHTML = enhanceClickableAnalysis(marked.parse(renderedText));
+                    }
+                    await sleep(22);
                 }
+            };
+
+            const renderTask = renderPendingText();
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const chunk = decoder.decode(value, { stream: true });
+                    pendingText += chunk;
+                }
+            } finally {
+                streamEnded = true;
+                await renderTask;
             }
 
             if (!hasData) {
@@ -893,16 +978,33 @@
                  generate_ai: 'true'
              });
 
-             try {
-                 const res = await fetch(`/api/report/generate?${params.toString()}`, { method: 'POST' });
-                 if (!res.ok) throw new Error("提交失败");
+              try {
+                  document.getElementById('loading').style.display = 'flex';
+                  const res = await fetch(`/api/report/generate?${params.toString()}`, { method: 'POST' });
+                  const payload = await res.json().catch(() => ({}));
+                  if (!res.ok) throw new Error("提交失败");
 
-                 showBackgroundNotification();
-                 startPolling(keyword, baselineId);
-             } catch(e) {
-                 alert("任务提交失败: " + e.message);
-             }
-             return;
+                  if (keyword && payload.report_id) {
+                      const reportResp = await fetch(`/api/report/load/${payload.report_id}`, { cache: 'no-store' });
+                      if (!reportResp.ok) throw new Error("报告加载失败");
+                      const data = await reportResp.json();
+                      currentReportId = payload.report_id;
+                      switchView('keyword');
+                      renderReport(data, 'keyword');
+                      hideBackgroundNotification();
+                      loadRecentReports();
+                      loadHistoryList(keyword);
+                      return;
+                  }
+
+                  showBackgroundNotification();
+                  startPolling(keyword, baselineId);
+              } catch(e) {
+                  alert("任务提交失败: " + e.message);
+              } finally {
+                  document.getElementById('loading').style.display = 'none';
+              }
+              return;
         }
 
         document.getElementById('loading').style.display = 'flex';
@@ -980,7 +1082,9 @@
             else if (type === 'sentiment') {
                 const sentimentDist = Array.isArray(data) ? data : (data.sentiment_dist || []);
                 const negKeywords = Array.isArray(data) ? [] : (data.neg_keywords || []);
+                const posKeywords = Array.isArray(data) ? [] : (data.pos_keywords || []);
                 reportNegativeTerms = (negKeywords || []).map(t => String(t).trim()).filter(Boolean);
+                reportPositiveTerms = (posKeywords || []).map(t => String(t).trim()).filter(Boolean);
                 renderSentimentChart(sentimentDist);
                 const negEl = document.getElementById('negKeywords');
                 if (negEl) negEl.innerText = reportNegativeTerms.join(', ');
@@ -1047,6 +1151,7 @@
 
         const charts = data.charts || {};
         reportNegativeTerms = (charts.neg_keywords || []).map(t => String(t).trim()).filter(Boolean);
+        reportPositiveTerms = (charts.pos_keywords || []).map(t => String(t).trim()).filter(Boolean);
         setTxt('negKeywords', reportNegativeTerms.join(', '));
         renderTrendChart(charts.trend);
         renderWordCloud(charts.word_cloud);
@@ -1327,16 +1432,7 @@
     }
 
     function getWordCloudTone(word) {
-        const name = String(word?.name || '').trim();
-        const rawType = String(word?.type || word?.category || word?.tag_type || word?.sentiment || '').toLowerCase();
-        const positiveHints = ['正面', '积极', '利好', '上涨', '增长', '创新', '高质量发展', '成功', '突破', '优秀', '复苏'];
-        const negativeHints = ['负面', '消极', '利空', '下跌', '受伤', '死亡', '事故', '关税', '火灾', '诈骗', '停火', '冲突', '风险', '危机'];
-
-        if (rawType.includes('negative') || rawType.includes('负')) return 'negative';
-        if (rawType.includes('positive') || rawType.includes('正')) return 'positive';
-        if (reportNegativeTerms.includes(name) || negativeHints.some(t => name.includes(t))) return 'negative';
-        if (positiveHints.some(t => name.includes(t))) return 'positive';
-        return 'entity';
+        return getTermTone(word);
     }
 
     function renderWordCloud(words) {
@@ -1817,18 +1913,19 @@
     function renderTermCooccurrenceChart(data) {
         if (chartTermCooccurrence) chartTermCooccurrence.dispose();
         chartTermCooccurrence = echarts.init(document.getElementById('termCooccurrenceChart'));
+        const nodes = styleCooccurrenceNodes(data.nodes || []);
         chartTermCooccurrence.setOption({
-            color: TS_CHART_COLORS,
-            tooltip: {},
+            tooltip: { trigger: 'item' },
             series: [{
                 type: 'graph',
                 layout: 'force',
                 roam: true,
-                data: data.nodes || [],
+                data: nodes,
                 links: data.links || [],
-                label: { show: !isMobileScreen(), position: 'right' },
+                label: { show: !isMobileScreen(), position: 'right', distance: 8 },
                 force: { repulsion: 180, edgeLength: 70 },
-                lineStyle: { color: 'source', curveness: 0.25 }
+                lineStyle: { color: 'rgba(148, 163, 184, 0.48)', width: 1.2, curveness: 0.25 },
+                emphasis: { focus: 'adjacency', lineStyle: { width: 2.2, color: 'rgba(71, 85, 105, 0.72)' } }
             }]
         });
         hideTermChartPlaceholder('termCooccurrenceChart');
@@ -1844,18 +1941,19 @@
              return;
         }
 
+        const nodes = styleCooccurrenceNodes(data.nodes || []);
         chartCorrelation.setOption({
-            color: TS_CHART_COLORS,
-            tooltip: {},
+            tooltip: { trigger: 'item' },
             series: [{
                 type: 'graph',
                 layout: 'force',
-                data: data.nodes,
+                data: nodes,
                 links: data.links,
                 roam: true,
-                label: { show: !isMobile, position: 'right' },
+                label: { show: !isMobile, position: 'right', distance: 8 },
                 force: { repulsion: isMobile ? 100 : 200, edgeLength: isMobile ? 50 : 80 },
-                lineStyle: { color: 'source', curveness: 0.3 }
+                lineStyle: { color: 'rgba(148, 163, 184, 0.48)', width: 1.2, curveness: 0.3 },
+                emphasis: { focus: 'adjacency', lineStyle: { width: 2.2, color: 'rgba(71, 85, 105, 0.72)' } }
             }]
         });
     }

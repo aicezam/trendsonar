@@ -20,6 +20,7 @@ from app.models.news import News
 from app.models.topic import Topic, TopicTimelineItem
 from app.services.ai_service import AIService
 from app.services.crawler_service import crawler_service
+from app.services.news_title_service import refine_news_title_if_needed
 from app.services.topic_discovery_service import TopicDiscoveryService
 from app.utils.retry import retry_async_result
 from app.utils.summary_material import build_summary_generation_input, get_existing_summary_material
@@ -1270,6 +1271,7 @@ class TopicService:
                     fresh_summary = await self.ai.generate_summary(news.title, news.content, max_words=200)
                     if fresh_summary:
                         news.summary = fresh_summary
+                        await refine_news_title_if_needed(news, summary=fresh_summary, content=news.content or "", ai=self.ai)
                 db.add(news)
                 ready_news.append(news)
 
@@ -1321,6 +1323,7 @@ class TopicService:
             summary = await self.ai.generate_summary(news.title, input_content, max_words=200)
             if summary:
                 news.summary = summary
+                await refine_news_title_if_needed(news, summary=summary, content=input_content, ai=self.ai)
                 db.add(news)
         except Exception:
             pass
