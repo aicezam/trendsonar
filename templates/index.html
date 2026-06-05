@@ -188,7 +188,8 @@
             chat: {
                 isOpen: false,
                 isSending: false,
-                useBackup: false
+                useBackup: false,
+                conversationId: localStorage.getItem('agent_conversation_id') || ''
             },
             detail: {
                 loading: false
@@ -668,60 +669,57 @@
                 els.chatSend.disabled = true;
                 els.chatSend.innerText = '...';
 
-                const aiMsgId = appendMessage('...', 'ai');
+                const aiMsgId = appendMessage('', 'ai');
                 const aiMsgEl = document.getElementById(aiMsgId);
+                aiMsgEl.classList.add('agent-message');
 
-                const statusMessages = ['思考中...', '查询中...', '准备回复...'];
-                let statusIdx = 0;
-                aiMsgEl.innerHTML = `<span class="inline-loading">${statusMessages[0]}</span>`;
-
-                const statusTimer = setInterval(() => {
-                    if (statusIdx < statusMessages.length - 1) {
-                        statusIdx++;
-                        aiMsgEl.innerHTML = `<span class="inline-loading">${statusMessages[statusIdx]}</span>`;
-                    }
-                }, 5000);
+                const renderState = {
+                    answer: '',
+                    status: '智能体思考中...',
+                    tools: [],
+                    toolMap: new Map()
+                };
+                renderAgentMessage(aiMsgEl, renderState);
 
                 try {
                     const params = new URLSearchParams({
                         query: text,
-                        stream: 'true',
                         use_backup: state.chat.useBackup
                     });
+                    if (state.chat.conversationId) {
+                        params.set('conversation_id', state.chat.conversationId);
+                    }
 
-                    const response = await fetch(`/api/chat?${params.toString()}`);
+                    const response = await fetch(`/api/agent/chat?${params.toString()}`);
                     if (!response.ok) throw new Error("API Error");
 
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
-
-                    // 累积流式 Markdown 内容，避免每个分片单独渲染造成闪烁。
-                    let fullText = "";
-                    let isFirstChunk = true;
+                    let buffer = "";
 
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) break;
 
-                        if (isFirstChunk) {
-                            clearInterval(statusTimer);
-                            isFirstChunk = false;
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+                        for (const line of lines) {
+                            if (!line.trim()) continue;
+                            handleAgentEvent(line, renderState);
+                            renderAgentMessage(aiMsgEl, renderState);
                         }
-
-                        const chunk = decoder.decode(value, { stream: true });
-                        fullText += chunk;
-
-                        aiMsgEl.innerHTML = marked.parse(fullText);
-
-                        els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+                    }
+                    if (buffer.trim()) {
+                        handleAgentEvent(buffer, renderState);
+                        renderAgentMessage(aiMsgEl, renderState);
                     }
 
                 } catch (e) {
-                    clearInterval(statusTimer);
-                    aiMsgEl.innerText += "\n[出错: " + e.message + "]";
+                    renderState.status = "调用失败";
+                    renderState.answer += `\n\n[出错: ${e.message}]`;
+                    renderAgentMessage(aiMsgEl, renderState);
                 } finally {
-                    // 停止等待态轮询，恢复输入控件。
-                    clearInterval(statusTimer);
                     state.chat.isSending = false;
                     els.chatSend.disabled = false;
                     els.chatSend.innerText = '发送';
@@ -732,6 +730,119 @@
             els.chatInput.onkeyup = (e) => {
                 if (e.key === 'Enter') sendMsg();
             };
+        }
+
+        function handleAgentEvent(line, renderState) {
+            let event;
+            try {
+                event = JSON.parse(line);
+            } catch (e) {
+                renderState.answer += line;
+                return;
+            }
+
+            if (event.type === 'conversation' && event.conversation_id) {
+                state.chat.conversationId = event.conversation_id;
+                localStorage.setItem('agent_conversation_id', event.conversation_id);
+                return;
+            }
+
+            if (event.type === 'tool_call') {
+                const item = {
+                    id: event.tool_call_id || `tool-${Date.now()}-${renderState.tools.length}`,
+                    name: event.tool_name || 'unknown_tool',
+                    args: event.args || {},
+                    result: null,
+                    status: 'running'
+                };
+                renderState.tools.push(item);
+                renderState.toolMap.set(item.id, item);
+                renderState.status = `正在调用工具：${item.name}`;
+                return;
+            }
+
+            if (event.type === 'tool_result') {
+                const item = renderState.toolMap.get(event.tool_call_id);
+                if (item) {
+                    item.result = event.content;
+                    item.status = event.outcome === 'success' ? 'done' : 'failed';
+                } else {
+                    renderState.tools.push({
+                        id: event.tool_call_id || `tool-result-${Date.now()}`,
+                        name: event.tool_name || 'unknown_tool',
+                        args: {},
+                        result: event.content,
+                        status: event.outcome === 'success' ? 'done' : 'failed'
+                    });
+                }
+                renderState.status = '工具调用完成，正在整理答案...';
+                return;
+            }
+
+            if (event.type === 'answer_delta') {
+                renderState.answer += event.content || '';
+                renderState.status = renderState.answer ? '' : '正在生成回复...';
+                return;
+            }
+
+            if (event.type === 'answer_done') {
+                if (!renderState.answer && event.content) {
+                    renderState.answer = event.content;
+                }
+                renderState.status = '';
+                return;
+            }
+
+            if (event.type === 'error') {
+                renderState.status = '智能体出错';
+                renderState.answer += `\n\n[出错: ${event.message || '未知错误'}]`;
+            }
+        }
+
+        function renderAgentMessage(container, renderState) {
+            const toolsHtml = renderState.tools.length
+                ? `<div class="agent-tool-list">${renderState.tools.map(renderToolTrace).join('')}</div>`
+                : '';
+            const statusHtml = renderState.status
+                ? `<div class="agent-status"><span class="inline-loading">${escapeHtml(renderState.status)}</span></div>`
+                : '';
+            const answerHtml = renderState.answer
+                ? `<div class="agent-answer markdown-body">${marked.parse(renderState.answer)}</div>`
+                : '';
+            container.innerHTML = `${statusHtml}${toolsHtml}${answerHtml}`;
+            els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+        }
+
+        function renderToolTrace(item) {
+            const statusText = item.status === 'done' ? '完成' : (item.status === 'failed' ? '失败' : '运行中');
+            const statusClass = item.status === 'done' ? 'agent-tool-done' : (item.status === 'failed' ? 'agent-tool-failed' : 'agent-tool-running');
+            const body = {
+                input: item.args || {},
+                output: compactToolOutput(item.result)
+            };
+            return `
+                <details class="agent-tool" ${item.status === 'running' ? 'open' : ''}>
+                    <summary>
+                        <span class="agent-tool-name">${escapeHtml(item.name)}</span>
+                        <span class="agent-tool-status ${statusClass}">${statusText}</span>
+                    </summary>
+                    <pre>${escapeHtml(JSON.stringify(body, null, 2))}</pre>
+                </details>
+            `;
+        }
+
+        function compactToolOutput(value) {
+            if (value === null || value === undefined) return null;
+            try {
+                const text = JSON.stringify(value, null, 2);
+                if (text.length > 5000) {
+                    return `${text.slice(0, 5000)}...(已截断)`;
+                }
+                return value;
+            } catch (e) {
+                const text = String(value || '');
+                return text.length > 5000 ? `${text.slice(0, 5000)}...(已截断)` : text;
+            }
         }
 
         function appendMessage(text, role) {

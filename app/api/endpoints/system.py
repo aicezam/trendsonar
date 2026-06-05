@@ -15,6 +15,7 @@ import time as perf_time
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import yaml
@@ -34,6 +35,7 @@ from app.models.news import News
 from app.schemas.system import AdminAuth
 from app.services.ai_service import ai_service
 from app.services.admin_service import is_admin_request, load_config_yaml_text, save_config_yaml_text, schedule_restart, verify_admin_password
+from app.services.agent_service import agent_service
 from app.services.pipeline_service import background_analyze_all, reanalyze_all_categories, run_manual
 from app.services.source_health_service import source_health_service
 from app.services.task_manager import task_manager
@@ -749,6 +751,43 @@ async def chat_api(
     async for chunk in ai_service.stream_chat(query, context_text, model_type):
         full_response += chunk
     return {"response": full_response}
+
+
+@router.get("/agent/chat")
+async def agent_chat_api(
+    query: str,
+    conversation_id: Optional[str] = None,
+    use_backup: bool = False,
+):
+    """
+    输入:
+    - `query`: 用户问题
+    - `conversation_id`: 连续对话 ID（可选）
+    - `use_backup`: 是否强制使用备用模型
+
+    输出:
+    - JSONL 流式事件，包括会话 ID、工具调用、工具结果、回答增量和结束事件
+
+    作用:
+    - 使用 PydanticAI 智能体自主分解任务并调用 TrendSonar 工具。
+    """
+
+    async def event_stream():
+        async for event in agent_service.stream_chat(
+            query=query,
+            conversation_id=conversation_id,
+            use_backup=use_backup,
+        ):
+            yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/admin/news_sources")

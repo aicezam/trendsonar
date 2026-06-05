@@ -3255,6 +3255,48 @@ body.page-index .chat-widget-icon { width: 18px; height: 18px;
 body.page-index .chat-widget-icon svg { width: 18px; height: 18px;
 }
 
+body.page-index .message.ai.agent-message { width: min(92%, 620px); max-width: 92%;
+}
+
+body.page-index .agent-status { color: var(--text-light); font-size: 0.82rem;
+}
+
+body.page-index .agent-tool-list { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 8px;
+}
+
+body.page-index .agent-tool { border: 1px solid color-mix(in srgb, var(--primary-color) 16%, var(--border-color)); border-radius: 8px; background: color-mix(in srgb, var(--bg-card) 94%, var(--primary-light)); overflow: hidden;
+}
+
+body.page-index .agent-tool summary { min-height: 30px; padding: 5px 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; font-size: 0.78rem; user-select: none;
+}
+
+body.page-index .agent-tool-name { font-weight: 750; color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+body.page-index .agent-tool-status { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; font-size: 0.7rem; color: var(--text-light); background: var(--bg-soft);
+}
+
+body.page-index .agent-tool-status.agent-tool-running { color: var(--primary-color); background: var(--primary-light);
+}
+
+body.page-index .agent-tool-status.agent-tool-done { color: #047857; background: #d1fae5;
+}
+
+body.page-index .agent-tool-status.agent-tool-failed { color: #b91c1c; background: #fee2e2;
+}
+
+body.page-index .agent-tool pre { margin: 0; padding: 8px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; border-top: 1px solid var(--border-color); color: var(--text-light); font-size: 0.72rem; line-height: 1.45; background: color-mix(in srgb, var(--bg-soft) 70%, var(--bg-card));
+}
+
+body.page-index .agent-answer { min-width: 0;
+}
+
+body.page-index .agent-answer p:first-child { margin-top: 0;
+}
+
+body.page-index .agent-answer p:last-child { margin-bottom: 0;
+}
+
 @media (max-width: 767px) { .header-main,
     body.page-index .header-main { gap: 14px;}
 
