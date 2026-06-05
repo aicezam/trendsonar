@@ -292,6 +292,83 @@
         let activeTermAnalysis = { term: "", range: "year" };
         let termAnalysisAbortController = null;
         let termAnalysisRequestId = 0;
+        let chartIndexTermTrend = null;
+        let chartIndexTermSentiment = null;
+        let chartIndexTermCooccurrence = null;
+        const TS_CHART_COLORS = ['#10b981', '#60a5fa', '#f59e0b', '#f87171', '#8b5cf6', '#14b8a6', '#94a3b8'];
+        const TS_HEAT_COLOR = '#f59e0b';
+        const TS_COUNT_COLOR = '#60a5fa';
+        const TERM_TONE_COLORS = {
+            entity: { main: '#2563eb', soft: 'rgba(37, 99, 235, 0.13)', stroke: 'rgba(37, 99, 235, 0.32)' },
+            negative: { main: '#ef4444', soft: 'rgba(239, 68, 68, 0.13)', stroke: 'rgba(239, 68, 68, 0.32)' },
+            positive: { main: '#10b981', soft: 'rgba(16, 185, 129, 0.13)', stroke: 'rgba(16, 185, 129, 0.32)' }
+        };
+
+        function isMobileScreen() {
+            return window.innerWidth <= 768;
+        }
+
+        function normalizeTermName(value) {
+            return String(value || '').trim();
+        }
+
+        function getTermTone(word) {
+            const name = normalizeTermName(typeof word === 'string' ? word : word?.name);
+            const rawType = String(typeof word === 'object' ? (word?.type || word?.category || word?.tag_type || word?.sentiment || '') : '').toLowerCase();
+            const positiveHints = ['正面', '积极', '利好', '上涨', '增长', '创新', '高质量发展', '成功', '突破', '优秀', '复苏', '合作'];
+            const negativeHints = ['负面', '消极', '利空', '下跌', '受伤', '死亡', '事故', '关税', '火灾', '诈骗', '冲突', '风险', '危机', '制裁', '爆炸', '违法'];
+
+            if (rawType.includes('negative') || rawType.includes('负')) return 'negative';
+            if (rawType.includes('positive') || rawType.includes('正')) return 'positive';
+            if (negativeHints.some(t => name.includes(t))) return 'negative';
+            if (positiveHints.some(t => name.includes(t))) return 'positive';
+            return 'entity';
+        }
+
+        function buildCooccurrenceSymbol(tone) {
+            const palette = TERM_TONE_COLORS[tone] || TERM_TONE_COLORS.entity;
+            const svg = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+                    <circle cx="32" cy="32" r="28" fill="${palette.soft}" stroke="${palette.stroke}" stroke-width="2"/>
+                    <circle cx="32" cy="32" r="6" fill="${palette.main}"/>
+                </svg>
+            `.trim();
+            return `image://data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+        }
+
+        function styleCooccurrenceNodes(nodes) {
+            return (nodes || []).map(node => {
+                const tone = getTermTone(node);
+                const palette = TERM_TONE_COLORS[tone] || TERM_TONE_COLORS.entity;
+                const rawSize = Number(node.symbolSize || node.value || 32);
+                const symbolSize = Math.max(26, Math.min(58, rawSize));
+                return {
+                    ...node,
+                    symbol: buildCooccurrenceSymbol(tone),
+                    symbolSize,
+                    itemStyle: {
+                        ...(node.itemStyle || {}),
+                        color: palette.main,
+                        borderColor: palette.stroke,
+                        shadowBlur: 0
+                    },
+                    label: {
+                        ...(node.label || {}),
+                        color: palette.main,
+                        fontWeight: 750
+                    }
+                };
+            });
+        }
+
+        function disposeIndexTermCharts() {
+            [chartIndexTermTrend, chartIndexTermSentiment, chartIndexTermCooccurrence].forEach(chart => {
+                if (chart) chart.dispose();
+            });
+            chartIndexTermTrend = null;
+            chartIndexTermSentiment = null;
+            chartIndexTermCooccurrence = null;
+        }
 
         class MultiSelect {
             constructor(containerIdOrElement, placeholder, options, selectedValues, onChange) {
@@ -703,6 +780,7 @@
                 const renderState = {
                     answer: '',
                     status: '智能体思考中...',
+                    done: false,
                     tools: [],
                     toolMap: new Map(),
                     references: new Map(),
@@ -735,19 +813,27 @@
                         buffer = lines.pop() || '';
                         for (const line of lines) {
                             if (!line.trim()) continue;
+                            const shouldFollow = shouldAutoScrollChat();
                             handleAgentEvent(line, renderState);
-                            renderAgentMessage(aiMsgEl, renderState);
+                            renderAgentMessage(aiMsgEl, renderState, shouldFollow);
                         }
                     }
                     if (buffer.trim()) {
+                        const shouldFollow = shouldAutoScrollChat();
                         handleAgentEvent(buffer, renderState);
-                        renderAgentMessage(aiMsgEl, renderState);
+                        renderAgentMessage(aiMsgEl, renderState, shouldFollow);
+                    }
+                    if (!renderState.done) {
+                        renderState.status = '';
+                        renderState.done = true;
+                        renderAgentMessage(aiMsgEl, renderState, shouldAutoScrollChat());
                     }
 
                 } catch (e) {
                     renderState.status = "调用失败";
+                    renderState.done = true;
                     renderState.answer += `\n\n[出错: ${e.message}]`;
-                    renderAgentMessage(aiMsgEl, renderState);
+                    renderAgentMessage(aiMsgEl, renderState, shouldAutoScrollChat());
                 } finally {
                     state.chat.isSending = false;
                     els.chatSend.disabled = false;
@@ -825,16 +911,27 @@
                     renderState.answer = event.content;
                 }
                 renderState.status = '';
+                renderState.done = true;
                 return;
             }
 
             if (event.type === 'error') {
                 renderState.status = '智能体出错';
+                renderState.done = true;
                 renderState.answer += `\n\n[出错: ${event.message || '未知错误'}]`;
             }
         }
 
-        function renderAgentMessage(container, renderState) {
+        function shouldAutoScrollChat() {
+            const el = els.chatMessages;
+            return el.scrollHeight - el.scrollTop - el.clientHeight < 72;
+        }
+
+        function scrollChatToBottom() {
+            els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+        }
+
+        function renderAgentMessage(container, renderState, shouldScroll = true) {
             const toolsHtml = renderState.tools.length
                 ? `<div class="agent-tool-list">${renderState.tools.map(renderToolTrace).join('')}</div>`
                 : '';
@@ -844,11 +941,10 @@
             const answerHtml = renderState.answer
                 ? `<div class="agent-answer markdown-body">${renderAgentAnswer(renderState.answer, renderState)}</div>`
                 : '';
-            const referencesHtml = renderAgentReferences(renderState);
-            const termsHtml = renderAgentTerms(renderState);
-            container.innerHTML = `${statusHtml}${toolsHtml}${answerHtml}${referencesHtml}${termsHtml}`;
+            const referencesHtml = renderState.done ? renderAgentReferences(renderState) : '';
+            container.innerHTML = `${statusHtml}${toolsHtml}${answerHtml}${referencesHtml}`;
             bindAgentMessageActions(container);
-            els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+            if (shouldScroll) scrollChatToBottom();
         }
 
         function mergeAgentMeta(renderState, event) {
@@ -888,7 +984,7 @@
             const parsed = marked.parse(extractSuggestionsFromAnswer(answer).body);
             const withCitations = enhanceAgentCitations(parsed, renderState);
             const withTerms = enhanceAgentTerms(withCitations, renderState);
-            return withTerms + renderAgentSuggestions(answer);
+            return withTerms + (renderState.done ? renderAgentSuggestions(answer) : '');
         }
 
         function extractSuggestionsFromAnswer(answer) {
@@ -1012,16 +1108,6 @@
             `;
         }
 
-        function renderAgentTerms(renderState) {
-            const terms = Array.from(renderState.terms.values()).slice(0, 18);
-            if (!terms.length) return '';
-            return `
-                <div class="agent-term-list">
-                    ${terms.map(item => `<button type="button" class="agent-term-chip" data-term="${escapeHtml(item.term)}">${escapeHtml(item.term)}</button>`).join('')}
-                </div>
-            `;
-        }
-
         function bindAgentMessageActions(container) {
             container.querySelectorAll('[data-news-id]').forEach(el => {
                 el.onclick = () => openNewsDetail(Number(el.dataset.newsId || 0));
@@ -1127,6 +1213,7 @@
                 termAnalysisAbortController.abort();
                 termAnalysisAbortController = null;
             }
+            disposeIndexTermCharts();
             termEls.modal.classList.remove('show');
             termEls.modal.setAttribute('aria-hidden', 'true');
             document.body.classList.remove('modal-open');
@@ -1185,6 +1272,7 @@
         };
 
         function renderTermAnalysisShell(loading = false) {
+            disposeIndexTermCharts();
             termEls.body.innerHTML = `
                 <div class="term-range-toolbar">
                     <button type="button" class="${activeTermAnalysis.range === '30d' ? 'active' : ''}" onclick="changeIndexTermAnalysisRange('30d')">最近30天</button>
@@ -1262,17 +1350,18 @@
         function renderTermTrendChart(data) {
             const el = document.getElementById('termTrendChart');
             if (!el || !window.echarts) return;
-            const chart = echarts.init(el);
-            chart.setOption({
-                color: ['#60a5fa', '#f59e0b'],
+            if (chartIndexTermTrend) chartIndexTermTrend.dispose();
+            chartIndexTermTrend = echarts.init(el);
+            chartIndexTermTrend.setOption({
+                color: [TS_COUNT_COLOR, TS_HEAT_COLOR],
                 tooltip: { trigger: 'axis' },
                 legend: { bottom: 0 },
                 grid: { left: 36, right: 42, top: 24, bottom: 48 },
                 xAxis: { type: 'category', data: data.dates || [] },
                 yAxis: [{ type: 'value', name: '报道量' }, { type: 'value', name: '热度' }],
                 series: [
-                    { name: '报道量', type: 'bar', data: data.count || [], itemStyle: { borderRadius: [5, 5, 0, 0] } },
-                    { name: '热度', type: 'line', yAxisIndex: 1, smooth: true, data: data.heat || [] }
+                    { name: '报道量', type: 'bar', data: data.count || [], itemStyle: { color: TS_COUNT_COLOR, borderRadius: [5, 5, 0, 0] } },
+                    { name: '热度', type: 'line', yAxisIndex: 1, smooth: true, data: data.heat || [], itemStyle: { color: TS_HEAT_COLOR }, lineStyle: { width: 3, color: TS_HEAT_COLOR }, areaStyle: { opacity: 0.08, color: TS_HEAT_COLOR } }
                 ]
             });
         }
@@ -1280,11 +1369,12 @@
         function renderTermSentimentChart(data) {
             const el = document.getElementById('termSentimentChart');
             if (!el || !window.echarts) return;
-            const chart = echarts.init(el);
-            chart.setOption({
-                color: ['#10b981'],
+            if (chartIndexTermSentiment) chartIndexTermSentiment.dispose();
+            chartIndexTermSentiment = echarts.init(el);
+            chartIndexTermSentiment.setOption({
+                color: TS_CHART_COLORS,
                 tooltip: { trigger: 'axis' },
-                grid: { left: 36, right: 20, top: 24, bottom: 36 },
+                grid: { left: 36, right: 24, top: 24, bottom: 42 },
                 xAxis: { type: 'category', data: data.dates || [] },
                 yAxis: { type: 'value', min: 0, max: 100 },
                 series: data.series || []
@@ -1294,19 +1384,21 @@
         function renderTermCooccurrenceChart(data) {
             const el = document.getElementById('termCooccurrenceChart');
             if (!el || !window.echarts) return;
-            const chart = echarts.init(el);
-            chart.setOption({
-                tooltip: {},
+            if (chartIndexTermCooccurrence) chartIndexTermCooccurrence.dispose();
+            chartIndexTermCooccurrence = echarts.init(el);
+            const nodes = styleCooccurrenceNodes(data.nodes || []);
+            chartIndexTermCooccurrence.setOption({
+                tooltip: { trigger: 'item' },
                 series: [{
                     type: 'graph',
                     layout: 'force',
                     roam: true,
-                    draggable: true,
-                    force: { repulsion: 110, edgeLength: [55, 120] },
-                    label: { show: true, fontWeight: 700 },
-                    data: (data.nodes || []).map(node => ({ ...node, symbolSize: Math.max(24, Math.min(58, Number(node.value || 1) * 5)) })),
+                    data: nodes,
                     links: data.links || [],
-                    lineStyle: { color: 'source', opacity: 0.42 }
+                    label: { show: !isMobileScreen(), position: 'right', distance: 8 },
+                    force: { repulsion: 180, edgeLength: 70 },
+                    lineStyle: { color: 'rgba(148, 163, 184, 0.48)', width: 1.2, curveness: 0.25 },
+                    emphasis: { focus: 'adjacency', lineStyle: { width: 2.2, color: 'rgba(71, 85, 105, 0.72)' } }
                 }]
             });
         }

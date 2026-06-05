@@ -97,10 +97,10 @@ def build_news_query_filters(
             pass
 
     if category and category != "all":
-        if "," in category:
-            stmt = stmt.where(News.category.in_([c.strip() for c in category.split(",") if c.strip()]))
-        else:
-            stmt = stmt.where(News.category == category)
+        selected_categories = [c.strip() for c in str(category).replace("，", ",").split(",") if c.strip()]
+        if selected_categories:
+            conditions = [News.category.ilike(f"%{c}%") for c in selected_categories]
+            stmt = stmt.where(or_(*conditions))
 
     normalized_region = normalize_regions_to_countries(region) if region and region != "all" else ""
     if normalized_region and normalized_region not in {"其他", "全球"}:

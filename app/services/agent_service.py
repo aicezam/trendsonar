@@ -40,11 +40,13 @@ AGENT_SYSTEM_PROMPT = """
 2. 用户问“今天”“昨日”“本周”等相对日期时，优先调用新闻或报告工具确认数据；“今天有哪些热点新闻”默认使用 get_top_news(date="today", limit=20)，不要自行降到 10 条。
 3. 列出新闻时必须尽量写出标题、来源、时间、热度、摘要和引用标记；引用格式使用 [新闻:ID]，其中 ID 必须来自工具返回。
 4. 如果新闻工具返回 summary 字段，回答必须输出摘要；summary 为空时才写“暂无摘要”。
-5. 需要创建报告或专题时，必须先调用对应工具完成查重；工具会负责发现已存在记录时避免重复创建。
-6. 如果需要同时了解新闻、专题、报告或词项趋势，可以连续调用多个工具，最后给出整合结论。
-7. 当工具返回数据为空时，要说明没有查到，并给出下一步可尝试的筛选条件。
-8. 如果要给出可点击的下一步建议，请在回答末尾单独输出一段“下一步建议：”，每条建议使用 <<建议:建议文本>> 标记，不要把建议混在正文里。
-9. 最终回复要简洁、可执行；涉及列表时保留标题、来源、时间、热度或 ID 等关键信息。
+5. 用户用自然语言查找某类新闻时，优先把地区、主题、同义词合并到 search_news 的 q 中做语义召回；不要只依赖 category/region 硬过滤。例如“美国近7天军事新闻”可调用 search_news(q="美国 军事 美军 防务", date="7d")。
+6. 需要创建报告或专题时，必须先调用对应工具完成查重；工具会负责发现已存在记录时避免重复创建。创建专题必须用户已登录管理账号；创建报告受到每 1 分钟 1 个新报告的限流，遇到 rate_limited 时要提示用户稍后再试。
+7. 如果需要同时了解新闻、专题、报告或词项趋势，可以连续调用多个工具，最后给出整合结论。
+8. 当工具返回数据为空时，要说明没有查到，并给出下一步可尝试的筛选条件。
+9. 新闻列表、热点梳理或趋势分析类回答，必须在正文末尾单独输出“下一步建议：”，给出 2-4 条可继续追问的建议；每条建议使用 <<建议:建议文本>> 标记，不要把建议混在正文里。
+10. 不要在正文末尾额外输出关键词、实体或标签清单；可点击词项由前端从正文自动识别。
+11. 最终回复要简洁、可执行；涉及列表时保留标题、来源、时间、热度或 ID 等关键信息。
 """
 
 
@@ -80,6 +82,7 @@ class AgentDeps:
     """
 
     conversation_id: str
+    is_admin: bool = False
 
 
 class AgentService:
@@ -309,7 +312,7 @@ class AgentService:
                 generate_ai=generate_ai,
             )
 
-        @agent.tool(description="生成指定关键词的报告缓存。工具内部会先查询现有报告，已存在时不会重复创建。")
+        @agent.tool(description="生成指定关键词的报告缓存。工具内部会先查询现有报告，已存在时不会重复创建；新建报告限制为每 1 分钟 1 个。")
         async def create_keyword_report(
             ctx: RunContext[AgentDeps],
             keyword: str,
@@ -330,9 +333,9 @@ class AgentService:
                 limit=limit,
             )
 
-        @agent.tool(description="创建某个新闻事件专题。工具内部会先查询现有专题，已存在同名专题时不会重复创建。")
+        @agent.tool(description="创建某个新闻事件专题。必须用户已登录管理账号；工具内部会先查询现有专题，已存在同名专题时不会重复创建。")
         async def create_event_topic(ctx: RunContext[AgentDeps], name: str) -> Dict[str, Any]:
-            return await agent_tool_service.create_event_topic(name=name)
+            return await agent_tool_service.create_event_topic(name=name, is_admin=ctx.deps.is_admin)
 
         @agent.tool(description="查询某个关键词或词项的词项分析，包括热度趋势、相关新闻、情感和共现词。")
         async def get_term_analysis(
@@ -361,12 +364,14 @@ class AgentService:
         query: str,
         conversation_id: Optional[str] = None,
         use_backup: bool = False,
+        is_admin: bool = False,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         输入:
         - `query`: 用户问题
         - `conversation_id`: 可选会话 ID
         - `use_backup`: 是否强制备用模型
+        - `is_admin`: 当前请求是否已管理员登录
 
         输出:
         - 智能体事件流字典
@@ -382,12 +387,15 @@ class AgentService:
 
         cid = conversation_id or self.create_conversation_id()
         conv = self._get_conversation(cid)
-        logger.info(f"智能体收到对话请求: conversation_id={cid}, query={user_query}, use_backup={use_backup}")
+        logger.info(
+            f"智能体收到对话请求: conversation_id={cid}, query={user_query}, "
+            f"use_backup={use_backup}, is_admin={is_admin}"
+        )
         yield {"type": "conversation", "conversation_id": cid}
 
         try:
             agent = self._build_agent(use_backup=use_backup)
-            deps = AgentDeps(conversation_id=cid)
+            deps = AgentDeps(conversation_id=cid, is_admin=bool(is_admin))
             answer_parts: List[str] = []
             final_output = ""
             emitted_meta: Dict[str, Any] = {"references": [], "terms": []}

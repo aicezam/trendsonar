@@ -849,6 +849,7 @@ async def chat_api(
 
 @router.get("/agent/chat")
 async def agent_chat_api(
+    request: Request,
     query: str,
     conversation_id: Optional[str] = None,
     use_backup: bool = False,
@@ -871,6 +872,7 @@ async def agent_chat_api(
             query=query,
             conversation_id=conversation_id,
             use_backup=use_backup,
+            is_admin=is_admin_request(request),
         ):
             yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
 

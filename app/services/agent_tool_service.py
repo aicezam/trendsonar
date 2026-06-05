@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from itertools import combinations
@@ -26,9 +27,11 @@ from app.services.task_manager import task_manager
 from app.services.topic_service import topic_service
 from app.utils.agent_tool_config import delete_custom_agent_tool, load_custom_agent_tools, save_custom_agent_tool
 from app.utils.news_query import build_news_query_filters, serialize_news_item
+from app.utils.news_search import build_soft_search_query, semantic_news_search
 from app.utils.tools import normalize_regions_to_countries
 
 logger = setup_logger("AgentToolService")
+REPORT_CREATE_COOLDOWN_SECONDS = 60
 
 
 BUILTIN_AGENT_TOOLS: list[dict[str, Any]] = [
@@ -51,12 +54,12 @@ BUILTIN_AGENT_TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_news",
         "title": "关键词新闻搜索",
-        "description": "按关键词搜索新闻并支持时间、分类、地区和来源筛选。",
+        "description": "按多个关键词语义召回新闻，支持模糊搜索、时间、分类、地区和来源线索。",
         "kind": "builtin",
         "enabled": True,
         "safe_to_test": True,
         "parameters": {
-            "q": {"type": "string", "default": "", "description": "搜索关键词。"},
+            "q": {"type": "string", "default": "", "description": "搜索关键词，可包含多个词或自然语言查询。"},
             "limit": {"type": "integer", "default": 20, "description": "返回数量。"},
             "date": {"type": "string", "default": "all", "description": "时间范围。"},
             "sort_by": {"type": "string", "default": "heat", "description": "heat 或 date。"},
@@ -292,6 +295,21 @@ class AgentToolService:
     - 将项目已有接口和服务包装成低耦合、可审计、可复用的智能体工具。
     """
 
+    def __init__(self) -> None:
+        """
+        输入:
+        - 无
+
+        输出:
+        - 工具服务实例
+
+        作用:
+        - 初始化写操作限流状态，避免智能体并发创建报告压垮服务。
+        """
+
+        self._report_create_lock = asyncio.Lock()
+        self._last_report_create_at = 0.0
+
     def list_tool_definitions(self) -> Dict[str, Any]:
         """
         输入:
@@ -497,15 +515,49 @@ class AgentToolService:
                 stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date))
 
             rows = (await db.execute(stmt.limit(safe_limit))).scalars().all()
+            relaxed_search: Optional[dict[str, Any]] = None
+            if not rows and (category or region):
+                query_text, terms = build_soft_search_query("", category=category, region=region)
+                if query_text:
+                    relaxed_stmt = build_news_query_filters(
+                        select(News),
+                        date=date or "24h",
+                        start_date=_clean_optional_text(start_date),
+                        end_date=_clean_optional_text(end_date),
+                        category=None,
+                        region=None,
+                        source=_clean_optional_text(source),
+                    )
+                    search_result = await semantic_news_search(
+                        db,
+                        relaxed_stmt,
+                        query_text,
+                        offset=0,
+                        limit=safe_limit,
+                        candidate_limit=2000,
+                        min_score=0.16,
+                        text_terms=terms,
+                        log_prefix="智能体工具 get_top_news 软召回",
+                    )
+                    rows = [row for _, row in search_result.items]
+                    if rows:
+                        relaxed_search = {
+                            "reason": "严格分类/地区筛选无结果，已改用多关键词语义召回。",
+                            "query": search_result.query,
+                            "terms": search_result.terms[:20],
+                            "matched": search_result.total,
+                            "used_embedding": search_result.used_embedding,
+                        }
             logger.info(
                 f"智能体工具 get_top_news 完成: date={date}, start={start_date}, end={end_date}, "
-                f"limit={safe_limit}, returned={len(rows)}, sort_by={sort_by}"
+                f"limit={safe_limit}, returned={len(rows)}, sort_by={sort_by}, relaxed={bool(relaxed_search)}"
             )
             return {
                 "total": len(rows),
                 "limit": safe_limit,
                 "date": date,
                 "time_range_label": _date_label(date or "24h", start_date, end_date),
+                "relaxed_search": relaxed_search,
                 "stats": _summarize_rows(rows),
                 "items": [serialize_news_item(row) for row in rows],
             }
@@ -532,7 +584,7 @@ class AgentToolService:
         - 新闻搜索结果
 
         作用:
-        - 基于标题、摘要、来源、分类、地区、关键词和实体做文本检索，供智能体查找特定事件。
+        - 基于标题、摘要、来源、分类、地区、关键词、实体和向量相似度做多关键词语义召回，供智能体查找特定事件。
         """
 
         query = (q or "").strip()
@@ -540,49 +592,49 @@ class AgentToolService:
         if not query:
             return {"total": 0, "items": [], "message": "q 不能为空"}
 
-        terms = [item.strip().lower() for item in query.replace("，", " ").replace(",", " ").split() if item.strip()]
-        if query.lower() not in terms:
-            terms.insert(0, query.lower())
-
         async with AsyncSessionLocal() as db:
             stmt = build_news_query_filters(
-                select(News).options(defer(News.content), defer(News.embedding)),
+                select(News),
                 date=date or "all",
                 start_date=_clean_optional_text(start_date),
                 end_date=_clean_optional_text(end_date),
-                category=_clean_optional_text(category),
-                region=_clean_optional_text(region),
+                category=None,
+                region=None,
                 source=_clean_optional_text(source),
             )
-            conditions = []
-            for term in terms:
-                like = f"%{term}%"
-                conditions.extend(
-                    [
-                        News.title.ilike(like),
-                        News.summary.ilike(like),
-                        News.source.ilike(like),
-                        News.category.ilike(like),
-                        News.region.ilike(like),
-                        cast(News.keywords, Text).ilike(like),
-                        cast(News.entities, Text).ilike(like),
-                    ]
-                )
-            stmt = stmt.where(or_(*conditions))
+            query_text, terms = build_soft_search_query(
+                query,
+                category=_clean_optional_text(category),
+                region=_clean_optional_text(region),
+            )
+            search_result = await semantic_news_search(
+                db,
+                stmt,
+                query_text or query,
+                offset=0,
+                limit=safe_limit,
+                candidate_limit=2000,
+                min_score=0.16,
+                text_terms=terms,
+                log_prefix="智能体工具 search_news",
+            )
+            rows = [row for _, row in search_result.items]
             if sort_by == "date":
-                stmt = stmt.order_by(desc(News.publish_date), desc(News.heat_score))
-            else:
-                stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date))
-            rows = (await db.execute(stmt.limit(safe_limit))).scalars().all()
+                rows = sorted(rows, key=lambda item: item.publish_date or datetime.min, reverse=True)
             logger.info(
                 f"智能体工具 search_news 完成: q={query}, date={date}, limit={safe_limit}, "
-                f"returned={len(rows)}, sort_by={sort_by}"
+                f"returned={len(rows)}, matched={search_result.total}, embedding={search_result.used_embedding}, sort_by={sort_by}"
             )
             return {
                 "q": query,
-                "total": len(rows),
+                "query_used": search_result.query,
+                "search_terms": search_result.terms[:24],
+                "total": search_result.total,
                 "limit": safe_limit,
                 "time_range_label": _date_label(date or "all", start_date, end_date),
+                "search_mode": "semantic_multi_keyword",
+                "used_embedding": search_result.used_embedding,
+                "elapsed_ms": round(search_result.elapsed_ms, 1),
                 "stats": _summarize_rows(rows),
                 "items": [serialize_news_item(row) for row in rows],
             }
@@ -822,6 +874,20 @@ class AgentToolService:
                 "report": existing[0],
             }
 
+        async with self._report_create_lock:
+            now = time.monotonic()
+            remaining = REPORT_CREATE_COOLDOWN_SECONDS - (now - self._last_report_create_at)
+            if remaining > 0:
+                retry_after = int(remaining) + 1
+                logger.info(f"智能体创建报告被限流: keyword={query}, retry_after={retry_after}s")
+                return {
+                    "created": False,
+                    "rate_limited": True,
+                    "retry_after_seconds": retry_after,
+                    "message": f"报告创建过于频繁，请约 {retry_after} 秒后再试。系统限制为每 1 分钟创建 1 个新报告。",
+                }
+            self._last_report_create_at = now
+
         report_id = await report_service.generate_report_and_stream_ai(
             keyword=query,
             start_date=_clean_optional_text(start_date),
@@ -839,17 +905,26 @@ class AgentToolService:
             "report": {"id": report_id, "keyword": query},
         }
 
-    async def create_event_topic(self, *, name: str) -> Dict[str, Any]:
+    async def create_event_topic(self, *, name: str, is_admin: bool = False) -> Dict[str, Any]:
         """
         输入:
         - `name`: 新闻事件专题名称
+        - `is_admin`: 当前请求是否已管理员登录
 
         输出:
         - 已存在或新创建的专题信息
 
         作用:
-        - 创建指定新闻事件专题；创建前查询现有专题，避免重复创建。
+        - 创建指定新闻事件专题；未登录时拒绝创建，创建前查询现有专题避免重复创建。
         """
+
+        if not is_admin:
+            logger.info(f"智能体创建专题被拦截: name={name}, reason=未登录")
+            return {
+                "created": False,
+                "auth_required": True,
+                "message": "创建专题需要先登录管理账号，请登录后再试。",
+            }
 
         topic_name = (name or "").strip()
         if not topic_name:
