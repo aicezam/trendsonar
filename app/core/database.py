@@ -10,8 +10,9 @@
 
 from __future__ import annotations
 
+import os
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -20,11 +21,36 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.core.config import get_settings
 from app.core.logger import logger
+from app.utils.postgres_search_indexes import ensure_postgres_search_indexes
+from app.utils.schema_migration import run_schema_migrations
 
 settings = get_settings()
 
 _engine: Optional[AsyncEngine] = None
 _sessionmaker: Optional[sessionmaker] = None
+
+
+async def _ensure_postgres_search_indexes(conn: Any) -> None:
+    """
+    输入:
+    - `conn`: SQLAlchemy 异步连接
+
+    输出:
+    - 无
+
+    作用:
+    - PostgreSQL 环境下按显式开关创建搜索所需 trigram 扩展和 GIN 索引，新库建议优先使用并发建索引脚本。
+    """
+
+    if "postgresql" not in (settings.DATABASE_URL or "").lower():
+        return
+    enabled = os.environ.get("TRENDSONAR_AUTO_SEARCH_INDEXES", "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+    try:
+        await ensure_postgres_search_indexes(conn)
+    except Exception as exc:
+        logger.warning(f"⚠️ PostgreSQL 搜索索引初始化跳过: {exc}")
 
 
 def get_engine() -> AsyncEngine:
@@ -95,10 +121,8 @@ async def init_db() -> None:
 
     engine = get_engine()
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_news_publish_date_heat_score ON news (publish_date, heat_score)"))
-        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_news_category_publish_date ON news (category, publish_date)"))
-        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_news_source_publish_date ON news (source, publish_date)"))
+        await run_schema_migrations(conn, Base.metadata)
+        await _ensure_postgres_search_indexes(conn)
         logger.info("✅ 数据库表结构和关键索引初始化完成")
 
 

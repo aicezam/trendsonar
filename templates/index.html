@@ -292,6 +292,8 @@
         let activeTermAnalysis = { term: "", range: "year" };
         let termAnalysisAbortController = null;
         let termAnalysisRequestId = 0;
+        const termAnalysisCache = new Map();
+        const TERM_ANALYSIS_CACHE_LIMIT = 12;
         let chartIndexTermTrend = null;
         let chartIndexTermSentiment = null;
         let chartIndexTermCooccurrence = null;
@@ -1256,14 +1258,23 @@
                 const defaultRange = getDefaultTermDateRange(range);
                 if (defaultRange.start_date) params.append('start_date', defaultRange.start_date);
                 if (defaultRange.end_date) params.append('end_date', defaultRange.end_date);
+                const cacheKey = params.toString();
+                const cached = termAnalysisCache.get(cacheKey);
+                if (cached) {
+                    if (requestId !== termAnalysisRequestId) return;
+                    renderTermAnalysis(cached, { fromCache: true });
+                    return;
+                }
+
                 termAnalysisAbortController = new AbortController();
-                const resp = await fetch(`/api/report/term-analysis?${params.toString()}`, {
+                const resp = await fetch(`/api/report/term-analysis?${cacheKey}`, {
                     cache: 'no-store',
                     signal: termAnalysisAbortController.signal
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
                 if (requestId !== termAnalysisRequestId) return;
+                rememberIndexTermAnalysis(cacheKey, data);
                 renderTermAnalysis(data);
             } catch (e) {
                 if (e.name === 'AbortError') return;
@@ -1278,6 +1289,15 @@
             if (!activeTermAnalysis.term) return;
             loadTermAnalysis(activeTermAnalysis.term, range, false);
         };
+
+        function rememberIndexTermAnalysis(key, data) {
+            if (!key) return;
+            if (termAnalysisCache.has(key)) termAnalysisCache.delete(key);
+            termAnalysisCache.set(key, data);
+            while (termAnalysisCache.size > TERM_ANALYSIS_CACHE_LIMIT) {
+                termAnalysisCache.delete(termAnalysisCache.keys().next().value);
+            }
+        }
 
         function renderTermAnalysisShell(loading = false) {
             disposeIndexTermCharts();
@@ -1314,12 +1334,12 @@
             `;
         }
 
-        function renderTermAnalysis(data) {
+        function renderTermAnalysis(data, options = {}) {
             const summary = data.summary || {};
             const status = termEls.body.querySelector('.term-analysis-status');
             if (status) {
                 status.classList.remove('loading');
-                status.textContent = `分析完成${summary.elapsed_ms ? `（${summary.elapsed_ms}ms）` : ''}`;
+                status.textContent = options.fromCache ? '已使用最近一次分析结果' : `分析完成${summary.elapsed_ms ? `（${summary.elapsed_ms}ms）` : ''}`;
             }
             const metrics = document.getElementById('termMetrics');
             if (metrics) {

@@ -9,6 +9,7 @@
 import io
 import os
 import time as perf_time
+from copy import deepcopy
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 
@@ -25,14 +26,79 @@ from app.models.news import News
 from app.services.ai_service import ai_service
 from app.services.crawler_service import crawler_service
 from app.services.news_title_service import refine_news_title_if_needed
+from app.services.similar_news_service import find_similar_news
 from app.utils.news_query import build_news_query_filters, serialize_news_item
-from app.utils.news_search import normalize_similarity_terms, semantic_news_search
+from app.utils.news_search import semantic_news_search
 from app.utils.summary_material import build_summary_generation_input, get_existing_summary_material
+from app.utils.ttl_cache import TtlMemoryCache
 from app.utils.tools import normalize_regions_to_countries
 
 router = APIRouter(prefix="/api", tags=["news"])
 _FILTER_CACHE_TTL_SECONDS = 300
 _FILTER_CACHE: dict[str, dict[str, Any]] = {}
+_NEWS_SEARCH_CACHE_TTL_SECONDS = 90
+_NEWS_SEARCH_CACHE = TtlMemoryCache[dict[str, Any]](
+    ttl_seconds=_NEWS_SEARCH_CACHE_TTL_SECONDS,
+    max_size=128,
+)
+_SIMILAR_NEWS_CACHE_TTL_SECONDS = 300
+_SIMILAR_NEWS_CACHE = TtlMemoryCache[dict[str, Any]](
+    ttl_seconds=_SIMILAR_NEWS_CACHE_TTL_SECONDS,
+    max_size=256,
+)
+
+
+def _clean_cache_part(value: Any) -> str:
+    """
+    输入:
+    - `value`: 可选查询参数
+
+    输出:
+    - 适合作为缓存键的规范化字符串
+
+    作用:
+    - 统一清洗新闻搜索缓存参数，减少空白、大小写造成的重复缓存。
+    """
+
+    return str(value or "").strip().lower()
+
+
+def _news_search_cache_key(
+    *,
+    q: str,
+    page: int,
+    page_size: int,
+    date: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    sort_by: str,
+    category: Optional[str],
+    region: Optional[str],
+    source: Optional[str],
+) -> tuple[str, int, int, str, str, str, str, str, str, str]:
+    """
+    输入:
+    - 首页新闻搜索接口的完整筛选与分页参数
+
+    输出:
+    - 稳定的缓存键元组
+
+    作用:
+    - 为同一搜索页短期复用序列化结果，降低重复请求的数据库和向量计算成本。
+    """
+
+    return (
+        _clean_cache_part(q),
+        page,
+        page_size,
+        _clean_cache_part(date),
+        _clean_cache_part(start_date),
+        _clean_cache_part(end_date),
+        _clean_cache_part(sort_by),
+        _clean_cache_part(category),
+        _clean_cache_part(region),
+        _clean_cache_part(source),
+    )
 
 
 def _get_filter_cache(key: str) -> Optional[list[str]]:
@@ -223,22 +289,46 @@ async def get_news(
     )
 
     if has_query:
+        cache_key = _news_search_cache_key(
+            q=q or "",
+            page=page,
+            page_size=page_size,
+            date=effective_date,
+            start_date=start_date,
+            end_date=end_date,
+            sort_by=sort_by,
+            category=category,
+            region=region,
+            source=source,
+        )
+        cached = _NEWS_SEARCH_CACHE.get(cache_key)
+        if cached is not None:
+            payload = deepcopy(cached)
+            payload["cached"] = True
+            return payload
+
+        first_pages = page <= 3
         search_result = await semantic_news_search(
             db,
             stmt,
             q,
             offset=offset,
             limit=page_size,
-            candidate_limit=2000,
+            candidate_limit=1200 if first_pages else 2000,
             min_score=0.2,
             log_prefix="/api/news",
+            max_core_terms=6 if first_pages else 10,
+            per_term_candidate_limit=90 if first_pages else None,
+            min_text_candidate_limit=80,
         )
         data = [serialize_news_item(n) for _, n in search_result.items]
         logger.info(
             f"/api/news 搜索完成: q={q}, matched={search_result.total}, "
             f"embedding={search_result.used_embedding}, elapsed={search_result.elapsed_ms:.1f}ms"
         )
-        return {"data": data, "page": page}
+        payload = {"data": data, "page": page}
+        _NEWS_SEARCH_CACHE.set(cache_key, payload)
+        return payload
 
     if sort_by == "heat":
         stmt = stmt.options(defer(News.content), defer(News.embedding)).order_by(
@@ -355,6 +445,18 @@ async def get_news_detail(news_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/news/{news_id}/similar")
 async def get_similar_news(news_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    输入:
+    - `news_id`: 当前新闻 ID
+    - `db`: 数据库会话
+
+    输出:
+    - 与当前新闻可能属于同一事件链的相似报道列表
+
+    作用:
+    - 复用首页搜索的召回和排序逻辑，并使用当前新闻向量提升相似报道查询速度与精度。
+    """
+
     news = await db.get(
         News,
         news_id,
@@ -363,34 +465,14 @@ async def get_similar_news(news_id: int, db: AsyncSession = Depends(get_db)):
     if not news:
         raise HTTPException(status_code=404, detail="新闻不存在")
 
-    keywords = normalize_similarity_terms(news.keywords, limit=10)
-    entities = normalize_similarity_terms(news.entities, limit=8)
-    keyword_keys = {kw.lower() for kw in keywords}
-    query_terms = keywords + [entity for entity in entities if entity.lower() not in keyword_keys]
-    if not query_terms:
-        return {"data": []}
+    cache_key = (news_id, 10)
+    cached = _SIMILAR_NEWS_CACHE.get(cache_key)
+    if cached is not None:
+        payload = deepcopy(cached)
+        payload["cached"] = True
+        return payload
 
-    stmt = (
-        select(News)
-        .options(defer(News.content))
-        .where(News.id != news_id)
-    )
-    query_text = " ".join(query_terms)
-    search_result = await semantic_news_search(
-        db,
-        stmt,
-        query_text,
-        offset=0,
-        limit=10,
-        candidate_limit=2000,
-        min_score=0.5,
-        text_terms=query_terms,
-        log_prefix=f"/api/news/{news_id}/similar",
-    )
-    logger.info(
-        f"/api/news/{news_id}/similar 语义召回完成: terms={len(query_terms)}, "
-        f"matched={search_result.total}, embedding={search_result.used_embedding}, elapsed={search_result.elapsed_ms:.1f}ms"
-    )
+    search_result = await find_similar_news(db, news, limit=10)
 
     similar_items = []
     for score, item in search_result.items:
@@ -398,7 +480,9 @@ async def get_similar_news(news_id: int, db: AsyncSession = Depends(get_db)):
         payload["similarity_score"] = round(float(score), 4)
         similar_items.append(payload)
 
-    return {"data": similar_items}
+    payload = {"data": similar_items}
+    _SIMILAR_NEWS_CACHE.set(cache_key, payload)
+    return payload
 
 
 @router.post("/generate_summary/{news_id}")
@@ -464,6 +548,7 @@ async def api_generate_summary(news_id: int, db: AsyncSession = Depends(get_db))
 
     db.add(news)
     await db.commit()
+    _SIMILAR_NEWS_CACHE.delete((news_id, 10))
     return {"summary": summary}
 
 

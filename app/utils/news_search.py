@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 import numpy as np
-from sqlalchemy import Text, cast, desc, or_
+from sqlalchemy import Text, cast, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
@@ -819,6 +819,46 @@ def combined_search_score(news: News, relevance: float, max_heat: float, now: da
     return relevance * 0.7 + freshness * 0.2 * relevance_gate + heat * 0.1 * relevance_gate
 
 
+def _apply_search_score_modifiers(
+    news: News,
+    relevance: float,
+    *,
+    max_heat: float,
+    now: datetime,
+    coverage: float,
+    has_intents: bool,
+    core_total: int,
+    core_coverage: float,
+    strong_matched: int,
+    strong_coverage: float,
+) -> float:
+    """
+    输入:
+    - `news`: 候选新闻
+    - `relevance`: 文本和向量融合后的相关性分
+    - `max_heat`/`now`: 热度和时间归一化所需上下文
+    - `coverage`/`has_intents`: 查询意图覆盖情况
+    - `core_total`/`core_coverage`/`strong_matched`/`strong_coverage`: 核心词命中情况
+
+    输出:
+    - 应用核心词和意图修正后的最终排序分
+
+    作用:
+    - 统一文本预排序与向量重排的打分修正逻辑，避免两个阶段排序口径发散。
+    """
+
+    final_score = combined_search_score(news, relevance, max_heat, now)
+    if core_total:
+        final_score *= 0.6 + core_coverage * 0.5
+        if strong_matched:
+            final_score *= 0.92 + strong_coverage * 0.25
+        else:
+            final_score *= 0.65
+    if has_intents:
+        final_score *= 0.35 + coverage * 0.65
+    return final_score
+
+
 def _build_text_conditions(terms: list[str]) -> list[Any]:
     """
     输入:
@@ -925,6 +965,78 @@ async def _load_embedding(query_text: str, log_prefix: str) -> Optional[np.ndarr
         return None
 
 
+def _coerce_query_vector(query_vector: Any) -> Optional[np.ndarray]:
+    """
+    输入:
+    - `query_vector`: 外部传入的查询向量，可能是列表或 NumPy 数组
+
+    输出:
+    - 可参与相似度计算的一维 NumPy 数组，非法时返回 None
+
+    作用:
+    - 允许调用方复用已有新闻向量，避免相似新闻查询重复请求 embedding 接口。
+    """
+
+    if query_vector is None:
+        return None
+    try:
+        vector = np.asarray(query_vector, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
+    if vector.ndim != 1 or vector.size == 0:
+        return None
+    norm = float(np.linalg.norm(vector))
+    if norm <= 0:
+        return None
+    return vector
+
+
+def cosine_similarity(left: Any, right: Any) -> float:
+    """
+    输入:
+    - `left`/`right`: 两个待比较的向量
+
+    输出:
+    - 余弦相似度，无法计算时返回 0
+
+    作用:
+    - 为新闻搜索、相似报道和后过滤统一提供轻量向量相似度计算。
+    """
+
+    left_vec = _coerce_query_vector(left)
+    right_vec = _coerce_query_vector(right)
+    if left_vec is None or right_vec is None or left_vec.size != right_vec.size:
+        return 0.0
+    left_norm = float(np.linalg.norm(left_vec))
+    right_norm = float(np.linalg.norm(right_vec))
+    if left_norm <= 0 or right_norm <= 0:
+        return 0.0
+    return float(np.dot(left_vec, right_vec) / (left_norm * right_norm))
+
+
+async def _load_embeddings_for_candidates(
+    db: AsyncSession,
+    candidates: list[tuple[float, News, dict[str, Any]]],
+) -> dict[int, Any]:
+    """
+    输入:
+    - `db`: 数据库会话
+    - `candidates`: 需要参与向量重排的候选新闻
+
+    输出:
+    - `{新闻 ID: embedding}` 映射
+
+    作用:
+    - 只为文本预排序靠前的一小批候选批量加载向量，减少远程数据库传输和 Python 向量计算量。
+    """
+
+    ids = [int(item.id) for _score, item, _meta in candidates if getattr(item, "id", None)]
+    if not ids:
+        return {}
+    rows = await db.execute(select(News.id, News.embedding).where(News.id.in_(ids)))
+    return {int(news_id): embedding for news_id, embedding in rows.all() if embedding is not None}
+
+
 async def semantic_news_search(
     db: AsyncSession,
     stmt: Any,
@@ -937,6 +1049,12 @@ async def semantic_news_search(
     text_terms: Optional[list[str]] = None,
     log_prefix: str = "新闻搜索",
     use_embedding: bool = True,
+    query_vector: Any = None,
+    extra_candidate_limit: int = 0,
+    max_core_terms: int = 12,
+    per_term_candidate_limit: Optional[int] = None,
+    min_text_candidate_limit: int = 120,
+    embedding_rerank_limit: int = 80,
 ) -> NewsSearchResult:
     """
     输入:
@@ -949,6 +1067,12 @@ async def semantic_news_search(
     - `text_terms`: 可选关键词列表
     - `log_prefix`: 日志前缀
     - `use_embedding`: 是否启用向量重排
+    - `query_vector`: 可选的预置查询向量，传入后优先复用
+    - `extra_candidate_limit`: 额外召回高热候选的数量，用于向量兜底重排
+    - `max_core_terms`: 最多按多少个核心词分别查询候选
+    - `per_term_candidate_limit`: 单个核心词候选上限
+    - `min_text_candidate_limit`: 文本候选查询的最低上限，默认保持首页搜索行为
+    - `embedding_rerank_limit`: 文本预排序后最多加载多少条候选向量参与重排
 
     输出:
     - `NewsSearchResult`
@@ -966,17 +1090,17 @@ async def semantic_news_search(
     normalized_terms = expand_search_terms(base_terms)
     intents = detect_query_intents(normalized_terms)
     text_conditions = _build_text_conditions(normalized_terms)
-    core_terms = _core_query_terms(normalized_terms, limit=12)
+    core_terms = _core_query_terms(normalized_terms, limit=max(0, max_core_terms))
 
-    q_vec = await _load_embedding(query_text, log_prefix) if use_embedding else None
-    candidate_options = [defer(News.content)]
-    if q_vec is None:
-        candidate_options.append(defer(News.embedding))
+    q_vec = _coerce_query_vector(query_vector)
+    if q_vec is None and use_embedding:
+        q_vec = await _load_embedding(query_text, log_prefix)
+    candidate_options = [defer(News.content), defer(News.embedding)]
 
     candidate_by_id: dict[int, News] = {}
 
     if text_conditions:
-        text_limit = max(120, min(candidate_limit, offset + limit * 6))
+        text_limit = max(min_text_candidate_limit, min(candidate_limit, offset + limit * 6))
         text_stmt = (
             stmt.options(*candidate_options)
             .where(or_(*text_conditions))
@@ -987,7 +1111,10 @@ async def semantic_news_search(
         for item in text_result.scalars().all():
             candidate_by_id[item.id] = item
 
-    per_term_limit = max(100, min(260, offset + limit * 5))
+    if per_term_candidate_limit is None:
+        per_term_limit = max(100, min(260, offset + limit * 5))
+    else:
+        per_term_limit = max(1, min(candidate_limit, per_term_candidate_limit))
     for term in core_terms:
         single_conditions = _build_single_term_text_conditions(term)
         if not single_conditions:
@@ -1000,6 +1127,17 @@ async def semantic_news_search(
         )
         single_result = await db.execute(single_stmt)
         for item in single_result.scalars().all():
+            candidate_by_id[item.id] = item
+
+    if q_vec is not None and extra_candidate_limit > 0:
+        broad_limit = max(1, min(candidate_limit, extra_candidate_limit))
+        broad_stmt = (
+            stmt.options(*candidate_options)
+            .order_by(desc(News.heat_score), desc(News.publish_date))
+            .limit(broad_limit)
+        )
+        broad_result = await db.execute(broad_stmt)
+        for item in broad_result.scalars().all():
             candidate_by_id[item.id] = item
 
     if not text_conditions:
@@ -1016,41 +1154,83 @@ async def semantic_news_search(
     now = datetime.now()
     max_heat = max((float(n.heat_score or 0.0) for n in candidates), default=0.0)
 
-    norm_q = float(np.linalg.norm(q_vec)) if q_vec is not None else 0.0
-    q_dim = len(q_vec) if q_vec is not None else 0
-    scored_news: list[tuple[float, News]] = []
+    has_intents = bool(intents and any(intents.values()))
+    scored_candidates: list[tuple[float, News, dict[str, Any]]] = []
     for item in candidates:
         coverage = intent_coverage_score(item, intents)
-        if intents and any(intents.values()) and coverage <= 0:
+        if has_intents and coverage <= 0:
             continue
         score = text_match_score(item, query_text, normalized_terms)
-
-        if q_vec is not None and item.embedding and len(item.embedding) == q_dim:
-            n_vec = np.array(item.embedding)
-            norm_n = np.linalg.norm(n_vec)
-            if norm_q > 0 and norm_n > 0:
-                sim = np.dot(q_vec, n_vec) / (norm_q * norm_n)
-                score += max(0.0, float(sim))
-
         core_coverage, core_matched, core_total = core_term_coverage(item, normalized_terms)
         strong_coverage, strong_matched, _strong_total = strong_core_term_coverage(item, normalized_terms)
         if not _meets_core_term_requirement(core_matched, core_total):
             continue
 
         if score >= min_score:
-            final_score = combined_search_score(item, score, max_heat, now)
-            if core_total:
-                final_score *= 0.6 + core_coverage * 0.5
-                if strong_matched:
-                    final_score *= 0.92 + strong_coverage * 0.25
-                else:
-                    final_score *= 0.65
-            if intents and any(intents.values()):
-                final_score *= 0.35 + coverage * 0.65
-            scored_news.append((final_score, item))
+            final_score = _apply_search_score_modifiers(
+                item,
+                score,
+                max_heat=max_heat,
+                now=now,
+                coverage=coverage,
+                has_intents=has_intents,
+                core_total=core_total,
+                core_coverage=core_coverage,
+                strong_matched=strong_matched,
+                strong_coverage=strong_coverage,
+            )
+            scored_candidates.append(
+                (
+                    final_score,
+                    item,
+                    {
+                        "text_score": score,
+                        "coverage": coverage,
+                        "core_total": core_total,
+                        "core_coverage": core_coverage,
+                        "strong_matched": strong_matched,
+                        "strong_coverage": strong_coverage,
+                    },
+                )
+            )
 
-    scored_news.sort(key=lambda x: x[0], reverse=True)
-    if intents and any(intents.values()):
+    scored_candidates.sort(key=lambda x: x[0], reverse=True)
+    if q_vec is not None and scored_candidates and embedding_rerank_limit > 0:
+        rerank_limit = min(len(scored_candidates), max(offset + limit * 3, embedding_rerank_limit))
+        embedding_by_id = await _load_embeddings_for_candidates(db, scored_candidates[:rerank_limit])
+        norm_q = float(np.linalg.norm(q_vec))
+        q_dim = len(q_vec)
+        reranked_candidates: list[tuple[float, News, dict[str, Any]]] = []
+        for final_score, item, meta in scored_candidates:
+            embedding = embedding_by_id.get(int(item.id))
+            if embedding is None or len(embedding) != q_dim or norm_q <= 0:
+                reranked_candidates.append((final_score, item, meta))
+                continue
+            n_vec = np.asarray(embedding, dtype=np.float32)
+            norm_n = float(np.linalg.norm(n_vec))
+            if norm_n <= 0:
+                reranked_candidates.append((final_score, item, meta))
+                continue
+            sim = float(np.dot(q_vec, n_vec) / (norm_q * norm_n))
+            semantic_score = float(meta["text_score"]) + max(0.0, sim)
+            reranked_score = _apply_search_score_modifiers(
+                item,
+                semantic_score,
+                max_heat=max_heat,
+                now=now,
+                coverage=float(meta["coverage"]),
+                has_intents=has_intents,
+                core_total=int(meta["core_total"]),
+                core_coverage=float(meta["core_coverage"]),
+                strong_matched=int(meta["strong_matched"]),
+                strong_coverage=float(meta["strong_coverage"]),
+            )
+            reranked_candidates.append((reranked_score, item, meta))
+        reranked_candidates.sort(key=lambda x: x[0], reverse=True)
+        scored_candidates = reranked_candidates
+
+    scored_news = [(score, item) for score, item, _meta in scored_candidates]
+    if has_intents:
         strict_news = [(score, item) for score, item in scored_news if matches_query_intents(item, intents)]
         if len(strict_news) >= min(limit, 3):
             scored_news = strict_news

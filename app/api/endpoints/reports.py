@@ -7,11 +7,13 @@
 """
 
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timedelta
 from itertools import combinations
 from typing import Any, Optional, List
 import hashlib
 import json
+import re
 import time as perf_time
 
 from fastapi import APIRouter, HTTPException, Query, Depends
@@ -26,9 +28,65 @@ from app.services.report_service import report_service
 from app.services.task_manager import task_manager
 from app.utils.news_query import build_news_query_filters
 from app.utils.news_ranking import sort_news_by_composite_score
+from app.utils.ttl_cache import TtlMemoryCache
 from app.utils.tools import normalize_regions_to_countries
 
 router = APIRouter(prefix="/api/report", tags=["report"])
+TERM_ANALYSIS_CACHE_TTL_SECONDS = 300
+TERM_ANALYSIS_CACHE_SIZE = 96
+TERM_ANALYSIS_SAMPLE_LIMIT = 600
+TERM_ANALYSIS_COOCCURRENCE_SAMPLE_LIMIT = 800
+_TERM_ANALYSIS_CACHE = TtlMemoryCache[dict[str, Any]](
+    ttl_seconds=TERM_ANALYSIS_CACHE_TTL_SECONDS,
+    max_size=TERM_ANALYSIS_CACHE_SIZE,
+)
+
+
+def _clean_cache_part(value: Optional[str]) -> str:
+    """
+    输入:
+    - `value`: 可选查询参数
+
+    输出:
+    - 适合作为缓存键的规范化字符串
+
+    作用:
+    - 统一清洗查询参数，避免大小写或空白差异造成重复缓存。
+    """
+
+    return str(value or "").strip().lower()
+
+
+def _term_analysis_cache_key(
+    *,
+    query: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    category: Optional[str],
+    region: Optional[str],
+    source: Optional[str],
+    range_key: str,
+) -> tuple[str, str, str, str, str, str, str]:
+    """
+    输入:
+    - 词项分析接口的筛选参数
+
+    输出:
+    - 稳定的缓存键元组
+
+    作用:
+    - 将同一词项和同一筛选条件的重复请求映射到同一个短期缓存结果。
+    """
+
+    return (
+        _clean_cache_part(query),
+        _clean_cache_part(start_date),
+        _clean_cache_part(end_date),
+        _clean_cache_part(category),
+        _clean_cache_part(region),
+        _clean_cache_part(source),
+        _clean_cache_part(range_key),
+    )
 
 
 def _valid_report_term(value: str) -> bool:
@@ -66,8 +124,66 @@ def _label_sentiment(label: str) -> str:
     return "neutral"
 
 
-def _term_match_conditions(query: str):
+def _db_dialect_name(db: AsyncSession) -> str:
+    """
+    输入:
+    - `db`: 数据库会话
+
+    输出:
+    - 当前数据库方言名称
+
+    作用:
+    - 让词项分析在 PostgreSQL 上使用更精确的短英文词匹配策略，同时兼容 SQLite。
+    """
+
+    try:
+        bind = db.get_bind()
+    except Exception:
+        return ""
+    return str(getattr(getattr(bind, "dialect", None), "name", "") or "").lower()
+
+
+def _is_short_latin_term(query: str) -> bool:
+    """
+    输入:
+    - `query`: 词项文本
+
+    输出:
+    - 是否为容易误命中的短英文/数字词
+
+    作用:
+    - 对 AI、GDP 等短词避免直接使用 `%term%` 扫描摘要造成误召回和慢查询。
+    """
+
+    return bool(re.fullmatch(r"[A-Za-z0-9]{1,3}", (query or "").strip()))
+
+
+def _latin_word_match(column: Any, query: str) -> Any:
+    """
+    输入:
+    - `column`: 待匹配的 SQLAlchemy 字段
+    - `query`: 短英文词项
+
+    输出:
+    - PostgreSQL 正则匹配条件
+
+    作用:
+    - 用非字母数字边界匹配短英文词，减少 `said`、`main` 等普通词片段误命中 `AI`。
+    """
+
+    escaped = re.escape((query or "").strip())
+    pattern = rf"(^|[^[:alnum:]_]){escaped}([^[:alnum:]_]|$)"
+    return column.op("~*")(pattern)
+
+
+def _term_match_conditions(query: str, *, dialect_name: str = "") -> Any:
     like = f"%{query}%"
+    if "postgresql" in dialect_name and _is_short_latin_term(query):
+        return or_(
+            _latin_word_match(News.title, query),
+            cast(News.keywords, Text).ilike(like),
+            cast(News.entities, Text).ilike(like),
+        )
     return or_(
         News.title.ilike(like),
         News.summary.ilike(like),
@@ -280,9 +396,25 @@ async def get_report_term_analysis(
     range: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    输入:
+    - `term`: 需要分析的词项
+    - `start_date`/`end_date`: 可选日期范围
+    - `category`/`region`/`source`: 可选筛选条件
+    - `range`: 前端快捷范围
+    - `db`: 数据库会话
+
+    输出:
+    - 词项概览、趋势、情绪趋势、共现关系和相关报道样本
+
+    作用:
+    - 为首页和报告页词项弹窗提供聚合分析，并使用短缓存和受控样本量降低远程数据库与 Python 计算压力。
+    """
+
     query = (term or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="term is required")
+    elapsed_start = perf_time.perf_counter()
     range_key = (range or "year").strip().lower()
     if not start_date and not end_date and range_key != "all":
         now = datetime.now()
@@ -292,31 +424,34 @@ async def get_report_term_analysis(
             start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
         end_date = now.strftime("%Y-%m-%d")
 
-    term_condition = _term_match_conditions(query)
-    elapsed_start = perf_time.perf_counter()
-
-    stats_stmt = build_news_query_filters(
-        select(
-            func.count(),
-            func.coalesce(func.sum(News.heat_score), 0.0),
-            func.avg(News.sentiment_score),
-        ),
-        date="all",
+    cache_key = _term_analysis_cache_key(
+        query=query,
         start_date=start_date,
         end_date=end_date,
         category=category,
         region=region,
         source=source,
-    ).where(term_condition)
-    total, total_heat, avg_sentiment = (await db.execute(stats_stmt)).one()
+        range_key=range_key,
+    )
+    cached = _TERM_ANALYSIS_CACHE.get(cache_key)
+    if cached is not None:
+        payload = deepcopy(cached)
+        summary = payload.setdefault("summary", {})
+        summary["cached"] = True
+        summary["elapsed_ms"] = round((perf_time.perf_counter() - elapsed_start) * 1000, 1)
+        return payload
+
+    term_condition = _term_match_conditions(query, dialect_name=_db_dialect_name(db))
 
     day_expr = func.date(News.publish_date)
-    trend_stmt = build_news_query_filters(
+    aggregate_stmt = build_news_query_filters(
         select(
             day_expr.label("day"),
+            News.sentiment_label.label("sentiment_label"),
             func.count().label("count"),
             func.coalesce(func.sum(News.heat_score), 0.0).label("heat"),
-            func.avg(News.sentiment_score).label("avg_sentiment"),
+            func.coalesce(func.sum(News.sentiment_score), 0.0).label("sentiment_sum"),
+            func.count(News.sentiment_score).label("sentiment_count"),
         ),
         date="all",
         start_date=start_date,
@@ -324,21 +459,37 @@ async def get_report_term_analysis(
         category=category,
         region=region,
         source=source,
-    ).where(term_condition).group_by(day_expr).order_by(day_expr)
-    trend_rows = (await db.execute(trend_stmt)).all()
+    ).where(term_condition).group_by(day_expr, News.sentiment_label).order_by(day_expr)
+    aggregate_rows = (await db.execute(aggregate_stmt)).all()
 
-    sentiment_stmt = build_news_query_filters(
-        select(News.sentiment_label, func.count()),
-        date="all",
-        start_date=start_date,
-        end_date=end_date,
-        category=category,
-        region=region,
-        source=source,
-    ).where(term_condition).group_by(News.sentiment_label)
+    total = 0
+    total_heat = 0.0
+    total_sentiment_sum = 0.0
+    total_sentiment_count = 0
     sentiment_counts: Counter[str] = Counter()
-    for label, count in (await db.execute(sentiment_stmt)).all():
-        sentiment_counts[_label_sentiment(label)] += int(count)
+    daily: dict[str, dict[str, Any]] = {}
+    for day, label, count, heat, sentiment_sum, sentiment_count in aggregate_rows:
+        row_count = int(count or 0)
+        row_heat = float(heat or 0.0)
+        row_sentiment_sum = float(sentiment_sum or 0.0)
+        row_sentiment_count = int(sentiment_count or 0)
+
+        total += row_count
+        total_heat += row_heat
+        total_sentiment_sum += row_sentiment_sum
+        total_sentiment_count += row_sentiment_count
+        sentiment_counts[_label_sentiment(label)] += row_count
+
+        if day:
+            day_key = str(day)
+            item = daily.setdefault(
+                day_key,
+                {"count": 0, "heat": 0.0, "sentiment_sum": 0.0, "sentiment_count": 0},
+            )
+            item["count"] += row_count
+            item["heat"] += row_heat
+            item["sentiment_sum"] += row_sentiment_sum
+            item["sentiment_count"] += row_sentiment_count
 
     sample_base_stmt = build_news_query_filters(
         select(
@@ -367,13 +518,21 @@ async def get_report_term_analysis(
     heat_rows = [
         dict(row)
         for row in (
-            await db.execute(sample_base_stmt.order_by(desc(News.heat_score), desc(News.publish_date)).limit(2000))
+            await db.execute(
+                sample_base_stmt.order_by(desc(News.heat_score), desc(News.publish_date)).limit(
+                    TERM_ANALYSIS_SAMPLE_LIMIT
+                )
+            )
         ).mappings().all()
     ]
     recent_rows = [
         dict(row)
         for row in (
-            await db.execute(sample_base_stmt.order_by(desc(News.publish_date), desc(News.heat_score)).limit(2000))
+            await db.execute(
+                sample_base_stmt.order_by(desc(News.publish_date), desc(News.heat_score)).limit(
+                    TERM_ANALYSIS_SAMPLE_LIMIT
+                )
+            )
         ).mappings().all()
     ]
     sample_map: dict[int, dict[str, Any]] = {}
@@ -387,23 +546,14 @@ async def get_report_term_analysis(
     keyword_counter: Counter[str] = Counter()
     pair_counter: Counter[tuple[str, str]] = Counter()
 
-    for item in sample_rows:
+    for item in sample_rows[:TERM_ANALYSIS_COOCCURRENCE_SAMPLE_LIMIT]:
         terms = _news_terms(item)
         for kw in terms:
             keyword_counter[kw] += 1
         for left, right in combinations(sorted(set(terms), key=str.lower)[:8], 2):
             pair_counter[(left, right)] += 1
 
-    labels = [str(day) for day, _count, _heat, _avg_sentiment in trend_rows if day]
-    daily = {
-        str(day): {
-            "count": int(count or 0),
-            "heat": float(heat or 0.0),
-            "avg_sentiment": float(avg or 0.0) if avg is not None else None,
-        }
-        for day, count, heat, avg in trend_rows
-        if day
-    }
+    labels = sorted(daily.keys())
     trend = {
         "dates": labels,
         "heat": [round(float(daily[label]["heat"]), 2) for label in labels],
@@ -417,8 +567,8 @@ async def get_report_term_analysis(
                 "type": "line",
                 "smooth": True,
                 "data": [
-                    round(float(daily[label]["avg_sentiment"]), 2)
-                    if daily[label]["avg_sentiment"] is not None else None
+                    round(float(daily[label]["sentiment_sum"]) / max(1, int(daily[label]["sentiment_count"])), 2)
+                    if int(daily[label]["sentiment_count"]) > 0 else None
                     for label in labels
                 ],
             }
@@ -434,13 +584,14 @@ async def get_report_term_analysis(
         if left in known and right in known
     ]
 
-    return {
+    payload = {
         "term": query,
         "summary": {
             "related_count": total,
             "returned_count": len(sample_rows),
             "total_heat": round(float(total_heat or 0.0), 2),
-            "avg_sentiment": round(float(avg_sentiment or 0.0), 2),
+            "avg_sentiment": round(total_sentiment_sum / max(1, total_sentiment_count), 2)
+            if total_sentiment_count > 0 else 0.0,
             "sentiment_counts": dict(sentiment_counts),
             "elapsed_ms": round((perf_time.perf_counter() - elapsed_start) * 1000, 1),
         },
@@ -449,6 +600,8 @@ async def get_report_term_analysis(
         "sentiment_trend": sentiment_trend,
         "cooccurrence": {"nodes": nodes, "links": links},
     }
+    _TERM_ANALYSIS_CACHE.set(cache_key, payload)
+    return payload
 
 
 @router.post("/generate")
