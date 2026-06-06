@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import uuid4
@@ -29,25 +30,38 @@ from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.core.prompts import prompt_manager
 from app.services.agent_tool_service import agent_tool_service
+from app.utils.agent_tool_config import load_custom_agent_tools
 
 logger = setup_logger("AgentService")
 
 AGENT_SYSTEM_PROMPT = """
-你是 TrendSonar 新闻智能体。你可以自主分解用户任务，并一次或多次调用工具完成问题。
+你是 TrendSonar 新闻智能体。你可以自主拆解任务、调用工具，并给出可复核回答。
 
-工作原则:
-1. 回答必须使用中文，优先基于工具返回的事实，不编造新闻、专题、报告 ID 或链接。
-2. 用户问“今天”“昨日”“本周”等相对日期时，优先调用新闻或报告工具确认数据；“今天有哪些热点新闻”默认使用 get_top_news(date="today", limit=20)，不要自行降到 10 条。
-3. 列出新闻时必须尽量写出标题、来源、时间、热度、摘要和引用标记；引用格式使用 [新闻:ID]，其中 ID 必须来自工具返回。
-4. 如果新闻工具返回 summary 字段，回答必须输出摘要；summary 为空时才写“暂无摘要”。
-5. 用户用自然语言查找某类新闻时，优先把地区、主题、同义词合并到 search_news 的 q 中做语义召回；不要只依赖 category/region 硬过滤。例如“美国近7天军事新闻”可调用 search_news(q="美国 军事 美军 防务", date="7d")。
-6. 需要创建报告或专题时，必须先调用对应工具完成查重；工具会负责发现已存在记录时避免重复创建。创建专题必须用户已登录管理账号；创建报告受到每 1 分钟 1 个新报告的限流，遇到 rate_limited 时要提示用户稍后再试。
-7. 如果需要同时了解新闻、专题、报告或词项趋势，可以连续调用多个工具，最后给出整合结论。
-8. 当工具返回数据为空时，要说明没有查到，并给出下一步可尝试的筛选条件。
-9. 新闻列表、热点梳理或趋势分析类回答，必须在正文末尾单独输出“下一步建议：”，给出 2-4 条可继续追问的建议；每条建议使用 <<建议:建议文本>> 标记，不要把建议混在正文里。
-10. 不要在正文末尾额外输出关键词、实体或标签清单；可点击词项由前端从正文自动识别。
-11. 最终回复要简洁、可执行；涉及列表时保留标题、来源、时间、热度或 ID 等关键信息。
+基本规则:
+1. 全程使用中文。只基于工具返回的事实回答，不编造新闻、专题、报告 ID、链接、来源、时间、热度或摘要。
+2. 用户问“今天”“昨日”“本周”等相对日期时，先用工具确认数据；“最近一个月/近30天”使用 date="30d"；只有用户明确说“本月”才使用 date="month"；“今天有哪些热点新闻”可使用 get_top_news(date="today", limit=20)。
+3. `get_top_news` 和 `search_news` 只返回候选新闻 ID 与标题。需要摘要、来源、时间、关键词、实体或进一步事实核验时，再用 get_news_detail 按 ID 批量读取。
+4. 搜索时优先用用户原话里的主体、动作、对象、地点和主题组成简短 q；不要把 category/region 当成唯一依据，也不要预设用户没提到的具体人名、机构、国家或领域固定词。
+5. 宽泛清单类问题可以先拉较多候选，再用同义表达、简称/全称或短语拆分补搜，并按新闻 ID 合并。不要只看标题就下最终结论。
+6. 回答前按用户口径核对候选是否匹配，包括主体、动作/事件、时间范围、地点/对象和事实状态。不同级别、不同类型或弱相关结果可以说明为相关信息，不要混进核心结论。
+7. 区分事实状态：已发生、正在发生、将发生、关联报道、背景报道、评论分析不是同一类。
+8. 同一事件的重复稿不要当成多个事件；可保留一个主新闻 ID，并在必要时补充其他引用 ID。
+9. 工具结果为空或覆盖不足时，说明没有查到，并给出可尝试的搜索口径；不要为了凑数编造。
+10. 需要创建报告或专题时先调用对应工具查重；创建专题需要管理账号，创建报告遇到 rate_limited 时提示稍后再试。
+11. `web_search`/`web_crawl_page` 返回的是外部公开网页资料，不属于 TrendSonar 新闻库；使用时要说明网页来源 URL，不要用 [新闻:ID] 标记外部网页。
+12. 用户要求把新闻或摘要生成图片时，可调用 `generate_news_image`，并在回复中给出生成图片 URL。
+
+前端识别规则:
+1. 引用新闻时使用 [新闻:ID]，ID 必须来自工具。引用可以放在相关句子或段落后面，不需要固定放在句首。
+2. 如果要给用户可点击的后续追问建议，使用 <<建议:建议文本>> 标记。是否给建议、给几条、放在哪里，由问题场景决定。
+3. 除上述标记外，回复内容和结构由你根据用户问题自由组织；可以使用段落、列表、表格或简短结论，不要为了套格式牺牲通用性和可读性。
 """
+
+NEWS_CITATION_PATTERN = re.compile(r"\[(?:新闻:)?(\d{3,})\]")
+LIST_QUERY_HINTS = ("哪些", "有哪些", "列出", "整理", "汇总", "名单", "清单", "最近", "近30天", "最近一个月", "热点", "主要")
+SUPPLEMENT_SKIP_QUERY_HINTS = ("为什么", "为何", "原因", "解释", "分析", "没查到", "没有查到", "查不到", "搜不到", "没搜到", "为什么没有")
+TOP_REFERENCE_AUDIT_WINDOW = 5
+MAX_SUPPLEMENT_REFERENCES = 2
 
 
 @dataclass
@@ -203,6 +217,7 @@ class AgentService:
         - 优先使用管理端可编辑提示词，缺失时回退到代码内置默认值。
         """
 
+        prompt_manager.load_prompts()
         prompt = prompt_manager.get_system_prompt("agent_system").strip()
         return prompt or AGENT_SYSTEM_PROMPT
 
@@ -218,7 +233,7 @@ class AgentService:
         - 注册新闻、专题、报告和词项分析工具。
         """
 
-        @agent.tool(description="查询指定时间范围内的热点新闻 TopN，适合今天热点、24小时热点、本周热点等问题。")
+        @agent.tool(description="查询指定时间范围内的热点新闻 TopN，只返回候选新闻 ID 和标题；需要摘要、来源、时间等详情时再用 get_news_detail 批量读取。")
         async def get_top_news(
             ctx: RunContext[AgentDeps],
             limit: int = 20,
@@ -229,7 +244,7 @@ class AgentService:
             category: Optional[str] = None,
             region: Optional[str] = None,
             source: Optional[str] = None,
-        ) -> Dict[str, Any]:
+        ) -> List[Dict[str, Any]]:
             return await agent_tool_service.get_top_news(
                 limit=limit,
                 date=date,
@@ -241,11 +256,11 @@ class AgentService:
                 source=source,
             )
 
-        @agent.tool(description="按关键词搜索新闻，可按时间、分类、地区、来源筛选。")
+        @agent.tool(description="按关键词语义搜索新闻，只返回候选新闻 ID 和标题；需要摘要、来源、时间等详情时再用 get_news_detail 批量读取。")
         async def search_news(
             ctx: RunContext[AgentDeps],
             q: str,
-            limit: int = 20,
+            limit: int = 100,
             date: str = "all",
             start_date: Optional[str] = None,
             end_date: Optional[str] = None,
@@ -253,7 +268,7 @@ class AgentService:
             category: Optional[str] = None,
             region: Optional[str] = None,
             source: Optional[str] = None,
-        ) -> Dict[str, Any]:
+        ) -> List[Dict[str, Any]]:
             return await agent_tool_service.search_news(
                 q=q,
                 limit=limit,
@@ -266,9 +281,13 @@ class AgentService:
                 source=source,
             )
 
-        @agent.tool(description="读取指定新闻 ID 的详情、摘要、来源和关键词实体。")
-        async def get_news_detail(ctx: RunContext[AgentDeps], news_id: int) -> Dict[str, Any]:
-            return await agent_tool_service.get_news_detail(news_id=news_id)
+        @agent.tool(description="读取一个或多个新闻 ID 的详情、摘要、来源和关键词实体；search_news 只定位候选后，用这个工具批量核对事实。")
+        async def get_news_detail(
+            ctx: RunContext[AgentDeps],
+            news_id: int = 0,
+            news_ids: Optional[List[int]] = None,
+        ) -> Dict[str, Any]:
+            return await agent_tool_service.get_news_detail(news_id=news_id, news_ids=news_ids)
 
         @agent.tool(description="查询已有活跃专题。创建专题前必须先用这个能力或 create_event_topic 的查重能力确认是否已存在。")
         async def list_topics(
@@ -358,6 +377,58 @@ class AgentService:
                 range=range,
             )
 
+        @agent.tool(description="查询公开网页搜索结果，只返回标题、URL 和简短摘要。适合补充站外资料；不要把网页搜索结果当作 TrendSonar 库内新闻。")
+        async def web_search(ctx: RunContext[AgentDeps], q: str, limit: int = 5) -> Dict[str, Any]:
+            return await agent_tool_service.web_search(q=q, limit=limit)
+
+        @agent.tool(description="抓取公开网页正文。工具会先校验 URL，随后复用 Crawl4AI/Playwright 读取正文；适合读取 web_search 找到的页面详情。")
+        async def web_crawl_page(ctx: RunContext[AgentDeps], url: str, max_chars: int = 8000) -> Dict[str, Any]:
+            return await agent_tool_service.web_crawl_page(url=url, max_chars=max_chars)
+
+        @agent.tool(description="将新闻 ID 或给定新闻文字生成 PNG 图片卡片，返回可访问 URL。用于用户要求把新闻、摘要或结论转换成图片。")
+        async def generate_news_image(
+            ctx: RunContext[AgentDeps],
+            news_id: int = 0,
+            title: str = "",
+            body: str = "",
+            source: str = "",
+            time_label: str = "",
+            theme: str = "default",
+        ) -> Dict[str, Any]:
+            return await agent_tool_service.generate_news_image(
+                news_id=news_id,
+                title=title,
+                body=body,
+                source=source,
+                time_label=time_label,
+                theme=theme,
+            )
+
+        custom_tools = [tool for tool in load_custom_agent_tools() if tool.get("enabled") is not False]
+        if custom_tools:
+            tool_lines = []
+            for tool in custom_tools:
+                params = tool.get("parameters") if isinstance(tool.get("parameters"), dict) else {}
+                param_names = ", ".join(params.keys()) or "无参数"
+                hint = str(tool.get("prompt_hint") or "").strip()
+                line = f"- {tool.get('name')}: {tool.get('title') or tool.get('name')}；参数：{param_names}；{tool.get('description') or ''}"
+                if hint:
+                    line += f"；说明：{hint[:500]}"
+                tool_lines.append(line)
+            custom_tool_description = (
+                "调用管理端配置的自定义 HTTP 工具。可用工具如下：\n"
+                + "\n".join(tool_lines)
+                + "\n调用时 tool_name 必须是上述名称之一，args 按该工具参数传入。"
+            )
+
+            @agent.tool(description=custom_tool_description)
+            async def run_custom_tool(
+                ctx: RunContext[AgentDeps],
+                tool_name: str,
+                args: Dict[str, Any],
+            ) -> Dict[str, Any]:
+                return await agent_tool_service.run_custom_tool(tool_name=tool_name, args=args)
+
     async def stream_chat(
         self,
         *,
@@ -428,6 +499,11 @@ class AgentService:
                             continue
                         yield payload
             final_answer = final_output or "".join(answer_parts)
+            emitted_meta = await self._backfill_missing_reference_details(
+                user_query=user_query,
+                answer=final_answer,
+                meta=emitted_meta,
+            )
             final_meta = self._build_meta_event(emitted_meta)
             if final_meta:
                 yield final_meta
@@ -543,14 +619,26 @@ class AgentService:
             "references": list(current.get("references") or []),
             "terms": list(current.get("terms") or []),
         }
-        seen_refs = {str(item.get("id")) for item in merged["references"] if item.get("id") is not None}
+        ref_by_id = {str(item.get("id")): item for item in merged["references"] if item.get("id") is not None}
+        seen_refs = set(ref_by_id)
         for item in meta.get("references") or []:
             if not isinstance(item, dict):
                 continue
-            key = str(item.get("id"))
-            if not key or key in seen_refs:
+            raw_id = item.get("id")
+            if raw_id is None:
+                continue
+            key = str(raw_id)
+            existing = ref_by_id.get(key)
+            if existing is not None:
+                # 同一新闻可能先由搜索返回、后由详情返回；详情字段要回填到引用元数据。
+                for field, value in item.items():
+                    if field == "id" or value in (None, ""):
+                        continue
+                    if field == "summary" or not existing.get(field):
+                        existing[field] = value
                 continue
             merged["references"].append(item)
+            ref_by_id[key] = item
             seen_refs.add(key)
 
         seen_terms = {str(item.get("term") or "").lower() for item in merged["terms"]}
@@ -579,25 +667,36 @@ class AgentService:
 
         references = list(current.get("references") or [])
         terms = list(current.get("terms") or [])
-        seen_refs = {str(item.get("id")) for item in references if item.get("id") is not None}
+        ref_by_id = {str(item.get("id")): item for item in references if item.get("id") is not None}
+        seen_refs = set(ref_by_id)
         seen_terms = {str(item.get("term") or "").lower() for item in terms}
 
         def add_news(item: Any) -> None:
             if not isinstance(item, dict):
                 return
             news_id = item.get("id")
-            if news_id is None or str(news_id) in seen_refs:
+            if news_id is None:
                 return
-            references.append(
-                {
-                    "id": news_id,
-                    "title": item.get("title") or "",
-                    "source": item.get("source") or "",
-                    "time": item.get("time") or item.get("publish_date"),
-                    "url": item.get("url") or "",
-                    "summary": item.get("summary") or "",
-                }
-            )
+            key = str(news_id)
+            payload = {
+                "id": news_id,
+                "title": item.get("title") or "",
+                "source": item.get("source") or "",
+                "time": item.get("time") or item.get("publish_date"),
+                "url": item.get("url") or "",
+                "summary": item.get("summary") or "",
+            }
+            existing = ref_by_id.get(key)
+            if existing is not None:
+                # 详情工具可能晚于轻量搜索返回，需要用更完整的字段回填引用元数据。
+                for field, value in payload.items():
+                    if field == "id" or value in (None, ""):
+                        continue
+                    if field == "summary" or not existing.get(field):
+                        existing[field] = value
+                return
+            references.append(payload)
+            ref_by_id[key] = payload
             seen_refs.add(str(news_id))
 
         def add_term(value: Any, term_type: str) -> None:
@@ -612,8 +711,23 @@ class AgentService:
             terms.append({"term": text, "type": term_type})
             seen_terms.add(key)
 
-        if isinstance(content, dict):
-            for item in content.get("items") or []:
+        content_items: List[Any] = []
+        if isinstance(content, list):
+            content_items = content
+        elif isinstance(content, dict):
+            content_items = list(content.get("items") or [])
+
+        if content_items:
+            for item in content_items:
+                if isinstance(item, dict) and isinstance(item.get("news"), dict):
+                    news_item = item["news"]
+                    add_news(news_item)
+                    for kw in news_item.get("keywords") or []:
+                        add_term(kw, "keyword")
+                    for entity in news_item.get("entities") or []:
+                        add_term(entity, "entity")
+                    continue
+
                 add_news(item)
                 if isinstance(item, dict):
                     for kw in item.get("keywords") or []:
@@ -621,6 +735,7 @@ class AgentService:
                     for entity in item.get("entities") or []:
                         add_term(entity, "entity")
 
+        if isinstance(content, dict):
             news = content.get("news")
             if isinstance(news, dict):
                 add_news(news)
@@ -633,6 +748,62 @@ class AgentService:
                 add_news(item)
 
         return {"references": references[:80], "terms": terms[:120]}
+
+    async def _backfill_missing_reference_details(
+        self,
+        *,
+        user_query: str,
+        answer: str,
+        meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        输入:
+        - `user_query`: 用户原始问题
+        - `answer`: 模型已经生成的正文
+        - `meta`: 工具累计的引用元数据
+
+        输出:
+        - 回填详情后的元数据
+
+        作用:
+        - 清单类回答中引用面板前排候选缺少详情时，仅回填元数据，不自动改写正文。
+        """
+
+        query = str(user_query or "")
+        if any(hint in query for hint in SUPPLEMENT_SKIP_QUERY_HINTS):
+            return meta
+        if not any(hint in query for hint in LIST_QUERY_HINTS):
+            return meta
+
+        references = [item for item in meta.get("references") or [] if isinstance(item, dict)]
+        if not references:
+            return meta
+
+        cited_ids = {match.group(1) for match in NEWS_CITATION_PATTERN.finditer(answer or "")}
+        missing_ids: list[int] = []
+        for ref in references[:TOP_REFERENCE_AUDIT_WINDOW]:
+            raw_id = ref.get("id")
+            if raw_id is None or str(raw_id) in cited_ids:
+                continue
+            try:
+                news_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if news_id > 0:
+                missing_ids.append(news_id)
+            if len(missing_ids) >= MAX_SUPPLEMENT_REFERENCES:
+                break
+
+        if not missing_ids:
+            return meta
+
+        try:
+            detail_result = await agent_tool_service.get_news_detail(news_ids=missing_ids)
+        except Exception as exc:
+            logger.warning(f"回填候选新闻详情失败: ids={missing_ids}, error={exc}")
+            return meta
+
+        return self._merge_tool_meta(meta, detail_result)
 
     def _build_meta_event(self, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """

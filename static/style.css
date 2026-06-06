@@ -3297,35 +3297,53 @@ body.page-index .agent-answer p:first-child { margin-top: 0;
 body.page-index .agent-answer p:last-child { margin-bottom: 0;
 }
 
-body.page-index .agent-citation { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; min-height: 20px; margin: 0 2px; padding: 0 6px; border: 1px solid rgba(37, 99, 235, 0.28); border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 0.72rem; font-weight: 800; line-height: 1; cursor: pointer;
+body.page-index .agent-citation { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; min-height: 16px; margin: 0 1px; padding: 0 4px; border: 1px solid rgba(37, 99, 235, 0.22); border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 0.64rem; font-weight: 760; line-height: 1; vertical-align: 0.08em; cursor: pointer;
 }
 
 body.page-index .agent-citation:hover { background: #dbeafe; border-color: rgba(37, 99, 235, 0.48);
 }
 
-body.page-index .agent-reference-list,
-body.page-index .agent-suggestions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px;
+body.page-index .agent-reference-panel,
+body.page-index .agent-suggestions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; justify-content: flex-start; text-align: left;
 }
 
-body.page-index .agent-reference-list { flex-direction: column; align-items: stretch; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border-color);
+body.page-index .agent-reference-panel { display: block; margin-top: 14px; border-top: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent); padding-top: 10px;
 }
 
-body.page-index .agent-reference-title { color: var(--text-light); font-size: 0.76rem; font-weight: 800;
+body.page-index .agent-reference-title { min-height: 26px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 6px; border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--bg-card) 96%, var(--bg-soft)); color: var(--text-light); font-size: 0.7rem; font-weight: 760; cursor: pointer; user-select: none; list-style: none;
 }
 
-body.page-index .agent-reference-item { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 8px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); color: var(--text-secondary); text-align: left; cursor: pointer; font-size: 0.78rem; line-height: 1.35;
+body.page-index .agent-reference-title::-webkit-details-marker { display: none;
+}
+
+body.page-index .agent-reference-label { display: inline-flex; align-items: center; gap: 5px; min-width: 0;
+}
+
+body.page-index .agent-reference-toggle::after { content: '展开'; color: var(--primary-color); font-size: 0.68rem; font-weight: 760;
+}
+
+body.page-index .agent-reference-panel[open] .agent-reference-toggle::after { content: '收起';
+}
+
+body.page-index .agent-reference-count { min-width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: flex-start; padding: 0 5px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 0.66rem; font-weight: 760;
+}
+
+body.page-index .agent-reference-list { display: flex; flex-direction: column; align-items: stretch; gap: 6px; margin-top: 6px;
+}
+
+body.page-index .agent-reference-item { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 7px; border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-card); color: var(--text-secondary); text-align: left; cursor: pointer; font-size: 0.74rem; line-height: 1.35;
 }
 
 body.page-index .agent-reference-item:hover { border-color: rgba(37, 99, 235, 0.32); background: #eff6ff; color: #1d4ed8;
 }
 
-body.page-index .agent-reference-index { flex: 0 0 auto; color: #1d4ed8; font-weight: 850;
+body.page-index .agent-reference-index { flex: 0 0 auto; color: #1d4ed8; font-weight: 780;
 }
 
 body.page-index .agent-clickable-term { cursor: pointer; color: var(--primary-color); font-weight: 780; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
 }
 
-body.page-index .agent-suggestion { min-height: 28px; padding: 0 10px; border: 1px solid rgba(37, 99, 235, 0.24); border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 0.78rem; font-weight: 800; cursor: pointer;
+body.page-index .agent-suggestion { min-height: 28px; padding: 0 10px; border: 1px solid rgba(37, 99, 235, 0.24); border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 0.78rem; font-weight: 800; text-align: left; cursor: pointer;
 }
 
 body.page-index .agent-suggestion:hover { background: #dbeafe; border-color: rgba(37, 99, 235, 0.46);
@@ -3428,6 +3446,18 @@ body.page-admin .tool-param-line { margin-bottom: 12px; color: var(--text-light)
 }
 
 body.page-admin .tool-test-output { margin-top: 14px; padding: 14px; border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-soft);
+}
+
+body.page-admin .tool-example-panel { margin-bottom: 14px; padding: 12px; border: 1px solid color-mix(in srgb, var(--primary-color) 18%, var(--border-color)); border-radius: 12px; background: color-mix(in srgb, var(--primary-light) 42%, var(--bg-card));
+}
+
+body.page-admin .tool-example-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px;
+}
+
+body.page-admin .tool-example-head strong { color: var(--text-main); font-size: 0.92rem;
+}
+
+body.page-admin .tool-example-code { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-card); color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; font-size: 0.74rem; line-height: 1.5;
 }
 
 body.page-admin .tool-test-head { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; margin-bottom: 10px;

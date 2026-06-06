@@ -8,6 +8,7 @@ config_local.py
 tests/
 scripts/
 logs/
+static/generated/
 trendsonar.db
 trendsonar.db-shm
 trendsonar.db-wal

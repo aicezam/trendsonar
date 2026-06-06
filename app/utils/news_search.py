@@ -3,6 +3,7 @@
 主要函数:
 - `semantic_news_search`: 基于文本命中、向量相似度、时间新鲜度和热度综合召回新闻
 - `build_soft_search_query`: 将关键词、分类和地区筛选转换为适合语义召回的查询文本
+- `build_search_query_variants`: 为智能体生成多组可复用搜索词，提升复杂问法召回率
 - `normalize_similarity_terms`: 清洗新闻关键词和实体，供相似新闻检索使用
 """
 
@@ -25,27 +26,56 @@ from app.models.news import News
 from app.services.ai_service import ai_service
 from app.utils.tools import normalize_regions_to_countries
 
-MILITARY_INTENT_TERMS = [
-    "军事",
-    "军方",
-    "军队",
-    "防务",
-    "国防",
-    "军演",
-    "武器",
-    "导弹",
-    "美军",
-    "军用",
-    "无人机",
-    "战机",
-    "军舰",
-    "航母",
-    "部队",
-    "五角大楼",
-    "国防部",
-]
-US_INTENT_TERMS = ["美国", "美方", "美军", "五角大楼", "美国防部", "美国国防部", "华盛顿"]
-CHINA_INTENT_TERMS = ["中国", "中方", "解放军"]
+GENERIC_QUERY_TERMS = {
+    "新闻",
+    "报道",
+    "相关",
+    "近期",
+    "最近",
+    "一个月",
+    "近一个月",
+    "过去一个月",
+    "本月",
+    "今天",
+    "昨天",
+    "昨日",
+    "本周",
+    "今年",
+    "热点",
+    "事件",
+    "情况",
+    "信息",
+    "内容",
+    "国际",
+    "国内",
+    "时政",
+    "政治",
+    "财经",
+    "商业",
+    "科技",
+    "科学",
+    "社会",
+    "民生",
+    "文娱",
+    "体育",
+    "综合",
+    "会晤",
+    "访问",
+    "外国",
+    "别国",
+    "国家",
+    "时政军事",
+    "财经商业",
+    "科技科学",
+    "社会民生",
+    "文娱体育",
+    "其他",
+    "全球",
+}
+
+TERM_SPLIT_PATTERN = r"[\s,，、/|;；]+"
+MAX_COMPACT_PHRASE_LENGTH = 24
+MAX_CORE_TERM_LENGTH = 18
 
 
 @dataclass
@@ -118,16 +148,48 @@ def split_search_terms(query_text: str, text_terms: Optional[list[str]] = None) 
     - 支持空格、逗号、顿号、斜杠等分隔的多关键词检索，并保留完整查询句。
     """
 
-    raw_terms = text_terms or re.split(r"[\s,，、/|;；]+", query_text or "")
+    raw_terms = text_terms or re.split(TERM_SPLIT_PATTERN, query_text or "")
     terms: list[str] = []
     full_query = (query_text or "").strip().lower()
     if full_query and text_terms is None:
         terms.append(full_query)
+        compact_query = compact_search_phrase(full_query)
+        split_count = len([term for term in raw_terms if str(term or "").strip()])
+        if (
+            compact_query
+            and compact_query != full_query
+            and compact_query not in terms
+            and 1 < split_count <= 2
+            and len(compact_query) <= MAX_COMPACT_PHRASE_LENGTH
+        ):
+            terms.append(compact_query)
     for term in raw_terms:
         value = (term or "").strip().lower()
         if value and value not in terms:
             terms.append(value)
     return terms
+
+
+def compact_search_phrase(value: str) -> str:
+    """
+    输入:
+    - `value`: 原始搜索文本
+
+    输出:
+    - 去除空白和常见分隔符后的短语
+
+    作用:
+    - 兼容中文短语中间带空格或分隔符的写法差异，避免精确事件被拆词结果淹没。
+    """
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    compact = re.sub(TERM_SPLIT_PATTERN, "", text)
+    if compact == text:
+        return text
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", compact))
+    return compact if has_cjk and len(compact) >= 2 else text
 
 
 def expand_search_terms(
@@ -145,7 +207,7 @@ def expand_search_terms(
     - 增强后的搜索词列表
 
     作用:
-    - 将“军事”等用户短词扩展到“时政军事、防务、军方”等同义线索，提高工具召回率。
+    - 合并用户关键词、分类和地区线索，不在通用搜索层写死具体领域同义词。
     """
 
     expanded: list[str] = []
@@ -164,51 +226,15 @@ def expand_search_terms(
     for term in terms:
         add(term)
 
-    has_military_intent = any(
-        any(alias in term for alias in ["军事", "军方", "军队", "防务", "国防", "军演", "武器", "导弹", "美军"])
-        for term in expanded
-    )
-    if has_military_intent:
-        for alias in ["时政军事", "政治军事", "军事", "军方", "军队", "防务", "国防", "军演", "武器", "导弹"]:
-            add(alias)
-
-    has_us_intent = any(
-        any(alias in term for alias in ["美国", "美方", "美军", "五角大楼", "华盛顿", "美国防部", "美国国防部"])
-        for term in expanded
-    )
-    if has_us_intent:
-        for alias in ["美国", "美方", "美军", "五角大楼", "美国防部", "美国国防部", "华盛顿"]:
-            add(alias)
-
-    has_china_intent = any(any(alias in term for alias in CHINA_INTENT_TERMS) for term in expanded)
-    if has_china_intent:
-        for alias in ["中国", "中方", "解放军", "国防部", "外交部"]:
-            add(alias)
-
     category_text = str(category or "").strip()
     if category_text and category_text != "all":
-        for item in re.split(r"[,，、/|;；\s]+", category_text):
+        for item in re.split(TERM_SPLIT_PATTERN, category_text):
             add(item)
-            if "军事" in item:
-                for alias in ["时政军事", "政治军事", "军事", "军方", "军队", "防务", "国防", "军演", "武器", "导弹"]:
-                    add(alias)
-            if item == "科技":
-                add("科技科学")
-            if item == "财经":
-                add("财经商业")
-            if item == "社会":
-                add("社会民生")
 
     normalized_region = normalize_regions_to_countries(region) if region and region != "all" else ""
     if normalized_region and normalized_region not in {"其他", "全球"}:
         for item in normalized_region.split(","):
             add(item)
-            if item == "美国":
-                for alias in ["美国", "美方", "美军", "五角大楼", "美国防部", "美国国防部", "华盛顿"]:
-                    add(alias)
-            if item == "中国":
-                for alias in ["中国", "中方", "解放军", "国防部", "外交部"]:
-                    add(alias)
 
     return expanded
 
@@ -219,17 +245,13 @@ def detect_query_intents(terms: list[str]) -> dict[str, bool]:
     - `terms`: 查询词列表
 
     输出:
-    - 查询中识别出的主题意图
+    - 查询中识别出的强约束意图
 
     作用:
-    - 判断是否需要对军事、国家等概念做结果覆盖度约束，避免宽泛分类命中过多无关新闻。
+    - 保留扩展点，默认不对任何领域做硬编码强约束。
     """
 
-    return {
-        "military": any(any(alias in term for alias in MILITARY_INTENT_TERMS) for term in terms),
-        "us": any(any(alias in term for alias in US_INTENT_TERMS) for term in terms),
-        "china": any(any(alias in term for alias in CHINA_INTENT_TERMS) for term in terms),
-    }
+    return {}
 
 
 def _joined_news_text(news: News, *, include_category: bool = False) -> str:
@@ -280,16 +302,9 @@ def matches_query_intents(news: News, intents: dict[str, bool]) -> bool:
     - 新闻是否覆盖所有强查询意图
 
     作用:
-    - 对“美国军事新闻”这类多条件查询，要求结果同时具备国家和主题线索。
+    - 保留强约束过滤扩展点，默认不过滤任何领域。
     """
 
-    text = _joined_news_text(news, include_category=False)
-    if intents.get("military") and not _has_any(text, MILITARY_INTENT_TERMS):
-        return False
-    if intents.get("us") and not _has_any(text, US_INTENT_TERMS):
-        return False
-    if intents.get("china") and not _has_any(text, CHINA_INTENT_TERMS + ["国防部"]):
-        return False
     return True
 
 
@@ -310,20 +325,7 @@ def intent_coverage_score(news: News, intents: dict[str, bool]) -> float:
     if not active:
         return 1.0
 
-    text = _joined_news_text(news, include_category=False)
-    category_text = news.category or ""
-    score = 0.0
-    for key in active:
-        if key == "military":
-            if _has_any(text, MILITARY_INTENT_TERMS):
-                score += 1.0
-            elif "军事" in category_text:
-                score += 0.15
-        elif key == "us":
-            score += 1.0 if _has_any(text, US_INTENT_TERMS) else 0.0
-        elif key == "china":
-            score += 1.0 if _has_any(text, CHINA_INTENT_TERMS + ["国防部"]) else 0.0
-    return score / len(active)
+    return 1.0
 
 
 def build_soft_search_query(
@@ -359,6 +361,170 @@ def build_soft_search_query(
     return " ".join(query_parts).strip(), terms
 
 
+def _is_generic_query_term(term: str) -> bool:
+    """
+    输入:
+    - `term`: 候选查询词
+
+    输出:
+    - 是否属于通用占位词
+
+    作用:
+    - 生成查询变体时保留人名、国家、机构等主体词，过滤“新闻、最近、访问”等宽泛词。
+    """
+
+    value = str(term or "").strip().lower()
+    if not value:
+        return True
+    return value in GENERIC_QUERY_TERMS or value.isdigit()
+
+
+def _is_usable_core_term(term: str) -> bool:
+    """
+    输入:
+    - `term`: 候选核心词
+
+    输出:
+    - 是否适合作为相关性锚点
+
+    作用:
+    - 过滤整句、过长串和通用占位词，保留用户明确给出的人名、机构、地点、产品或事件词。
+    """
+
+    value = str(term or "").strip()
+    if not value or _is_generic_query_term(value):
+        return False
+    if len(value) > MAX_CORE_TERM_LENGTH:
+        return False
+    if any(separator in value for separator in [" ", ",", "，", "、", "/", "|", ";", "；"]):
+        return False
+    return True
+
+
+def _important_query_terms(terms: list[str], limit: int = 4) -> list[str]:
+    """
+    输入:
+    - `terms`: 原始查询词列表
+    - `limit`: 最多保留的主体词数量
+
+    输出:
+    - 去重后的重要主体词
+
+    作用:
+    - 从用户问题里提取可作为查询变体锚点的非泛化关键词。
+    """
+
+    important: list[str] = []
+    seen: set[str] = set()
+
+    def add_important(value: str) -> None:
+        text = str(value or "").strip()
+        if not text or _is_generic_query_term(text):
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        important.append(text)
+
+    for term in terms:
+        value = str(term or "").strip()
+        if not _is_usable_core_term(value):
+            continue
+        add_important(value)
+        if len(important) >= limit:
+            break
+    return important
+
+
+def _term_bigrams(terms: list[str], limit: int = 3, *, anchor_to_first: bool = False) -> list[str]:
+    """
+    输入:
+    - `terms`: 关键词列表
+    - `limit`: 最多生成数量
+    - `anchor_to_first`: 是否只保留包含首个核心词的组合
+
+    输出:
+    - 相邻关键词组合列表
+
+    作用:
+    - 为“主体 + 动作/对象”生成更精确的中文短语变体，并避免后半段宽泛组合覆盖主查询意图。
+    """
+
+    values = [term for term in terms if _is_usable_core_term(term)]
+    bigrams: list[str] = []
+    seen: set[str] = set()
+    anchor = values[0] if values and anchor_to_first else ""
+    for left, right in zip(values, values[1:]):
+        if anchor and anchor not in {left, right}:
+            continue
+        compact = compact_search_phrase(f"{left} {right}")
+        if not compact or compact in seen or compact in {left, right}:
+            continue
+        seen.add(compact)
+        bigrams.append(compact)
+        if len(bigrams) >= limit:
+            break
+    return bigrams
+
+
+def build_search_query_variants(
+    q: str,
+    *,
+    category: Optional[str] = None,
+    region: Optional[str] = None,
+    max_variants: int = 5,
+) -> list[tuple[str, list[str]]]:
+    """
+    输入:
+    - `q`: 用户或智能体传入的搜索文本
+    - `category`/`region`: 可选分类和地区线索
+    - `max_variants`: 最大查询变体数量
+
+    输出:
+    - `(查询文本, 查询词列表)` 元组列表
+
+    作用:
+    - 让单次智能体工具调用内部执行多组检索，例如同时尝试原始问题、去空格短语和重要词组合。
+    """
+
+    query = str(q or "").strip()
+    variants: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+
+    def add(raw_query: str, raw_terms: Optional[list[str]] = None) -> None:
+        text = str(raw_query or "").strip()
+        if not text:
+            return
+        query_text, terms = build_soft_search_query(text, category=category, region=region)
+        if raw_terms:
+            terms = expand_search_terms(split_search_terms(query_text, raw_terms), category=category, region=region)
+        key = query_text.lower()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        variants.append((query_text, terms))
+
+    raw_terms = [term.strip() for term in re.split(TERM_SPLIT_PATTERN, query) if term.strip()]
+    important_terms = _important_query_terms(raw_terms, limit=12)
+    visible_terms = important_terms[:4 if len(raw_terms) > 4 else 6]
+    if len(raw_terms) > 4 and important_terms:
+        add(" ".join(visible_terms), important_terms)
+    else:
+        add(query)
+
+    if len(important_terms) > 2:
+        for phrase in _term_bigrams(important_terms[:6], anchor_to_first=True):
+            add(phrase, [phrase])
+
+    if len(raw_terms) > 4:
+        add(query)
+    elif 1 < len(important_terms) <= 6:
+        add(" ".join(important_terms), important_terms)
+
+    return variants[: max(1, max_variants)]
+
+
 def text_match_score(news: News, query_text: str, terms: list[str]) -> float:
     """
     输入:
@@ -384,6 +550,7 @@ def text_match_score(news: News, query_text: str, terms: list[str]) -> float:
         for t in (news.keywords or []) + (news.entities or [])
         if isinstance(t, str) and t.strip()
     ]
+    has_specific_terms = any(not _is_generic_query_term(term) for term in terms)
 
     score = 0.0
     if lowered_q:
@@ -392,24 +559,189 @@ def text_match_score(news: News, query_text: str, terms: list[str]) -> float:
         if lowered_q in summary:
             score += 0.18
         if lowered_q in source or lowered_q in category or lowered_q in region:
-            score += 0.2
+            score += 0.06
         if lowered_q in item_terms:
             score += 0.35
+
+        compact_q = compact_search_phrase(lowered_q)
+        if compact_q and compact_q != lowered_q:
+            compact_title = compact_search_phrase(title)
+            compact_summary = compact_search_phrase(summary)
+            compact_item_terms = [compact_search_phrase(term) for term in item_terms]
+            if compact_q in compact_title:
+                score += 0.86
+            if compact_q in compact_summary:
+                score += 0.26
+            if compact_q in compact_item_terms:
+                score += 0.42
 
     for term in terms:
         value = str(term or "").strip().lower()
         if not value:
             continue
+        if has_specific_terms and _is_generic_query_term(value):
+            continue
         if value in title:
-            score += 0.14
+            score += 0.18
         if value in summary:
-            score += 0.06
+            score += 0.07
         if value in source or value in category or value in region:
-            score += 0.09
+            score += 0.025
         if value in item_terms:
-            score += 0.12
+            score += 0.16
+
+        compact_value = compact_search_phrase(value)
+        if compact_value and compact_value != value:
+            if compact_value in compact_search_phrase(title):
+                score += 0.22
+            if compact_value in compact_search_phrase(summary):
+                score += 0.09
 
     return min(score, 1.0)
+
+
+def _core_query_terms(terms: list[str], limit: int = 6) -> list[str]:
+    """
+    输入:
+    - `terms`: 搜索词列表
+    - `limit`: 最大核心词数量
+
+    输出:
+    - 去重后的核心词列表
+
+    作用:
+    - 抽取用户显式提供的短主体词，用于限制向量和热度对搜索结果的过度影响。
+    """
+
+    core_terms: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        value = str(term or "").strip().lower()
+        if not _is_usable_core_term(value):
+            continue
+        key = compact_search_phrase(value)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        core_terms.append(value)
+        if len(core_terms) >= limit:
+            break
+    return core_terms
+
+
+def _anchor_query_term(terms: list[str]) -> str:
+    """
+    输入:
+    - `terms`: 搜索词列表
+
+    输出:
+    - 第一个可用核心词，若不存在则返回空字符串
+
+    作用:
+    - 将用户问题中靠前的主体词作为召回锚点，避免动作词或地点词单独命中导致结果跑偏。
+    """
+
+    core_terms = _core_query_terms(terms, limit=1)
+    return core_terms[0] if core_terms else ""
+
+
+def anchor_term_matched(news: News, terms: list[str]) -> bool:
+    """
+    输入:
+    - `news`: 新闻对象
+    - `terms`: 搜索词列表
+
+    输出:
+    - 新闻文本是否命中查询锚点词
+
+    作用:
+    - 对多核心词查询要求主体锚点出现，降低只命中动作或地点的弱相关结果。
+    """
+
+    anchor = _anchor_query_term(terms)
+    if not anchor:
+        return True
+    text = compact_search_phrase(_joined_news_text(news, include_category=False).lower())
+    compact_anchor = compact_search_phrase(anchor)
+    return bool(compact_anchor and compact_anchor in text)
+
+
+def core_term_coverage(news: News, terms: list[str]) -> tuple[float, int, int]:
+    """
+    输入:
+    - `news`: 新闻对象
+    - `terms`: 搜索词列表
+
+    输出:
+    - 覆盖率、命中数量、核心词总数
+
+    作用:
+    - 衡量新闻正文是否真正覆盖用户给出的核心词，避免宽泛语义召回压过精确查询。
+    """
+
+    core_terms = _core_query_terms(terms)
+    if not core_terms:
+        return 1.0, 0, 0
+
+    parts = [news.title or "", news.summary or ""]
+    for item in (news.keywords or []) + (news.entities or []):
+        if isinstance(item, str):
+            parts.append(item)
+    text = compact_search_phrase(" ".join(parts).lower())
+    matched = 0
+    for term in core_terms:
+        compact_term = compact_search_phrase(term)
+        if compact_term and compact_term in text:
+            matched += 1
+    return matched / len(core_terms), matched, len(core_terms)
+
+
+def strong_core_term_coverage(news: News, terms: list[str]) -> tuple[float, int, int]:
+    """
+    输入:
+    - `news`: 新闻对象
+    - `terms`: 搜索词列表
+
+    输出:
+    - 标题、关键词、实体字段中的核心词覆盖率、命中数量、核心词总数
+
+    作用:
+    - 区分标题/标签强相关和摘要中的顺带提及，提升特定事件搜索的结果精度。
+    """
+
+    core_terms = _core_query_terms(terms)
+    if not core_terms:
+        return 1.0, 0, 0
+
+    parts = [news.title or ""]
+    for item in (news.keywords or []) + (news.entities or []):
+        if isinstance(item, str):
+            parts.append(item)
+    text = compact_search_phrase(" ".join(parts).lower())
+    matched = 0
+    for term in core_terms:
+        compact_term = compact_search_phrase(term)
+        if compact_term and compact_term in text:
+            matched += 1
+    return matched / len(core_terms), matched, len(core_terms)
+
+
+def _meets_core_term_requirement(matched: int, total: int) -> bool:
+    """
+    输入:
+    - `matched`: 已命中的核心词数量
+    - `total`: 查询中的核心词总数
+
+    输出:
+    - 是否达到最低核心词覆盖要求
+
+    作用:
+    - 单核心词查询允许命中 1 个；多核心词查询至少命中 2 个，避免单个宽泛词把无关新闻带入结果。
+    """
+
+    if total <= 0:
+        return True
+    return matched > 0
 
 
 def _recency_score(publish_date: Optional[datetime], now: datetime) -> float:
@@ -484,7 +816,7 @@ def combined_search_score(news: News, relevance: float, max_heat: float, now: da
     freshness = _recency_score(news.publish_date, now)
     heat = _heat_score(news.heat_score, max_heat)
     relevance_gate = min(1.0, relevance / 0.45)
-    return relevance * 0.55 + freshness * 0.35 * relevance_gate + heat * 0.10 * relevance_gate
+    return relevance * 0.7 + freshness * 0.2 * relevance_gate + heat * 0.1 * relevance_gate
 
 
 def _build_text_conditions(terms: list[str]) -> list[Any]:
@@ -519,6 +851,59 @@ def _build_text_conditions(terms: list[str]) -> list[Any]:
     return conditions
 
 
+def _build_core_text_conditions(terms: list[str]) -> list[Any]:
+    """
+    输入:
+    - `terms`: 搜索词列表
+
+    输出:
+    - 针对核心词的 SQLAlchemy 文本匹配条件列表
+
+    作用:
+    - 为特定事件搜索提供锚点候选，避免只从宽泛分类、地区或热榜候选中取数。
+    """
+
+    conditions: list[Any] = []
+    for term in _core_query_terms(terms):
+        like = f"%{term}%"
+        conditions.extend(
+            [
+                News.title.ilike(like),
+                News.summary.ilike(like),
+                cast(News.keywords, Text).ilike(like),
+                cast(News.entities, Text).ilike(like),
+            ]
+        )
+    return conditions
+
+
+def _build_single_term_text_conditions(term: str) -> list[Any]:
+    """
+    输入:
+    - `term`: 单个查询词
+
+    输出:
+    - 单词跨字段模糊匹配条件
+
+    作用:
+    - 让多关键词查询中的每个词都能独立进入候选池，避免宽 OR 查询按时间截断时漏掉目标新闻。
+    """
+
+    value = str(term or "").strip()
+    if not value:
+        return []
+    like = f"%{value}%"
+    return [
+        News.title.ilike(like),
+        News.summary.ilike(like),
+        News.source.ilike(like),
+        News.category.ilike(like),
+        News.region.ilike(like),
+        cast(News.keywords, Text).ilike(like),
+        cast(News.entities, Text).ilike(like),
+    ]
+
+
 async def _load_embedding(query_text: str, log_prefix: str) -> Optional[np.ndarray]:
     """
     输入:
@@ -551,6 +936,7 @@ async def semantic_news_search(
     min_score: float = 0.2,
     text_terms: Optional[list[str]] = None,
     log_prefix: str = "新闻搜索",
+    use_embedding: bool = True,
 ) -> NewsSearchResult:
     """
     输入:
@@ -562,6 +948,7 @@ async def semantic_news_search(
     - `min_score`: 最低相关性阈值
     - `text_terms`: 可选关键词列表
     - `log_prefix`: 日志前缀
+    - `use_embedding`: 是否启用向量重排
 
     输出:
     - `NewsSearchResult`
@@ -575,11 +962,13 @@ async def semantic_news_search(
     if not query_text:
         return NewsSearchResult([], 0, 0.0, query_text, [], False)
 
-    normalized_terms = expand_search_terms(split_search_terms(query_text, text_terms))
+    base_terms = split_search_terms(query_text, text_terms)
+    normalized_terms = expand_search_terms(base_terms)
     intents = detect_query_intents(normalized_terms)
     text_conditions = _build_text_conditions(normalized_terms)
+    core_terms = _core_query_terms(normalized_terms, limit=12)
 
-    q_vec = await _load_embedding(query_text, log_prefix)
+    q_vec = await _load_embedding(query_text, log_prefix) if use_embedding else None
     candidate_options = [defer(News.content)]
     if q_vec is None:
         candidate_options.append(defer(News.embedding))
@@ -587,24 +976,41 @@ async def semantic_news_search(
     candidate_by_id: dict[int, News] = {}
 
     if text_conditions:
+        text_limit = max(120, min(candidate_limit, offset + limit * 6))
         text_stmt = (
             stmt.options(*candidate_options)
             .where(or_(*text_conditions))
-            .order_by(desc(News.publish_date), desc(News.heat_score))
-            .limit(max(candidate_limit, offset + limit))
+            .order_by(desc(News.heat_score), desc(News.publish_date))
+            .limit(text_limit)
         )
         text_result = await db.execute(text_stmt)
         for item in text_result.scalars().all():
             candidate_by_id[item.id] = item
 
-    broad_stmt = (
-        stmt.options(*candidate_options)
-        .order_by(desc(News.publish_date), desc(News.heat_score))
-        .limit(candidate_limit)
-    )
-    broad_result = await db.execute(broad_stmt)
-    for item in broad_result.scalars().all():
-        candidate_by_id[item.id] = item
+    per_term_limit = max(100, min(260, offset + limit * 5))
+    for term in core_terms:
+        single_conditions = _build_single_term_text_conditions(term)
+        if not single_conditions:
+            continue
+        single_stmt = (
+            stmt.options(*candidate_options)
+            .where(or_(*single_conditions))
+            .order_by(desc(News.heat_score), desc(News.publish_date))
+            .limit(per_term_limit)
+        )
+        single_result = await db.execute(single_stmt)
+        for item in single_result.scalars().all():
+            candidate_by_id[item.id] = item
+
+    if not text_conditions:
+        broad_stmt = (
+            stmt.options(*candidate_options)
+            .order_by(desc(News.heat_score), desc(News.publish_date))
+            .limit(candidate_limit)
+        )
+        broad_result = await db.execute(broad_stmt)
+        for item in broad_result.scalars().all():
+            candidate_by_id[item.id] = item
 
     candidates = list(candidate_by_id.values())
     now = datetime.now()
@@ -626,8 +1032,19 @@ async def semantic_news_search(
                 sim = np.dot(q_vec, n_vec) / (norm_q * norm_n)
                 score += max(0.0, float(sim))
 
+        core_coverage, core_matched, core_total = core_term_coverage(item, normalized_terms)
+        strong_coverage, strong_matched, _strong_total = strong_core_term_coverage(item, normalized_terms)
+        if not _meets_core_term_requirement(core_matched, core_total):
+            continue
+
         if score >= min_score:
             final_score = combined_search_score(item, score, max_heat, now)
+            if core_total:
+                final_score *= 0.6 + core_coverage * 0.5
+                if strong_matched:
+                    final_score *= 0.92 + strong_coverage * 0.25
+                else:
+                    final_score *= 0.65
             if intents and any(intents.values()):
                 final_score *= 0.35 + coverage * 0.65
             scored_news.append((final_score, item))

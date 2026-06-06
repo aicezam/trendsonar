@@ -21,7 +21,7 @@ import numpy as np
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -229,14 +229,15 @@ class SourceContentTestPayload(BaseModel):
 
 class AgentToolTestPayload(BaseModel):
     name: str
-    args: dict[str, Any] = {}
+    args: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentCustomToolPayload(BaseModel):
     name: str
     title: str = ""
     description: str = ""
-    parameters: dict[str, Any] = {}
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    executor: dict[str, Any] = Field(default_factory=dict)
     prompt_hint: str = ""
     enabled: bool = True
 
@@ -574,13 +575,13 @@ async def api_test_agent_tool(payload: AgentToolTestPayload, request: Request):
 async def api_save_custom_agent_tool(payload: AgentCustomToolPayload, request: Request):
     """
     输入:
-    - `payload`: 自定义工具草案配置
+    - `payload`: 自定义工具配置
 
     输出:
     - 保存后的工具配置
 
     作用:
-    - 允许管理端新增或更新工具元数据，供后续绑定执行器。
+    - 允许管理端新增或更新可执行 HTTP 自定义工具。
     """
 
     if not is_admin_request(request):
@@ -602,7 +603,7 @@ async def api_delete_custom_agent_tool(name: str, request: Request):
     - 删除结果
 
     作用:
-    - 删除管理端维护的自定义工具草案。
+    - 删除管理端维护的自定义工具配置。
     """
 
     if not is_admin_request(request):

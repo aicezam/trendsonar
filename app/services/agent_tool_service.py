@@ -13,9 +13,10 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from itertools import combinations
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
+import aiohttp
 from sqlalchemy import Text, cast, desc, func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from app.core.database import AsyncSessionLocal
@@ -26,25 +27,45 @@ from app.services.report_service import report_service
 from app.services.task_manager import task_manager
 from app.services.topic_service import topic_service
 from app.utils.agent_tool_config import delete_custom_agent_tool, load_custom_agent_tools, save_custom_agent_tool
+from app.utils.agent_web import compact_web_text, ensure_public_web_url, simple_web_search
 from app.utils.news_query import build_news_query_filters, serialize_news_item
-from app.utils.news_search import build_soft_search_query, semantic_news_search
+from app.utils.news_search import (
+    build_search_query_variants,
+    build_soft_search_query,
+    semantic_news_search,
+    strong_core_term_coverage,
+)
+from app.utils.news_image import generate_news_text_image
 from app.utils.tools import normalize_regions_to_countries
+from app.services.crawler_service import crawler_service
 
 logger = setup_logger("AgentToolService")
 REPORT_CREATE_COOLDOWN_SECONDS = 60
+CUSTOM_TOOL_TIMEOUT_SECONDS = 20
+CUSTOM_TOOL_MAX_RESPONSE_CHARS = 60000
+CUSTOM_TOOL_MAX_FIELD_CHARS = 3000
+CUSTOM_TOOL_MAX_OBJECT_KEYS = 80
+CUSTOM_TOOL_MAX_ITEMS = 20
+BLOCKED_CUSTOM_TOOL_HOSTS = {"metadata.google.internal"}
+BLOCKED_CUSTOM_TOOL_IPS = {"0.0.0.0", "169.254.169.254"}
+WEB_CRAWL_MAX_CHARS = 12000
 
 
 BUILTIN_AGENT_TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_top_news",
         "title": "热点新闻查询",
-        "description": "查询指定时间范围内的热点新闻 TopN。",
+        "description": "查询指定时间范围内的热点新闻 TopN，只返回新闻 ID 和标题。",
         "kind": "builtin",
         "enabled": True,
         "safe_to_test": True,
         "parameters": {
             "limit": {"type": "integer", "default": 20, "description": "返回数量，默认 20。"},
-            "date": {"type": "string", "default": "today", "description": "today/24h/3d/7d/week/month/year/all。"},
+            "date": {
+                "type": "string",
+                "default": "today",
+                "description": "today/24h/3d/7d/30d/week/month/year/all；30d 是滚动最近30天，month 是本月。",
+            },
             "sort_by": {"type": "string", "default": "heat", "description": "heat 或 date。"},
             "category": {"type": "string", "default": "", "description": "可选分类。"},
             "region": {"type": "string", "default": "", "description": "可选地区。"},
@@ -54,25 +75,28 @@ BUILTIN_AGENT_TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_news",
         "title": "关键词新闻搜索",
-        "description": "按多个关键词语义召回新闻，支持模糊搜索、时间、分类、地区和来源线索。",
+        "description": "按多个关键词语义召回新闻，只返回新闻 ID 和标题。",
         "kind": "builtin",
         "enabled": True,
         "safe_to_test": True,
         "parameters": {
             "q": {"type": "string", "default": "", "description": "搜索关键词，可包含多个词或自然语言查询。"},
-            "limit": {"type": "integer", "default": 20, "description": "返回数量。"},
-            "date": {"type": "string", "default": "all", "description": "时间范围。"},
+            "limit": {"type": "integer", "default": 100, "description": "返回数量，默认 100；宽泛枚举或查漏可提高到 300。"},
+            "date": {"type": "string", "default": "all", "description": "时间范围；最近一个月请用 30d，本月请用 month。"},
             "sort_by": {"type": "string", "default": "heat", "description": "heat 或 date。"},
         },
     },
     {
         "name": "get_news_detail",
         "title": "新闻详情读取",
-        "description": "读取指定新闻 ID 的详情、摘要、来源、关键词和实体。",
+        "description": "读取一个或多个新闻 ID 的详情、摘要、来源、关键词和实体。",
         "kind": "builtin",
         "enabled": True,
         "safe_to_test": True,
-        "parameters": {"news_id": {"type": "integer", "default": 0, "description": "新闻 ID。"}},
+        "parameters": {
+            "news_id": {"type": "integer", "default": 0, "description": "单个新闻 ID。"},
+            "news_ids": {"type": "array", "default": [], "description": "多个新闻 ID，一次最多 30 个。"},
+        },
     },
     {
         "name": "list_topics",
@@ -143,6 +167,46 @@ BUILTIN_AGENT_TOOLS: list[dict[str, Any]] = [
             "range": {"type": "string", "default": "year", "description": "30d/year/all。"},
         },
     },
+    {
+        "name": "web_search",
+        "title": "网页搜索",
+        "description": "查询公开网页搜索结果，只返回标题、URL 和简短摘要；适合补充站外资料。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "q": {"type": "string", "default": "TrendSonar 新闻", "description": "搜索关键词或自然语言问题。"},
+            "limit": {"type": "integer", "default": 5, "description": "返回数量，最多 10。"},
+        },
+    },
+    {
+        "name": "web_crawl_page",
+        "title": "网页正文抓取",
+        "description": "使用轻量抓取、Crawl4AI 和 Playwright 兜底读取公开网页正文。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "url": {"type": "string", "default": "https://example.com", "description": "公开 http/https 页面地址。"},
+            "max_chars": {"type": "integer", "default": 8000, "description": "返回正文最大字符数，最多 12000。"},
+        },
+    },
+    {
+        "name": "generate_news_image",
+        "title": "新闻图片生成",
+        "description": "将新闻 ID 或文字摘要渲染为 PNG 图片卡片，并返回可访问 URL。",
+        "kind": "builtin",
+        "enabled": True,
+        "safe_to_test": True,
+        "parameters": {
+            "news_id": {"type": "integer", "default": 0, "description": "可选新闻 ID，传入后自动读取标题、摘要、来源和时间。"},
+            "title": {"type": "string", "default": "TrendSonar 新闻图片", "description": "未传 news_id 时使用的图片标题。"},
+            "body": {"type": "string", "default": "这里是一段新闻摘要，可由智能体根据上下文生成。", "description": "未传 news_id 时使用的正文。"},
+            "source": {"type": "string", "default": "TrendSonar", "description": "来源。"},
+            "time_label": {"type": "string", "default": "", "description": "时间标签。"},
+            "theme": {"type": "string", "default": "default", "description": "default/dark/warm。"},
+        },
+    },
 ]
 
 
@@ -167,6 +231,42 @@ def _safe_limit(value: int, *, default: int, minimum: int = 1, maximum: int = 10
     return max(minimum, min(raw, maximum))
 
 
+def _safe_news_ids(news_id: Optional[int] = None, news_ids: Optional[list[int]] = None, *, maximum: int = 30) -> list[int]:
+    """
+    输入:
+    - `news_id`: 单个新闻 ID
+    - `news_ids`: 多个新闻 ID
+    - `maximum`: 最多允许查询数量
+
+    输出:
+    - 清洗去重后的新闻 ID 列表
+
+    作用:
+    - 兼容单条详情读取和批量详情读取，避免模型一次请求过多记录。
+    """
+
+    values: list[int] = []
+    seen: set[int] = set()
+    raw_values: list[Any] = []
+    if news_ids:
+        raw_values.extend(news_ids)
+    if news_id:
+        raw_values.append(news_id)
+
+    for value in raw_values:
+        try:
+            item = int(value)
+        except (TypeError, ValueError):
+            continue
+        if item <= 0 or item in seen:
+            continue
+        seen.add(item)
+        values.append(item)
+        if len(values) >= maximum:
+            break
+    return values
+
+
 def _clean_optional_text(value: Optional[str]) -> Optional[str]:
     """
     输入:
@@ -183,52 +283,189 @@ def _clean_optional_text(value: Optional[str]) -> Optional[str]:
     return text or None
 
 
-def _date_label(date: str, start_date: Optional[str], end_date: Optional[str]) -> str:
+def _serialize_news_brief(news: News) -> dict[str, Any]:
     """
     输入:
-    - `date`: 快捷时间范围
-    - `start_date`/`end_date`: 自定义日期
+    - `news`: 新闻对象
 
     输出:
-    - 可读的时间范围说明
+    - 仅包含新闻 ID 与标题的轻量字典
 
     作用:
-    - 让智能体工具返回明确说明，避免用户误以为“今天”和“24 小时”相同。
+    - 降低智能体候选召回工具的输出体积；摘要与来源等详情统一由详情工具按 ID 读取。
     """
 
-    if start_date or end_date:
-        return f"{start_date or '不限'} 至 {end_date or '不限'}"
-    labels = {
-        "today": "今天",
-        "yesterday": "昨天",
-        "24h": "最近24小时",
-        "3d": "最近3天",
-        "7d": "最近7天",
-        "week": "本周",
-        "month": "本月",
-        "year": "今年",
-        "all": "所有时间",
-    }
-    return labels.get(str(date or "").strip(), str(date or "24h"))
+    return {"id": news.id, "title": news.title or ""}
 
 
-def _summarize_rows(rows: list[News]) -> dict[str, Any]:
+def _render_template_value(value: Any, args: Dict[str, Any]) -> Any:
     """
     输入:
-    - `rows`: 新闻 ORM 列表
+    - `value`: 自定义工具执行器中的模板值
+    - `args`: 工具调用参数
 
     输出:
-    - 工具结果统计说明
+    - 用参数替换后的值
 
     作用:
-    - 为智能体提供摘要覆盖率和结果数量，帮助其解释输出范围。
+    - 支持在 URL、查询参数、请求体和请求头中使用 `{name}` 形式引用工具入参。
     """
 
-    return {
-        "returned": len(rows),
-        "summary_available": sum(1 for row in rows if bool(row.summary)),
-        "summary_missing": sum(1 for row in rows if not row.summary),
+    if isinstance(value, str):
+        try:
+            template_args = defaultdict(str, {key: "" if val is None else val for key, val in args.items()})
+            return value.format_map(template_args)
+        except Exception:
+            return value
+    if isinstance(value, list):
+        return [_render_template_value(item, args) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _render_template_value(item, args) for key, item in value.items()}
+    return value
+
+
+def _drop_empty_values(data: Any) -> Any:
+    """
+    输入:
+    - `data`: 字典、列表或普通值
+
+    输出:
+    - 删除空字符串和空值后的结构
+
+    作用:
+    - 避免把可选参数的空值发送给外部 HTTP 接口。
+    """
+
+    if isinstance(data, dict):
+        return {
+            key: _drop_empty_values(value)
+            for key, value in data.items()
+            if value not in (None, "")
+        }
+    if isinstance(data, list):
+        return [_drop_empty_values(item) for item in data if item not in (None, "")]
+    return data
+
+
+def _ensure_safe_custom_tool_url(url: str) -> str:
+    """
+    输入:
+    - `url`: 自定义 HTTP 工具目标地址
+
+    输出:
+    - 校验后的 URL
+
+    作用:
+    - 限制自定义工具只能访问 http/https，并拦截高风险元数据地址。
+    """
+
+    clean_url = str(url or "").strip()
+    parsed = urlparse(clean_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("自定义工具 URL 必须是合法的 http/https 地址")
+    host = (parsed.hostname or "").lower()
+    if host in BLOCKED_CUSTOM_TOOL_HOSTS or host in BLOCKED_CUSTOM_TOOL_IPS:
+        raise ValueError("自定义工具 URL 指向被禁止的地址")
+    return clean_url
+
+
+def _extract_result_path(data: Any, path: str) -> Any:
+    """
+    输入:
+    - `data`: HTTP 响应 JSON
+    - `path`: 点号分隔路径，例如 `results`
+
+    输出:
+    - 路径对应的数据，路径不存在时返回原数据
+
+    作用:
+    - 让自定义工具可以从外部接口响应中截取主要结果数组。
+    """
+
+    current = data
+    for part in [item for item in str(path or "").split(".") if item]:
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return data
+        else:
+            return data
+        if current is None:
+            return data
+    return current
+
+
+def _compact_custom_tool_result(data: Any, *, result_path: str = "", item_fields: Optional[list[str]] = None, limit: int = 10) -> Any:
+    """
+    输入:
+    - `data`: 外部 HTTP 接口响应
+    - `result_path`: 可选结果路径
+    - `item_fields`: 可选字段白名单
+    - `limit`: 数组返回上限
+
+    输出:
+    - 控制体积后的工具结果
+
+    作用:
+    - 减少自定义工具返回给智能体的 token 体积。
+    """
+
+    def truncate_value(value: Any) -> Any:
+        if isinstance(value, str):
+            return value[:CUSTOM_TOOL_MAX_FIELD_CHARS] if len(value) > CUSTOM_TOOL_MAX_FIELD_CHARS else value
+        if isinstance(value, list):
+            return [truncate_value(item) for item in value[:safe_limit]]
+        if isinstance(value, dict):
+            return {
+                str(key): truncate_value(item)
+                for key, item in list(value.items())[:CUSTOM_TOOL_MAX_OBJECT_KEYS]
+            }
+        return value
+
+    selected = _extract_result_path(data, result_path) if result_path else data
+    safe_limit = _safe_limit(limit, default=10, maximum=CUSTOM_TOOL_MAX_ITEMS)
+    fields = [str(field) for field in (item_fields or []) if str(field).strip()]
+    if isinstance(selected, list):
+        rows = selected[:safe_limit]
+        if fields:
+            return [
+                {field: truncate_value(item.get(field)) for field in fields if isinstance(item, dict) and field in item}
+                if isinstance(item, dict)
+                else truncate_value(item)
+                for item in rows
+            ]
+        return truncate_value(rows)
+    if isinstance(selected, dict) and fields:
+        return {field: truncate_value(selected.get(field)) for field in fields if field in selected}
+    return truncate_value(selected)
+
+
+def _build_custom_tool_args(tool: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    输入:
+    - `tool`: 自定义工具配置
+    - `args`: 调用方显式传入的参数
+
+    输出:
+    - 已合并参数默认值的调用参数
+
+    作用:
+    - 让管理端配置的参数默认值在智能体调用时同样生效，避免 URL 模板缺少 `base_url` 等必填默认参数。
+    """
+
+    parameters = tool.get("parameters") if isinstance(tool.get("parameters"), dict) else {}
+    defaults = {
+        key: meta.get("default")
+        for key, meta in parameters.items()
+        if isinstance(meta, dict) and "default" in meta
     }
+    merged = dict(defaults)
+    if isinstance(args, dict):
+        merged.update(args)
+    return merged
 
 
 def _serialize_topic(topic: Topic, effective_updated_time: Optional[datetime] = None) -> Dict[str, Any]:
@@ -319,7 +556,7 @@ class AgentToolService:
         - 内置工具与自定义工具元数据
 
         作用:
-        - 为管理端提供工具查看、提示词编辑入口和新增工具草案列表。
+        - 为管理端提供工具查看、提示词编辑入口和自定义工具列表。
         """
 
         custom_tools = load_custom_agent_tools()
@@ -347,13 +584,10 @@ class AgentToolService:
         if not meta:
             custom_tool = next((item for item in load_custom_agent_tools() if item.get("name") == tool_name), None)
             if custom_tool:
-                return {
-                    "ok": True,
-                    "dry_run": True,
-                    "message": "自定义工具当前作为草案保存，尚未绑定后端执行器。",
-                    "tool": custom_tool,
-                    "args": args or {},
-                }
+                started = datetime.now()
+                result = await self.run_custom_tool(tool_name=tool_name, args=args or {})
+                elapsed_ms = round((datetime.now() - started).total_seconds() * 1000, 1)
+                return {"ok": bool(result.get("ok")), "tool": tool_name, "elapsed_ms": elapsed_ms, "result": result}
             return {"ok": False, "message": "工具不存在"}
 
         if not meta.get("safe_to_test"):
@@ -395,7 +629,7 @@ class AgentToolService:
         if name == "search_news":
             return await self.search_news(
                 q=str(args.get("q") or "").strip(),
-                limit=_safe_limit(args.get("limit", 20), default=20, maximum=30),
+                limit=_safe_limit(args.get("limit", 100), default=100, maximum=300),
                 date=str(args.get("date") or "all"),
                 start_date=_clean_optional_text(args.get("start_date")),
                 end_date=_clean_optional_text(args.get("end_date")),
@@ -405,7 +639,10 @@ class AgentToolService:
                 source=_clean_optional_text(args.get("source")),
             )
         if name == "get_news_detail":
-            return await self.get_news_detail(news_id=int(args.get("news_id") or 0))
+            return await self.get_news_detail(
+                news_id=int(args.get("news_id") or 0),
+                news_ids=args.get("news_ids") if isinstance(args.get("news_ids"), list) else None,
+            )
         if name == "list_topics":
             return await self.list_topics(
                 q=str(args.get("q") or ""),
@@ -440,6 +677,25 @@ class AgentToolService:
                 source=_clean_optional_text(args.get("source")),
                 range=str(args.get("range") or "year"),
             )
+        if name == "web_search":
+            return await self.web_search(
+                q=str(args.get("q") or "").strip(),
+                limit=_safe_limit(args.get("limit", 5), default=5, maximum=10),
+            )
+        if name == "web_crawl_page":
+            return await self.web_crawl_page(
+                url=str(args.get("url") or "").strip(),
+                max_chars=_safe_limit(args.get("max_chars", 8000), default=8000, maximum=WEB_CRAWL_MAX_CHARS),
+            )
+        if name == "generate_news_image":
+            return await self.generate_news_image(
+                news_id=int(args.get("news_id") or 0),
+                title=str(args.get("title") or ""),
+                body=str(args.get("body") or ""),
+                source=str(args.get("source") or ""),
+                time_label=str(args.get("time_label") or ""),
+                theme=str(args.get("theme") or "default"),
+            )
         return {"message": "工具未实现测试路由"}
 
     def save_custom_tool(self, tool: Dict[str, Any]) -> Dict[str, Any]:
@@ -467,13 +723,210 @@ class AgentToolService:
         - 是否删除成功
 
         作用:
-        - 为管理端删除自定义工具草案。
+        - 为管理端删除自定义工具配置。
         """
 
         ok = delete_custom_agent_tool(name)
         if ok:
             logger.info(f"删除自定义智能体工具: name={name}")
         return ok
+
+    async def run_custom_tool(self, *, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        输入:
+        - `tool_name`: 自定义工具名称
+        - `args`: 智能体或管理端传入的工具参数
+
+        输出:
+        - 外部 HTTP 工具执行结果
+
+        作用:
+        - 执行管理端配置的 HTTP 自定义工具，使用户新增工具可被测试并被智能体调用。
+        """
+
+        clean_name = str(tool_name or "").strip()
+        tool = next((item for item in load_custom_agent_tools() if item.get("name") == clean_name), None)
+        if not tool:
+            return {"ok": False, "message": "自定义工具不存在"}
+        if tool.get("enabled") is False:
+            return {"ok": False, "message": "自定义工具已停用"}
+
+        executor = tool.get("executor") if isinstance(tool.get("executor"), dict) else {}
+        if not executor:
+            return {"ok": False, "message": "自定义工具缺少 executor 执行器配置"}
+        executor_type = str(executor.get("type") or "http").strip().lower()
+        if executor_type != "http":
+            return {"ok": False, "message": f"暂不支持的自定义工具执行器类型: {executor_type}"}
+
+        method = str(executor.get("method") or "GET").strip().upper()
+        if method not in {"GET", "POST"}:
+            return {"ok": False, "message": "自定义 HTTP 工具只支持 GET/POST"}
+
+        raw_args = _build_custom_tool_args(tool, args if isinstance(args, dict) else {})
+        rendered_url = _render_template_value(executor.get("url") or "", raw_args)
+        try:
+            url = _ensure_safe_custom_tool_url(str(rendered_url))
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc)}
+
+        query_params = _drop_empty_values(_render_template_value(executor.get("query") or {}, raw_args))
+        headers = _drop_empty_values(_render_template_value(executor.get("headers") or {}, raw_args))
+        body = _drop_empty_values(_render_template_value(executor.get("body") or {}, raw_args))
+        result_path = str(executor.get("result_path") or "")
+        item_fields = executor.get("item_fields") if isinstance(executor.get("item_fields"), list) else []
+        limit_value = raw_args.get("limit") or executor.get("limit") or 10
+        timeout_seconds = _safe_limit(executor.get("timeout", CUSTOM_TOOL_TIMEOUT_SECONDS), default=CUSTOM_TOOL_TIMEOUT_SECONDS, maximum=60)
+
+        started = time.perf_counter()
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                if method == "POST":
+                    response_ctx = session.post(url, params=query_params, json=body or None, headers=headers or None)
+                else:
+                    response_ctx = session.get(url, params=query_params, headers=headers or None)
+                async with response_ctx as resp:
+                    text = await resp.text()
+                    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                    if len(text) > CUSTOM_TOOL_MAX_RESPONSE_CHARS:
+                        text = text[:CUSTOM_TOOL_MAX_RESPONSE_CHARS]
+                    try:
+                        payload: Any = await resp.json(content_type=None)
+                    except Exception:
+                        payload = text
+                    compact = _compact_custom_tool_result(
+                        payload,
+                        result_path=result_path,
+                        item_fields=item_fields,
+                        limit=_safe_limit(limit_value, default=10, maximum=CUSTOM_TOOL_MAX_ITEMS),
+                    )
+                    if isinstance(compact, str) and len(compact) > CUSTOM_TOOL_MAX_RESPONSE_CHARS:
+                        compact = compact[:CUSTOM_TOOL_MAX_RESPONSE_CHARS]
+                    return {
+                        "ok": 200 <= resp.status < 300,
+                        "tool": clean_name,
+                        "status": resp.status,
+                        "elapsed_ms": elapsed_ms,
+                        "items": compact if isinstance(compact, list) else None,
+                        "data": None if isinstance(compact, list) else compact,
+                    }
+        except Exception as exc:
+            logger.warning(f"自定义工具执行失败: tool={clean_name}, url={url}, error={exc}")
+            return {"ok": False, "tool": clean_name, "message": str(exc)}
+
+    async def web_search(self, *, q: str, limit: int = 5) -> Dict[str, Any]:
+        """
+        输入:
+        - `q`: 搜索关键词或问题
+        - `limit`: 返回数量
+
+        输出:
+        - 网页搜索结果列表
+
+        作用:
+        - 为智能体提供轻量外部网页查询能力，适合查找公开页面入口。
+        """
+
+        safe_limit = _safe_limit(limit, default=5, maximum=10)
+        result = await simple_web_search(q, limit=safe_limit)
+        logger.info(f"智能体工具 web_search 完成: q={q}, returned={len(result.get('items') or [])}")
+        return result
+
+    async def web_crawl_page(self, *, url: str, max_chars: int = 8000) -> Dict[str, Any]:
+        """
+        输入:
+        - `url`: 公开网页地址
+        - `max_chars`: 返回正文最大字符数
+
+        输出:
+        - 抓取到的网页正文片段
+
+        作用:
+        - 复用项目 Crawl4AI/Playwright 正文抓取链路，供智能体读取公开网页内容。
+        """
+
+        safe_chars = _safe_limit(max_chars, default=8000, maximum=WEB_CRAWL_MAX_CHARS)
+        try:
+            clean_url = await ensure_public_web_url(url)
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc)}
+
+        started = time.perf_counter()
+        content = await crawler_service.crawl_content(clean_url)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        text = compact_web_text(content or "", safe_chars)
+        return {
+            "ok": bool(text),
+            "url": clean_url,
+            "elapsed_ms": elapsed_ms,
+            "content": text,
+            "truncated": bool(content and len(" ".join(str(content).split())) > len(text)),
+            "message": "" if text else "未抓取到可用正文",
+        }
+
+    async def generate_news_image(
+        self,
+        *,
+        news_id: int = 0,
+        title: str = "",
+        body: str = "",
+        source: str = "",
+        time_label: str = "",
+        theme: str = "default",
+    ) -> Dict[str, Any]:
+        """
+        输入:
+        - `news_id`: 可选新闻 ID
+        - `title`/`body`/`source`/`time_label`: 图片文字内容
+        - `theme`: 图片主题
+
+        输出:
+        - 生成的图片 URL 与文件信息
+
+        作用:
+        - 将新闻文字或指定新闻记录渲染成 PNG 图片，方便用户分享或下载。
+        """
+
+        clean_title = str(title or "").strip()
+        clean_body = str(body or "").strip()
+        clean_source = str(source or "").strip()
+        clean_time = str(time_label or "").strip()
+        source_news_id = int(news_id or 0)
+
+        if source_news_id > 0:
+            async with AsyncSessionLocal() as db:
+                row = (
+                    await db.execute(
+                        select(News)
+                        .options(defer(News.embedding))
+                        .where(News.id == source_news_id)
+                    )
+                ).scalar_one_or_none()
+            if not row:
+                return {"ok": False, "message": "新闻不存在"}
+            clean_title = clean_title or row.title or f"新闻 {source_news_id}"
+            clean_body = clean_body or row.summary or row.content or ""
+            clean_source = clean_source or row.source or "TrendSonar"
+            if not clean_time and row.publish_date:
+                clean_time = row.publish_date.strftime("%Y-%m-%d %H:%M")
+
+        if not clean_title and not clean_body:
+            return {"ok": False, "message": "title/body 不能为空"}
+
+        try:
+            result = generate_news_text_image(
+                title=clean_title,
+                body=clean_body,
+                source=clean_source,
+                time_label=clean_time,
+                theme=theme,
+            )
+            result["news_id"] = source_news_id or None
+            logger.info(f"智能体工具 generate_news_image 完成: news_id={source_news_id}, url={result.get('url')}")
+            return result
+        except Exception as exc:
+            logger.warning(f"新闻图片生成失败: news_id={source_news_id}, error={exc}")
+            return {"ok": False, "message": str(exc)}
 
     async def get_top_news(
         self,
@@ -486,7 +939,7 @@ class AgentToolService:
         category: Optional[str] = None,
         region: Optional[str] = None,
         source: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
         输入:
         - 热榜查询参数，包括数量、时间、分类、地区和来源
@@ -552,21 +1005,13 @@ class AgentToolService:
                 f"智能体工具 get_top_news 完成: date={date}, start={start_date}, end={end_date}, "
                 f"limit={safe_limit}, returned={len(rows)}, sort_by={sort_by}, relaxed={bool(relaxed_search)}"
             )
-            return {
-                "total": len(rows),
-                "limit": safe_limit,
-                "date": date,
-                "time_range_label": _date_label(date or "24h", start_date, end_date),
-                "relaxed_search": relaxed_search,
-                "stats": _summarize_rows(rows),
-                "items": [serialize_news_item(row) for row in rows],
-            }
+            return [_serialize_news_brief(row) for row in rows]
 
     async def search_news(
         self,
         *,
         q: str,
-        limit: int = 20,
+        limit: int = 100,
         date: str = "all",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
@@ -574,23 +1019,23 @@ class AgentToolService:
         category: Optional[str] = None,
         region: Optional[str] = None,
         source: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """
         输入:
         - `q`: 搜索关键词
         - 其他筛选参数：时间、分类、地区、来源和排序
 
         输出:
-        - 新闻搜索结果
+        - 仅包含 ID 和标题的新闻搜索结果
 
         作用:
-        - 基于标题、摘要、来源、分类、地区、关键词、实体和向量相似度做多关键词语义召回，供智能体查找特定事件。
+        - 基于标题、摘要、来源、分类、地区、关键词、实体和向量相似度做多关键词语义召回，供智能体先定位候选新闻。
         """
 
         query = (q or "").strip()
-        safe_limit = _safe_limit(limit, default=20, maximum=80)
+        safe_limit = _safe_limit(limit, default=100, maximum=300)
         if not query:
-            return {"total": 0, "items": [], "message": "q 不能为空"}
+            return []
 
         async with AsyncSessionLocal() as db:
             stmt = build_news_query_filters(
@@ -602,60 +1047,79 @@ class AgentToolService:
                 region=None,
                 source=_clean_optional_text(source),
             )
-            query_text, terms = build_soft_search_query(
+            query_variants = build_search_query_variants(
                 query,
                 category=_clean_optional_text(category),
                 region=_clean_optional_text(region),
+                max_variants=5,
             )
-            search_result = await semantic_news_search(
-                db,
-                stmt,
-                query_text or query,
-                offset=0,
-                limit=safe_limit,
-                candidate_limit=2000,
-                min_score=0.16,
-                text_terms=terms,
-                log_prefix="智能体工具 search_news",
-            )
-            rows = [row for _, row in search_result.items]
+            if not query_variants:
+                query_variants = [build_soft_search_query(query, category=category, region=region)]
+
+            merged: dict[int, tuple[float, News, list[str]]] = {}
+            total_elapsed_ms = 0.0
+            used_embedding = False
+
+            for index, (query_text, terms) in enumerate(query_variants):
+                effective_query = query_text or query
+                search_result = await semantic_news_search(
+                    db,
+                    stmt,
+                    effective_query,
+                    offset=0,
+                    limit=max(safe_limit * 12, 300),
+                    candidate_limit=3000,
+                    min_score=0.16 if index == 0 else 0.14,
+                    text_terms=terms,
+                    log_prefix=f"智能体工具 search_news#{index + 1}",
+                    use_embedding=False,
+                )
+                total_elapsed_ms += search_result.elapsed_ms
+                used_embedding = used_embedding or search_result.used_embedding
+                variant_bonus = max(0.0, 0.08 - index * 0.015)
+                for score, row in search_result.items:
+                    existing = merged.get(int(row.id))
+                    merged_score = float(score) + variant_bonus
+                    if existing is None or merged_score > existing[0]:
+                        merged[int(row.id)] = (merged_score, row, search_result.terms[:24])
+
+            merged_items = sorted(merged.values(), key=lambda item: item[0], reverse=True)
+            strong_items = [
+                (score, row, terms)
+                for score, row, terms in merged_items
+                if strong_core_term_coverage(row, terms)[1] > 0
+            ]
+            effective_items = strong_items if strong_items else merged_items
+            selected = effective_items[:safe_limit]
+            rows = [row for _, row, _terms in selected]
             if sort_by == "date":
                 rows = sorted(rows, key=lambda item: item.publish_date or datetime.min, reverse=True)
+            weak_only = bool(merged_items) and not strong_items
             logger.info(
                 f"智能体工具 search_news 完成: q={query}, date={date}, limit={safe_limit}, "
-                f"returned={len(rows)}, matched={search_result.total}, embedding={search_result.used_embedding}, sort_by={sort_by}"
+                f"returned={len(rows)}, matched={len(merged)}, attempts={len(query_variants)}, "
+                f"embedding={used_embedding}, sort_by={sort_by}, weak_only={weak_only}"
             )
-            return {
-                "q": query,
-                "query_used": search_result.query,
-                "search_terms": search_result.terms[:24],
-                "total": search_result.total,
-                "limit": safe_limit,
-                "time_range_label": _date_label(date or "all", start_date, end_date),
-                "search_mode": "semantic_multi_keyword",
-                "used_embedding": search_result.used_embedding,
-                "elapsed_ms": round(search_result.elapsed_ms, 1),
-                "stats": _summarize_rows(rows),
-                "items": [serialize_news_item(row) for row in rows],
-            }
+            return [_serialize_news_brief(row) for row in rows]
 
-    async def get_news_detail(self, *, news_id: int) -> Dict[str, Any]:
+    async def get_news_detail(self, *, news_id: int = 0, news_ids: Optional[list[int]] = None) -> Dict[str, Any]:
         """
         输入:
-        - `news_id`: 新闻 ID
+        - `news_id`: 单个新闻 ID
+        - `news_ids`: 可选的多个新闻 ID
 
         输出:
-        - 新闻详情、关联来源和基础状态
+        - 单条或多条新闻详情、关联来源和基础状态
 
         作用:
-        - 读取单条新闻的可复核信息，供智能体基于具体事件继续分析。
+        - 读取新闻的可复核信息，供智能体在轻量搜索后按 ID 批量获取摘要和详情。
         """
 
-        async with AsyncSessionLocal() as db:
-            news = await db.get(News, int(news_id), options=[defer(News.content), defer(News.embedding)])
-            if not news:
-                return {"found": False, "message": "新闻不存在"}
+        ids = _safe_news_ids(news_id, news_ids)
+        if not ids:
+            return {"found": False, "items": [], "message": "news_id/news_ids 不能为空"}
 
+        def build_detail(news: News) -> dict[str, Any]:
             related_sources = []
             if isinstance(news.sources, list):
                 for source in news.sources:
@@ -676,7 +1140,6 @@ class AgentToolService:
                 )
 
             return {
-                "found": True,
                 "news": {
                     **serialize_news_item(news),
                     "is_ai_summary": bool(news.is_ai_summary),
@@ -688,6 +1151,31 @@ class AgentToolService:
                     "has_summary": bool(news.summary),
                     "related_source_count": len(related_sources),
                 },
+            }
+
+        async with AsyncSessionLocal() as db:
+            rows = (
+                await db.execute(
+                    select(News)
+                    .options(defer(News.content), defer(News.embedding))
+                    .where(News.id.in_(ids))
+                )
+            ).scalars().all()
+            row_by_id = {int(row.id): row for row in rows}
+            items = [build_detail(row_by_id[item_id]) for item_id in ids if item_id in row_by_id]
+            missing_ids = [item_id for item_id in ids if item_id not in row_by_id]
+
+            if len(ids) == 1:
+                if not items:
+                    return {"found": False, "message": "新闻不存在", "missing_ids": missing_ids}
+                return {"found": True, **items[0], "missing_ids": missing_ids}
+
+            return {
+                "found": bool(items),
+                "total": len(items),
+                "requested": len(ids),
+                "missing_ids": missing_ids,
+                "items": items,
             }
 
     async def list_topics(

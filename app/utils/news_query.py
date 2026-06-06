@@ -30,7 +30,7 @@ def build_news_query_filters(
     """
     输入:
     - `stmt`: SQLAlchemy 查询对象
-    - `date`: 快捷时间范围，支持 24h/3d/7d/week/month/year/all 或 YYYY-MM-DD
+    - `date`: 快捷时间范围，支持 24h/3d/7d/30d/week/month/year/all 或 YYYY-MM-DD
     - `start_date`/`end_date`: 自定义起止日期，格式为 YYYY-MM-DD
     - `category`/`region`/`source`: 新闻分类、地区和来源筛选条件
 
@@ -73,6 +73,9 @@ def build_news_query_filters(
                 stmt = stmt.where(News.publish_date >= start)
             elif date == "7d":
                 start = now - timedelta(days=7)
+                stmt = stmt.where(News.publish_date >= start)
+            elif date == "30d":
+                start = now - timedelta(days=30)
                 stmt = stmt.where(News.publish_date >= start)
             elif date == "week":
                 start = now - timedelta(days=now.weekday())

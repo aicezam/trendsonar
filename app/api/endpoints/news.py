@@ -178,7 +178,7 @@ async def get_news(
     q: str = "",
     page: int = 1,
     page_size: Optional[int] = None,
-    date: str = "24h",
+    date: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     sort_by: str = "heat",
@@ -191,7 +191,7 @@ async def get_news(
     输入:
     - `q`: 搜索关键词（支持标题包含与向量相似度加权）
     - `page`: 页码
-    - `date`: 快捷时间范围（24h/3d/7d/week/month/year/all 或 YYYY-MM-DD）
+    - `date`: 快捷时间范围（24h/3d/7d/week/month/year/all 或 YYYY-MM-DD）；关键词搜索未传时默认 all
     - `start_date`/`end_date`: 自定义起止日期（YYYY-MM-DD）
     - `sort_by`: 排序方式（heat/date）
     - `category`/`region`/`source`: 筛选条件
@@ -205,15 +205,16 @@ async def get_news(
     """
 
     has_query = bool((q or "").strip())
+    effective_date = date or ("all" if has_query else "24h")
     page_size = page_size or (10 if has_query else 20)
     page_size = max(1, min(page_size, 50))
-    max_page = 500 if date == "all" else 1000
+    max_page = 500 if effective_date == "all" else 1000
     page = max(1, min(page, max_page))
     offset = (page - 1) * page_size
 
     stmt = build_news_query_filters(
         select(News),
-        date=date,
+        date=effective_date,
         start_date=start_date,
         end_date=end_date,
         category=category,

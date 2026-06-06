@@ -13,10 +13,11 @@ CUSTOM_AGENT_TOOLS_FILE = BASE_DIR / "data" / "agent_tools.json"
 _TOOL_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{1,63}$")
 
 
-def _normalize_custom_tool(raw: dict[str, Any]) -> dict[str, Any]:
+def _normalize_custom_tool(raw: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
     """
     输入:
     - `raw`: 管理端提交或文件中读取的工具配置
+    - `strict`: 是否按保存场景校验执行器完整性
 
     输出:
     - 字段完整、名称合法的自定义工具配置
@@ -30,13 +31,32 @@ def _normalize_custom_tool(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("工具名称只能包含字母、数字和下划线，并且必须以字母开头")
 
     parameters = raw.get("parameters") if isinstance(raw.get("parameters"), dict) else {}
+    executor = raw.get("executor") if isinstance(raw.get("executor"), dict) else {}
+    enabled = bool(raw.get("enabled", True))
+    if strict and enabled and not executor:
+        raise ValueError("启用自定义工具必须配置 executor 执行器")
+    if strict and executor:
+        executor_type = str(executor.get("type") or "http").strip().lower()
+        if executor_type != "http":
+            raise ValueError("当前自定义工具只支持 HTTP 执行器")
+        method = str(executor.get("method") or "GET").strip().upper()
+        if method not in {"GET", "POST"}:
+            raise ValueError("自定义 HTTP 工具只支持 GET/POST")
+        if not str(executor.get("url") or "").strip():
+            raise ValueError("自定义 HTTP 工具必须配置 url")
+        if "query" in executor and not isinstance(executor.get("query"), dict):
+            raise ValueError("自定义 HTTP 工具的 query 必须是 JSON 对象")
+        if "headers" in executor and not isinstance(executor.get("headers"), dict):
+            raise ValueError("自定义 HTTP 工具的 headers 必须是 JSON 对象")
+        executor = {**executor, "type": executor_type, "method": method}
     return {
         "name": name,
         "title": str(raw.get("title") or name).strip(),
         "description": str(raw.get("description") or "").strip(),
         "parameters": parameters,
+        "executor": executor,
         "prompt_hint": str(raw.get("prompt_hint") or "").strip(),
-        "enabled": bool(raw.get("enabled", True)),
+        "enabled": enabled,
         "kind": "custom",
     }
 
@@ -82,10 +102,10 @@ def save_custom_agent_tool(tool: dict[str, Any]) -> dict[str, Any]:
     - 保存后的标准化工具配置
 
     作用:
-    - 按工具名称进行 upsert 保存，供管理端维护新增工具草案。
+    - 按工具名称进行 upsert 保存，供管理端维护可执行自定义工具。
     """
 
-    normalized = _normalize_custom_tool(tool)
+    normalized = _normalize_custom_tool(tool, strict=True)
     tools = load_custom_agent_tools()
     replaced = False
     for index, item in enumerate(tools):
@@ -110,7 +130,7 @@ def delete_custom_agent_tool(name: str) -> bool:
     - 是否删除成功
 
     作用:
-    - 删除管理端维护的自定义工具草案。
+    - 删除管理端维护的自定义工具配置。
     """
 
     clean_name = str(name or "").strip()

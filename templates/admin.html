@@ -72,7 +72,7 @@
             </div>
             <div id="panelTools" class="admin-panel">
                 <div class="admin-log-toolbar">
-                    <div class="admin-hint admin-hint-fluid">查看智能体可调用工具，测试只读工具，维护自定义工具草案。</div>
+                    <div class="admin-hint admin-hint-fluid">查看智能体可调用工具，测试只读工具，维护可执行自定义 HTTP 工具。</div>
                     <button id="editAgentPromptBtn" class="admin-btn">编辑智能体提示词</button>
                     <button id="addAgentToolBtn" class="admin-btn">新增工具</button>
                     <button id="refreshAgentToolsBtn" class="admin-btn">刷新</button>
@@ -169,6 +169,16 @@
                 <button class="modal-close" onclick="closeAgentToolModal()">×</button>
             </div>
             <div class="modal-body">
+                <div id="agentToolExamplePanel" class="tool-example-panel">
+                    <div class="tool-example-head">
+                        <div>
+                            <strong>SearXNG 查询接口示例</strong>
+                            <div class="form-hint">示例会填入完整自定义工具字段；接口地址请改成你的 SearXNG 服务地址。</div>
+                        </div>
+                        <button type="button" class="admin-btn small" onclick="fillAgentToolExample('searxng')">填入示例</button>
+                    </div>
+                    <pre id="agentToolExampleCode" class="tool-example-code"></pre>
+                </div>
                 <div class="form-group">
                     <label>工具名称</label>
                     <input type="text" id="agentToolName" class="admin-input admin-input-full" placeholder="例如 custom_search">
@@ -187,12 +197,17 @@
                     <textarea id="agentToolParameters" class="admin-textarea" rows="7">{}</textarea>
                 </div>
                 <div class="form-group">
+                    <label>执行器 JSON</label>
+                    <textarea id="agentToolExecutor" class="admin-textarea" rows="8">{}</textarea>
+                    <div class="form-hint">用于真正执行工具。当前支持 HTTP GET/POST，可使用 {参数名} 引用参数。</div>
+                </div>
+                <div class="form-group">
                     <label>提示词说明</label>
                     <textarea id="agentToolPromptHint" class="admin-textarea" rows="4"></textarea>
                 </div>
                 <label class="source-switch-pill source-switch-inline on">
                     <input type="checkbox" id="agentToolEnabled" checked>
-                    <span>启用工具草案</span>
+                    <span>启用自定义工具</span>
                 </label>
             </div>
             <div class="modal-footer">
@@ -217,6 +232,80 @@
     let sourceContentTestResults = {};
     let agentToolsData = { builtin_tools: [], custom_tools: [] };
     let agentToolTestArgs = {};
+    const AGENT_TOOL_EXAMPLES = {
+        searxng: {
+            name: "searxng_search",
+            title: "SearXNG 网页搜索",
+            description: "调用 SearXNG /search 接口检索公开网页结果，适合补充外部资料。需要将 base_url 改成你的 SearXNG 服务地址。",
+            parameters: {
+                q: {
+                    type: "string",
+                    default: "TrendSonar 新闻",
+                    description: "搜索关键词或自然语言问题"
+                },
+                base_url: {
+                    type: "string",
+                    default: "http://127.0.0.1:8080",
+                    description: "SearXNG 服务根地址，不要以斜杠结尾"
+                },
+                language: {
+                    type: "string",
+                    default: "zh-CN",
+                    description: "搜索语言，例如 zh-CN、en"
+                },
+                categories: {
+                    type: "string",
+                    default: "general",
+                    description: "搜索分类，例如 general、news、science"
+                },
+                time_range: {
+                    type: "string",
+                    default: "",
+                    description: "可选时间范围：day、week、month、year；留空不限制"
+                },
+                limit: {
+                    type: "integer",
+                    default: 5,
+                    description: "返回结果数量上限"
+                }
+            },
+            executor: {
+                type: "http",
+                method: "GET",
+                url: "{base_url}/search",
+                query: {
+                    q: "{q}",
+                    format: "json",
+                    language: "{language}",
+                    categories: "{categories}",
+                    time_range: "{time_range}"
+                },
+                result_path: "results",
+                item_fields: ["title", "url", "content", "engine", "publishedDate"],
+                limit: 5,
+                timeout: 20
+            },
+            prompt_hint: [
+                "执行方式：",
+                "- 使用 HTTP GET 请求 {base_url}/search。",
+                "- 查询参数至少包含 q={q}、format=json、language={language}、categories={categories}。",
+                "- 如果 time_range 不为空，附加 time_range={time_range}。",
+                "- 从 JSON 响应的 results 数组取前 limit 条。",
+                "",
+                "返回字段：",
+                "- title：结果标题",
+                "- url：结果链接",
+                "- content：摘要文本",
+                "- engine：来源搜索引擎",
+                "- publishedDate：发布时间（如果有）",
+                "",
+                "使用规则：",
+                "- 只依据返回结果回答，不要把搜索结果当成已核实新闻。",
+                "- 引用外部网页时保留 url。",
+                "- 如果 SearXNG 不可用或结果为空，说明没有查到。"
+            ].join("\n")
+        }
+    };
     let logsTimer = null;
     let activeTab = "config";
 
@@ -1563,12 +1652,17 @@
         const paramText = Object.keys(params).length ? Object.keys(params).join("、") : "无参数";
         const kind = tool.kind === "custom" ? "自定义" : "内置";
         const safeToTest = tool.safe_to_test !== false;
+        const executor = tool.executor && typeof tool.executor === "object" ? tool.executor : {};
+        const executorText = tool.kind === "custom"
+            ? `执行器：${executor.type ? escapeHtml(String(executor.type).toUpperCase()) : "未配置"}`
+            : "";
         return `
             <div class="prompt-card tool-card">
                 <h4>${escapeHtml(tool.title || name)} <span class="prompt-key">(${safeName})</span></h4>
                 <div class="prompt-group-name">${kind}工具 · ${tool.enabled === false ? "停用" : "启用"}</div>
                 <p>${escapeHtml(tool.description || "暂无描述")}</p>
                 <div class="tool-param-line">参数：${escapeHtml(paramText)}</div>
+                ${executorText ? `<div class="tool-param-line">${executorText}</div>` : ""}
                 <div class="prompt-actions">
                     <button class="admin-btn small" onclick="openAgentToolTest('${safeName}')">${safeToTest ? "测试" : "查看"}</button>
                     ${tool.kind === "custom" ? `<button class="admin-btn small" onclick="openAgentToolModal('${safeName}')">编辑</button><button class="admin-btn danger small" onclick="deleteAgentTool('${safeName}')">删除</button>` : ""}
@@ -1591,6 +1685,12 @@
         if (tool?.name === "get_news_detail" && !args.news_id) args.news_id = 1;
         if (tool?.name === "get_topic_detail" && !args.topic_id) args.topic_id = 1;
         if (tool?.name === "get_term_analysis" && !args.term) args.term = "中国";
+        if (tool?.name === "web_search" && !args.q) args.q = "TrendSonar 新闻";
+        if (tool?.name === "web_crawl_page" && !args.url) args.url = "https://example.com";
+        if (tool?.name === "generate_news_image") {
+            if (!args.title) args.title = "TrendSonar 新闻图片";
+            if (!args.body) args.body = "这里是一段用于测试图片生成工具的新闻摘要。";
+        }
         return args;
     }
 
@@ -1645,9 +1745,34 @@
         document.getElementById("agentToolTitle").value = tool?.title || "";
         document.getElementById("agentToolDescription").value = tool?.description || "";
         document.getElementById("agentToolParameters").value = JSON.stringify(tool?.parameters || {}, null, 2);
+        document.getElementById("agentToolExecutor").value = JSON.stringify(tool?.executor || {}, null, 2);
         document.getElementById("agentToolPromptHint").value = tool?.prompt_hint || "";
         document.getElementById("agentToolEnabled").checked = tool?.enabled !== false;
+        updateAgentToolExamplePanel(!tool);
         document.getElementById("agentToolModal").classList.remove("is-hidden");
+    }
+
+    function updateAgentToolExamplePanel(visible) {
+        const panel = document.getElementById("agentToolExamplePanel");
+        const code = document.getElementById("agentToolExampleCode");
+        if (!panel || !code) return;
+        panel.classList.toggle("is-hidden", !visible);
+        code.textContent = JSON.stringify({
+            ...AGENT_TOOL_EXAMPLES.searxng,
+            enabled: true
+        }, null, 2);
+    }
+
+    function fillAgentToolExample(key) {
+        const example = AGENT_TOOL_EXAMPLES[key];
+        if (!example) return;
+        document.getElementById("agentToolName").value = example.name;
+        document.getElementById("agentToolTitle").value = example.title;
+        document.getElementById("agentToolDescription").value = example.description;
+        document.getElementById("agentToolParameters").value = JSON.stringify(example.parameters, null, 2);
+        document.getElementById("agentToolExecutor").value = JSON.stringify(example.executor, null, 2);
+        document.getElementById("agentToolPromptHint").value = example.prompt_hint;
+        document.getElementById("agentToolEnabled").checked = true;
     }
 
     function closeAgentToolModal() {
@@ -1658,10 +1783,17 @@
     async function saveAgentTool() {
         const statusEl = document.getElementById("adminStatus");
         let parameters = {};
+        let executor = {};
         try {
             parameters = JSON.parse(document.getElementById("agentToolParameters")?.value || "{}");
         } catch (e) {
             alert("参数 JSON 不合法: " + e.message);
+            return;
+        }
+        try {
+            executor = JSON.parse(document.getElementById("agentToolExecutor")?.value || "{}");
+        } catch (e) {
+            alert("执行器 JSON 不合法: " + e.message);
             return;
         }
         const payload = {
@@ -1669,6 +1801,7 @@
             title: document.getElementById("agentToolTitle")?.value || "",
             description: document.getElementById("agentToolDescription")?.value || "",
             parameters,
+            executor,
             prompt_hint: document.getElementById("agentToolPromptHint")?.value || "",
             enabled: !!document.getElementById("agentToolEnabled")?.checked,
         };

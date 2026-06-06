@@ -186,7 +186,7 @@
             list: [],
             page: 1,
             pageSize: 20,
-            searchPageSize: 10,
+            searchPageSize: 20,
             loading: false,
             hasMore: true,
             isGenerating: false, // 手动摘要生成的全局锁，避免并发请求。
@@ -907,7 +907,7 @@
             }
 
             if (event.type === 'answer_done') {
-                if (!renderState.answer && event.content) {
+                if (event.content) {
                     renderState.answer = event.content;
                 }
                 renderState.status = '';
@@ -1096,15 +1096,23 @@
             const refs = Array.from(renderState.references.values()).slice(0, 12);
             if (!refs.length) return '';
             return `
-                <div class="agent-reference-list">
-                    <div class="agent-reference-title">引用新闻</div>
-                    ${refs.map(ref => `
-                        <button type="button" class="agent-reference-item" data-news-id="${ref.id}">
-                            <span class="agent-reference-index">[${ref.id}]</span>
-                            <span>${escapeHtml(ref.title || '未命名新闻')}</span>
-                        </button>
-                    `).join('')}
-                </div>
+                <details class="agent-reference-panel">
+                    <summary class="agent-reference-title">
+                        <span class="agent-reference-label">
+                            <span>引用新闻</span>
+                            <span class="agent-reference-count">${refs.length}</span>
+                        </span>
+                        <span class="agent-reference-toggle" aria-hidden="true"></span>
+                    </summary>
+                    <div class="agent-reference-list">
+                        ${refs.map(ref => `
+                            <button type="button" class="agent-reference-item" data-news-id="${ref.id}">
+                                <span class="agent-reference-index">[${ref.id}]</span>
+                                <span>${escapeHtml(ref.title || '未命名新闻')}</span>
+                            </button>
+                        `).join('')}
+                    </div>
+                </details>
             `;
         }
 
@@ -1762,6 +1770,7 @@
 
             try {
                 const effectivePageSize = state.filter.q ? state.searchPageSize : state.pageSize;
+                const effectiveDate = state.filter.q && !state.filter.dateTouched ? 'all' : getEffectiveDate();
                 const params = new URLSearchParams({
                     q: state.filter.q,
                     category: (state.filter.category === 'all') ? '' : state.filter.category,
@@ -1770,7 +1779,7 @@
                     sort_by: state.filter.sortBy,
                     page: state.page,
                     page_size: effectivePageSize,
-                    date: getEffectiveDate()
+                    date: effectiveDate
                 });
 
                 if (state.filter.dateOption === 'other') {
