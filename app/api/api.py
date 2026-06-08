@@ -7,7 +7,7 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import verify_admin_access
-from app.api.endpoints import news, reports, system, topics, prompts
+from app.api.endpoints import graph, news, prompts, reports, system, topics
 
 api_router = APIRouter()
 api_router.include_router(system.router)
@@ -15,3 +15,4 @@ api_router.include_router(prompts.router)
 api_router.include_router(news.router)
 api_router.include_router(reports.router)
 api_router.include_router(topics.router)
+api_router.include_router(graph.router)

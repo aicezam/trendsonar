@@ -18,7 +18,7 @@
             } catch (e) {}
         })();
     </script>
-    <link rel="stylesheet" href="/static/style.css?version=v0.1.8.5">
+    <link rel="stylesheet" href="/static/style.css?version=v0.1.8.6">
     {% block head %}{% endblock %}
 </head>
 <body class="page page-{{ active_page or 'index' }} {% block body_class %}{% endblock %}">
@@ -36,6 +36,7 @@
                 <nav class="nav-links">
                     <a href="/" class="nav-link {% if active_page == 'index' %}active{% endif %}">首页</a>
                     <a href="/topics" class="nav-link {% if active_page == 'topics' %}active{% endif %}">专题</a>
+                    <a href="/graph" class="nav-link {% if active_page == 'graph' %}active{% endif %}">图谱</a>
                     <a href="/report" class="nav-link {% if active_page == 'report' %}active{% endif %}">报告</a>
                     <a href="/admin" class="nav-link {% if active_page == 'admin' %}active{% endif %}">管理</a>
                 </nav>

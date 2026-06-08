@@ -178,6 +178,32 @@ async def page_topic_detail(topic_id: int, request: Request):
     )
 
 
+@app.get("/graph", response_class=HTMLResponse)
+async def page_graph(request: Request):
+    """
+    输入:
+    - `request`: FastAPI 请求对象
+
+    输出:
+    - 知识图谱页面 HTML 响应
+
+    作用:
+    - 渲染语义关系画布页面，用于查看新闻词项之间的实体、议题和风险关联。
+    """
+
+    missing_keys = get_missing_config_keys(settings)
+    return templates.TemplateResponse(
+        "graph.html",
+        {
+            "request": request,
+            "settings": settings,
+            "active_page": "graph",
+            "missing_keys": missing_keys,
+            "db_error": DB_INIT_ERROR,
+        },
+    )
+
+
 class AdminLoginPayload(BaseModel):
     password: str
 

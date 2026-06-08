@@ -415,11 +415,15 @@ async def get_report_term_analysis(
     if not query:
         raise HTTPException(status_code=400, detail="term is required")
     elapsed_start = perf_time.perf_counter()
-    range_key = (range or "year").strip().lower()
+    range_key = (range or "30d").strip().lower()
     if not start_date and not end_date and range_key != "all":
         now = datetime.now()
         if range_key == "year":
             start_date = (now - timedelta(days=365)).strftime("%Y-%m-%d")
+        elif range_key == "7d":
+            start_date = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        elif range_key == "24h":
+            start_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
             start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
         end_date = now.strftime("%Y-%m-%d")

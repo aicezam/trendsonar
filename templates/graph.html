@@ -1,0 +1,137 @@
+{# 本文件渲染知识图谱页面，提供语义关系画布、筛选控制和节点分析面板。 #}
+{% extends "base.html" %}
+{% block title %}图谱 - {{ settings.APP_NAME }}{% endblock %}
+{% block head %}
+    <link rel="stylesheet" href="/static/graph.css?version=v0.5.0">
+    <script src="/static/graphology.umd.min.js"></script>
+    <script src="/static/graphology-library.min.js"></script>
+    <script src="/static/sigma.min.js"></script>
+{% endblock %}
+{% block content %}
+<main class="graph-page">
+    <section class="graph-toolbar" aria-label="图谱筛选">
+        <div class="graph-toolbar-main">
+            <div class="graph-title-block">
+                <h1>信息图谱</h1>
+                <div id="graphStatus" class="graph-status">等待加载</div>
+            </div>
+            <div class="graph-controls">
+                <div class="graph-segmented" id="graphRangeTabs">
+                    <button type="button" class="active" data-range="24h">24小时</button>
+                    <button type="button" data-range="7d">7天</button>
+                    <button type="button" data-range="30d">30天</button>
+                    <button type="button" data-range="year">1年</button>
+                    <button type="button" data-range="all">全部</button>
+                </div>
+                <button id="graphRefreshBtn" class="graph-icon-btn" type="button" title="刷新图谱" aria-label="刷新图谱">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                        <path d="M20 6v5h-5M4 18v-5h5M18.3 9A7 7 0 0 0 6.2 6.8L4 9m2 6a7 7 0 0 0 11.8 2.2L20 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+                <button id="graphResetBtn" class="graph-icon-btn" type="button" title="重置视图" aria-label="重置视图">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                        <path d="M3 12a9 9 0 1 1 2.6 6.4M3 20v-6h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <div class="graph-filter-row">
+            <label>
+                <span>分类</span>
+                <select id="graphCategoryFilter">
+                    <option value="">全部分类</option>
+                </select>
+            </label>
+            <label>
+                <span>地区</span>
+                <select id="graphRegionFilter">
+                    <option value="">全部地区</option>
+                </select>
+            </label>
+            <label>
+                <span>来源</span>
+                <select id="graphSourceFilter">
+                    <option value="">全部来源</option>
+                </select>
+            </label>
+            <label class="graph-search">
+                <span>词项</span>
+                <input id="graphSearchInput" type="search" placeholder="输入关键词或实体">
+            </label>
+            <button id="graphSearchBtn" class="graph-primary-btn" type="button">定位</button>
+        </div>
+    </section>
+
+    <section class="graph-workspace">
+        <div class="graph-canvas-wrap">
+            <div id="graphCanvas" class="graph-canvas"></div>
+            <div id="graphEmpty" class="graph-empty is-hidden">暂无可展示的图谱数据</div>
+            <div class="graph-legend" aria-label="图例">
+                <span><i class="center"></i>中心</span>
+                <span><i class="hub"></i>主题簇</span>
+                <span><i class="entity"></i>实体</span>
+                <span><i class="topic"></i>议题</span>
+                <span><i class="risk"></i>风险</span>
+                <span><i class="positive"></i>正向</span>
+            </div>
+            <div id="graphMiniStats" class="graph-mini-stats">
+                <span>节点 0</span>
+                <span>边 0</span>
+            </div>
+        </div>
+        <aside class="graph-side-panel" id="graphSidePanel">
+            <div class="graph-side-empty" id="graphSideEmpty">
+                <div class="graph-side-kicker">节点分析</div>
+                <div class="graph-side-title">选择一个词项</div>
+                <p>点击节点查看趋势、关联实体与议题、相关新闻。双击节点可展开语义邻域。</p>
+            </div>
+            <div class="graph-side-content is-hidden" id="graphSideContent">
+                <div class="graph-side-head">
+                    <div>
+                        <div class="graph-side-kicker">节点分析</div>
+                        <div id="graphNodeTitle" class="graph-side-title"></div>
+                    </div>
+                    <button id="graphCloseDetailBtn" class="graph-icon-btn" type="button" title="收起详情" aria-label="收起详情">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                            <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="graphNodeMetrics" class="graph-node-metrics"></div>
+                <div class="graph-section">
+                    <div class="graph-section-title">趋势</div>
+                    <div id="graphTrendBars" class="graph-trend-bars"></div>
+                </div>
+                <div class="graph-section">
+                    <div class="graph-section-title">关联实体与议题</div>
+                    <div id="graphNeighborList" class="graph-chip-list"></div>
+                </div>
+                <div class="graph-section">
+                    <div class="graph-section-title">相关新闻</div>
+                    <div id="graphNewsList" class="graph-news-list"></div>
+                </div>
+                <button id="graphExpandBtn" class="graph-primary-btn full" type="button">展开关系</button>
+            </div>
+        </aside>
+    </section>
+</main>
+
+<div id="newsDetailModal" class="news-detail-modal" aria-hidden="true">
+    <div class="news-detail-panel">
+        <div class="news-detail-head">
+            <div>
+                <div class="news-detail-kicker">新闻详情</div>
+                <div id="detailTitle" class="news-detail-title"></div>
+            </div>
+            <button id="detailCloseBtn" class="news-detail-close" type="button">×</button>
+        </div>
+        <div id="detailBody" class="news-detail-body">
+            <div class="detail-loading">加载中...</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/marked.min.js"></script>
+<script src="/static/graph-view.js?version=v0.6.0"></script>
+{% endblock %}

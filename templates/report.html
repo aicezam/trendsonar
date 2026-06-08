@@ -328,7 +328,7 @@
         category: 'all',
         observer: null
     };
-    let activeTermAnalysis = { term: "", range: "year" };
+    let activeTermAnalysis = { term: "", range: "30d" };
     let termAnalysisAbortController = null;
     let termAnalysisRequestId = 0;
     const termAnalysisCache = new Map();
@@ -1642,7 +1642,7 @@
         return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
     }
 
-    function getDefaultTermDateRange(range = "year") {
+    function getDefaultTermDateRange(range = "30d") {
         if (range === "all") return { start_date: "", end_date: "" };
         const end = new Date();
         const start = new Date(end);
@@ -1654,7 +1654,7 @@
         };
     }
 
-    function getReportAnalysisParams(range = "year") {
+    function getReportAnalysisParams(range = "30d") {
         const p = window.currentReportParams || {};
         const defaultRange = getDefaultTermDateRange(range);
         return {
@@ -1692,7 +1692,7 @@
         }
         modal.classList.remove('show');
         modal.setAttribute('aria-hidden', 'true');
-        document.body.classList.remove('modal-open');
+        if (!detailEls.modal.classList.contains('show')) document.body.classList.remove('modal-open');
         [chartTermTrend, chartTermSentiment, chartTermCooccurrence].forEach(chart => chart && chart.dispose());
         chartTermTrend = chartTermSentiment = chartTermCooccurrence = null;
     }
@@ -1705,11 +1705,11 @@
     async function openTermAnalysis(term) {
         const cleanTerm = String(term || '').trim();
         if (!cleanTerm) return;
-        activeTermAnalysis = { term: cleanTerm, range: "year" };
-        await loadTermAnalysis(cleanTerm, "year", true);
+        activeTermAnalysis = { term: cleanTerm, range: "30d" };
+        await loadTermAnalysis(cleanTerm, "30d", true);
     }
 
-    async function loadTermAnalysis(term, range = "year", openModal = false) {
+    async function loadTermAnalysis(term, range = "30d", openModal = false) {
         const cleanTerm = String(term || '').trim();
         if (!cleanTerm) return;
         activeTermAnalysis = { term: cleanTerm, range };
@@ -1891,7 +1891,7 @@
             const time = item.time ? new Date(item.time).toLocaleString('zh-CN') : '-';
             return `
                 <div class="term-news-item">
-                    <a href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title || '(无标题)')}</a>
+                    <button type="button" class="detail-inline-link" onclick="openNewsDetail(${Number(item.id || 0)}, { replace: true })">${escapeHtml(item.title || '(无标题)')}</button>
                     <div class="term-news-meta">
                         <span>${escapeHtml(item.source || '未知来源')}</span>
                         <span>${time}</span>
@@ -2042,14 +2042,15 @@
 
     function closeNewsDetail() {
         detailEls.modal.classList.remove('show');
+        detailEls.modal.classList.remove('stacked');
         detailEls.modal.setAttribute('aria-hidden', 'true');
-        document.body.classList.remove('modal-open');
+        if (!document.getElementById('termAnalysisModal').classList.contains('show')) document.body.classList.remove('modal-open');
     }
 
     function renderDetailTags(items, emptyText) {
         const values = (items || []).filter(x => typeof x === 'string' && x.trim()).slice(0, 16);
         if (!values.length) return `<div class="detail-empty">${emptyText}</div>`;
-        return values.map(x => `<span class="detail-chip">${escapeHtml(x)}</span>`).join('');
+        return values.map(x => `<button type="button" class="detail-chip detail-chip-btn" data-term="${escapeHtml(x)}">${escapeHtml(x)}</button>`).join('');
     }
 
     function renderDetailNewsList(items, emptyText) {
@@ -2058,7 +2059,7 @@
             const time = item.time ? new Date(item.time).toLocaleString('zh-CN') : '-';
             const itemId = Number(item.id || 0);
             const titleHtml = itemId > 0
-                ? `<button class="detail-inline-link" type="button" onclick="openNewsDetail(${itemId})">${escapeHtml(item.title || '(无标题)')}</button>`
+                ? `<button class="detail-inline-link" type="button" onclick="openNewsDetail(${itemId}, { replace: true })">${escapeHtml(item.title || '(无标题)')}</button>`
                 : `<a href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title || '(无标题)')}</a>`;
             return `
                 <div class="detail-list-item">
@@ -2205,12 +2206,14 @@
         }
     }
 
-    window.openNewsDetail = async (id) => {
+    window.openNewsDetail = async (id, options = {}) => {
         if (!id || state.detail.loading) return;
+        if (options.replace) closeNewsDetail();
         state.detail.loading = true;
         detailEls.title.textContent = '新闻详情';
         detailEls.body.innerHTML = '<div class="detail-loading">加载中...</div>';
         detailEls.modal.classList.add('show');
+        detailEls.modal.classList.toggle('stacked', !!options.replace && document.getElementById('termAnalysisModal').classList.contains('show'));
         detailEls.modal.setAttribute('aria-hidden', 'false');
         document.body.classList.add('modal-open');
         try {
@@ -2218,6 +2221,9 @@
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             renderNewsDetail(data);
+            detailEls.body.querySelectorAll('[data-term]').forEach(el => {
+                el.onclick = () => openTermAnalysis(el.dataset.term || el.textContent);
+            });
             loadSimilarNews(id);
         } catch (e) {
             detailEls.body.innerHTML = `<div class="detail-empty">加载失败：${escapeHtml(e.message)}</div>`;

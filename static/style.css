@@ -785,99 +785,100 @@ html[data-theme="dark"] .CodeMirror-line > span > span::selection { background: 
 .btn-regen:hover:not(:disabled) { text-decoration: underline; }
 
 body.modal-open { overflow: hidden; }
-:is(body.page-index, body.page-report) .news-detail-modal { position: fixed; inset: 0; z-index: 1200; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(15, 23, 42, 0.55);
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-modal { position: fixed; inset: 0; z-index: 1200; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(15, 23, 42, 0.55);
 }
-:is(body.page-index, body.page-report) .news-detail-modal.show { display: flex; }
-:is(body.page-index, body.page-report) .news-detail-panel { width: min(980px, 100%); max-height: min(86vh, 920px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-card); box-shadow: var(--shadow-lg);
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-modal.show { display: flex; }
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-modal.stacked { z-index: 1300; }
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-panel { width: min(980px, 100%); max-height: min(86vh, 920px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-card); box-shadow: var(--shadow-lg);
 }
-:is(body.page-index, body.page-report) .news-detail-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; padding: 20px 22px 16px; border-bottom: 1px solid var(--border-color); background: transparent;
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; padding: 20px 22px 16px; border-bottom: 1px solid var(--border-color); background: transparent;
 }
-:is(body.page-index, body.page-report) .news-detail-kicker { color: var(--primary-color); font-size: 0.78rem; font-weight: 800; margin-bottom: 4px;
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-kicker { color: var(--primary-color); font-size: 0.78rem; font-weight: 800; margin-bottom: 4px;
 }
-:is(body.page-index, body.page-report) .news-detail-title { color: var(--text-main); font-size: 1.1rem; font-weight: 850; line-height: 1.45;
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-title { color: var(--text-main); font-size: 1.1rem; font-weight: 850; line-height: 1.45;
 }
-:is(body.page-index, body.page-report) .news-detail-title-link { color: inherit; text-decoration: none;
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-title-link { color: inherit; text-decoration: none;
 }
-:is(body.page-index, body.page-report) .news-detail-title-link:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-title-link:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
 }
-:is(body.page-index, body.page-report) .news-detail-close { width: 34px; height: 34px; flex: 0 0 auto; border-radius: 999px; color: var(--text-secondary); font-size: 1.45rem; line-height: 1;
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-close { width: 34px; height: 34px; flex: 0 0 auto; border-radius: 999px; color: var(--text-secondary); font-size: 1.45rem; line-height: 1;
 }
-:is(body.page-index, body.page-report) .news-detail-close:hover { background: var(--bg-card); color: var(--text-main); }
-:is(body.page-index, body.page-report) .news-detail-body { overflow-y: auto; padding: 20px 22px; display: flex; flex-direction: column; gap: 16px;
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-close:hover { background: var(--bg-card); color: var(--text-main); }
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-body { overflow-y: auto; padding: 20px 22px; display: flex; flex-direction: column; gap: 16px;
 }
-:is(body.page-index, body.page-report) .detail-loading,
-:is(body.page-index, body.page-report) .detail-empty { color: var(--text-light); font-size: 0.9rem; padding: 12px; border: 1px dashed var(--border-color); border-radius: 10px; background: transparent;
+:is(body.page-index, body.page-report, body.page-graph) .detail-loading,
+:is(body.page-index, body.page-report, body.page-graph) .detail-empty { color: var(--text-light); font-size: 0.9rem; padding: 12px; border: 1px dashed var(--border-color); border-radius: 10px; background: transparent;
 }
-:is(body.page-index, body.page-report) .detail-meta-line,
-:is(body.page-index, body.page-report) .detail-actions,
-:is(body.page-index, body.page-report) .detail-chip-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line,
+:is(body.page-index, body.page-report, body.page-graph) .detail-actions,
+:is(body.page-index, body.page-report, body.page-graph) .detail-chip-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
 }
-:is(body.page-index, body.page-report) .detail-meta-line { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; color: var(--text-secondary); font-size: 0.84rem;
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; color: var(--text-secondary); font-size: 0.84rem;
 }
-:is(body.page-index, body.page-report) .detail-meta-line > span,
-:is(body.page-index, body.page-report) .detail-meta-line > a { padding: 0; border-radius: 0; border: none; background: transparent;
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line > span,
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line > a { padding: 0; border-radius: 0; border: none; background: transparent;
 }
-:is(body.page-index, body.page-report) .detail-meta-line > span:not(:last-child)::after,
-:is(body.page-index, body.page-report) .detail-meta-line > a:not(:last-child)::after { content: '·'; margin-left: 12px; color: var(--text-light);
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line > span:not(:last-child)::after,
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line > a:not(:last-child)::after { content: '·'; margin-left: 12px; color: var(--text-light);
 }
-:is(body.page-index, body.page-report) .detail-source-link { color: #2563eb; font-weight: 700; text-decoration: none;
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-link { color: #2563eb; font-weight: 700; text-decoration: none;
 }
-:is(body.page-index, body.page-report) .detail-source-link:hover { color: #1d4ed8; text-decoration: underline; text-underline-offset: 3px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-link:hover { color: #1d4ed8; text-decoration: underline; text-underline-offset: 3px;
 }
-:is(body.page-index, body.page-report) .detail-meta-line .meta-heat-val { color: var(--heat-hot); font-weight: 650;
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line .meta-heat-val { color: var(--heat-hot); font-weight: 650;
 }
-:is(body.page-index, body.page-report) .detail-meta-line .meta-sent-val { font-weight: 600;
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line .meta-sent-val { font-weight: 600;
 }
-:is(body.page-index, body.page-report) .detail-meta-line .meta-sent-val.sent-pos { color: var(--sent-pos-text); }
-:is(body.page-index, body.page-report) .detail-meta-line .meta-sent-val.sent-neg { color: var(--sent-neg-text); }
-:is(body.page-index, body.page-report) .detail-meta-line .meta-sent-val.sent-neu { color: var(--sent-neu-text); }
-:is(body.page-index, body.page-report) .detail-primary-link { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 12px; border-radius: 10px; background: var(--primary-color); color: #fff; text-decoration: none; font-size: 0.88rem; font-weight: 750;
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line .meta-sent-val.sent-pos { color: var(--sent-pos-text); }
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line .meta-sent-val.sent-neg { color: var(--sent-neg-text); }
+:is(body.page-index, body.page-report, body.page-graph) .detail-meta-line .meta-sent-val.sent-neu { color: var(--sent-neu-text); }
+:is(body.page-index, body.page-report, body.page-graph) .detail-primary-link { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 12px; border-radius: 10px; background: var(--primary-color); color: #fff; text-decoration: none; font-size: 0.88rem; font-weight: 750;
 }
-:is(body.page-index, body.page-report) .detail-status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
 }
-:is(body.page-index, body.page-report) .detail-status-grid > div,
+:is(body.page-index, body.page-report, body.page-graph) .detail-status-grid > div,
 body.page-topics.page-topic-detail .trend-metric { border: 1px solid var(--border-color); border-radius: 10px; background: transparent; padding: 10px;
 }
-:is(body.page-index, body.page-report) .detail-status-grid strong,
+:is(body.page-index, body.page-report, body.page-graph) .detail-status-grid strong,
 body.page-topics.page-topic-detail .trend-metric-value { display: block; color: var(--text-main); font-size: 1.05rem; font-weight: 850; line-height: 1.25;
 }
-:is(body.page-index, body.page-report) .detail-status-grid span,
+:is(body.page-index, body.page-report, body.page-graph) .detail-status-grid span,
 body.page-topics.page-topic-detail .trend-metric-label { color: var(--text-secondary); font-size: 0.78rem;
 }
-:is(body.page-index, body.page-report) .detail-section { border: none; border-radius: 0; padding: 0; background: transparent;
+:is(body.page-index, body.page-report, body.page-graph) .detail-section { border: none; border-radius: 0; padding: 0; background: transparent;
 }
-:is(body.page-index, body.page-report) .detail-section-title { display: flex; align-items: center; justify-content: space-between; color: var(--text-main); font-size: 0.88rem; font-weight: 800; margin-bottom: 8px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-section-title { display: flex; align-items: center; justify-content: space-between; color: var(--text-main); font-size: 0.88rem; font-weight: 800; margin-bottom: 8px;
 }
-:is(body.page-index, body.page-report) .detail-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
 }
-:is(body.page-index, body.page-report) .detail-chip { display: inline-flex; align-items: center; justify-content: center; min-height: auto; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); font-size: 0.82rem; line-height: 1.4;
+:is(body.page-index, body.page-report, body.page-graph) .detail-chip { display: inline-flex; align-items: center; justify-content: center; min-height: auto; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); font-size: 0.82rem; line-height: 1.4;
 }
-:is(body.page-index, body.page-report) .detail-list,
-:is(body.page-index, body.page-report) .detail-topic-list,
-:is(body.page-index, body.page-report) .detail-source-list { display: grid; gap: 10px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-list,
+:is(body.page-index, body.page-report, body.page-graph) .detail-topic-list,
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-list { display: grid; gap: 10px;
 }
-:is(body.page-index, body.page-report) .detail-list-item,
-:is(body.page-index, body.page-report) .detail-source-row,
-:is(body.page-index, body.page-report) .detail-topic-link { border: 1px solid var(--border-color); border-radius: 10px; padding: 10px; background: transparent;
+:is(body.page-index, body.page-report, body.page-graph) .detail-list-item,
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-row,
+:is(body.page-index, body.page-report, body.page-graph) .detail-topic-link { border: 1px solid var(--border-color); border-radius: 10px; padding: 10px; background: transparent;
 }
-:is(body.page-index, body.page-report) .detail-list-item a,
-:is(body.page-index, body.page-report) .detail-source-main a,
-:is(body.page-index, body.page-report) .detail-topic-link { color: var(--text-main); text-decoration: none; font-weight: 750; line-height: 1.45;
+:is(body.page-index, body.page-report, body.page-graph) .detail-list-item a,
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-main a,
+:is(body.page-index, body.page-report, body.page-graph) .detail-topic-link { color: var(--text-main); text-decoration: none; font-weight: 750; line-height: 1.45;
 }
-:is(body.page-index, body.page-report) .detail-list-item a:hover,
-:is(body.page-index, body.page-report) .detail-source-main a:hover,
-:is(body.page-index, body.page-report) .detail-topic-link:hover .detail-topic-name { color: var(--primary-color);
+:is(body.page-index, body.page-report, body.page-graph) .detail-list-item a:hover,
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-main a:hover,
+:is(body.page-index, body.page-report, body.page-graph) .detail-topic-link:hover .detail-topic-name { color: var(--primary-color);
 }
-:is(body.page-index, body.page-report) .detail-item-meta,
-:is(body.page-index, body.page-report) .detail-topic-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; color: var(--text-light); font-size: 0.76rem;
+:is(body.page-index, body.page-report, body.page-graph) .detail-item-meta,
+:is(body.page-index, body.page-report, body.page-graph) .detail-topic-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; color: var(--text-light); font-size: 0.76rem;
 }
-:is(body.page-index, body.page-report) .detail-source-row { display: grid; grid-template-columns: 26px 1fr; gap: 10px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-row { display: grid; grid-template-columns: 26px 1fr; gap: 10px;
 }
-:is(body.page-index, body.page-report) .detail-source-index { width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 999px; background: var(--primary-light); color: var(--primary-color); font-size: 0.78rem; font-weight: 850;
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-index { width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 999px; background: var(--primary-light); color: var(--primary-color); font-size: 0.78rem; font-weight: 850;
 }
-:is(body.page-index, body.page-report) .detail-source-name { color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 4px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-source-name { color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 4px;
 }
-:is(body.page-index, body.page-report) .detail-topic-snippet { color: var(--text-secondary); font-size: 0.82rem; line-height: 1.55; margin-top: 8px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-topic-snippet { color: var(--text-secondary); font-size: 0.82rem; line-height: 1.55; margin-top: 8px;
 }
 
 .loading-state { text-align: center; font-size: 0.9rem; }
@@ -920,15 +921,15 @@ body.page-topics.page-topic-detail .trend-metric-label { color: var(--text-secon
 
     .history-sidebar { display: none; /* 移动端隐藏历史侧栏 */}
 
-    :is(body.page-index, body.page-report) .news-detail-modal { padding: 0; align-items: stretch;}
+    :is(body.page-index, body.page-report, body.page-graph) .news-detail-modal { padding: 0; align-items: stretch;}
 
-    :is(body.page-index, body.page-report) .news-detail-panel { width: 100%; max-height: 100vh; border-radius: 0;}
+    :is(body.page-index, body.page-report, body.page-graph) .news-detail-panel { width: 100%; max-height: 100vh; border-radius: 0;}
 
-    :is(body.page-index, body.page-report) .news-detail-body { padding: 14px;}
+    :is(body.page-index, body.page-report, body.page-graph) .news-detail-body { padding: 14px;}
 
-    :is(body.page-index, body.page-report) .detail-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr));}
+    :is(body.page-index, body.page-report, body.page-graph) .detail-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr));}
 
-    :is(body.page-index, body.page-report) .detail-two-col { grid-template-columns: 1fr;}
+    :is(body.page-index, body.page-report, body.page-graph) .detail-two-col { grid-template-columns: 1fr;}
 }
 
 /* 代码编辑器暗色模式语法高亮。 */
@@ -1589,7 +1590,7 @@ body.page-report { background-image:
 
 .github-link { transition: color 0.2s; }
 
-:is(body.page-index, body.page-report) .container { padding-top: 18px; padding-bottom: 44px;
+:is(body.page-index, body.page-report, body.page-graph) .container { padding-top: 18px; padding-bottom: 44px;
 }
 
 body.page-report .report-kicker { font-size: 0.78rem; font-weight: 850; letter-spacing: 0.08em; text-transform: uppercase;
@@ -1802,12 +1803,12 @@ body.page-report .table-header-wrapper { padding: 22px 22px 16px; background: co
 body.page-report #hotNewsList.news-list { margin-top: 0; padding: 18px;
 }
 
-:is(body.page-index, body.page-report) .news-detail-panel,
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-panel,
 body.page-report .term-analysis-panel,
 body.page-report .modal-content { border-radius: 24px; box-shadow: 0 30px 80px rgba(15, 23, 42, 0.18);
 }
 
-:is(body.page-index, body.page-report) .news-detail-head,
+:is(body.page-index, body.page-report, body.page-graph) .news-detail-head,
 body.page-report .term-analysis-head,
 body.page-report .modal-header,
 body.page-report .modal-footer { background: transparent;
@@ -2120,7 +2121,7 @@ body.page-admin .source-card-meta .source-address-text { max-width: min(620px, 7
 
 @media (max-width: 767px) { .nav-links { padding: 4px 0; border: none; background: transparent; box-shadow: none;}
 
-    :is(body.page-index, body.page-report) .container { padding-top: 14px; padding-bottom: 32px;}
+    :is(body.page-index, body.page-report, body.page-graph) .container { padding-top: 14px; padding-bottom: 32px;}
 
     body.page-index .category-tabs-container { padding: 6px; gap: 8px; border-radius: 16px;}
 
@@ -3123,10 +3124,10 @@ body.page-index .news-title-btn:hover,
 body.page-report .news-title-btn:hover { color: var(--primary-color);
 }
 
-:is(body.page-index, body.page-report) .detail-inline-link { padding: 0; border: 0; background: transparent; color: var(--text-main); font: inherit; font-weight: 800; line-height: 1.45; text-align: left; cursor: pointer;
+:is(body.page-index, body.page-report, body.page-graph) .detail-inline-link { padding: 0; border: 0; background: transparent; color: var(--text-main); font: inherit; font-weight: 800; line-height: 1.45; text-align: left; cursor: pointer;
 }
 
-:is(body.page-index, body.page-report) .detail-inline-link:hover { color: var(--primary-color); text-decoration: underline; text-underline-offset: 3px;
+:is(body.page-index, body.page-report, body.page-graph) .detail-inline-link:hover { color: var(--primary-color); text-decoration: underline; text-underline-offset: 3px;
 }
 
 body.page-topics .topics-hero-panel { gap: 22px; min-width: auto; align-items: start; margin-top: 24px;
@@ -3436,10 +3437,10 @@ body.page-index .term-news-item:last-child { border-bottom: none; padding-bottom
 body.page-index .term-news-meta { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 10px; color: var(--text-secondary); font-size: 0.8rem;
 }
 
-body.page-index .detail-chip-btn { border: 1px solid var(--border-color); cursor: pointer;
+:is(body.page-index, body.page-report, body.page-graph) .detail-chip-btn { border: 1px solid var(--border-color); cursor: pointer;
 }
 
-body.page-index .detail-chip-btn:hover { border-color: rgba(16, 185, 129, 0.32); color: var(--primary-color);
+:is(body.page-index, body.page-report, body.page-graph) .detail-chip-btn:hover { border-color: rgba(16, 185, 129, 0.32); color: var(--primary-color);
 }
 
 body.page-admin .tool-param-line { margin-bottom: 12px; color: var(--text-light); font-size: 0.78rem; line-height: 1.5;
