@@ -1,0 +1,1752 @@
+// 本文件承载管理后台的配置、新闻源、提示词与工具管理逻辑。
+const adminPageDataEl = document.getElementById("page-data");
+const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent || "{}") : {};
+    const authed = !!adminPageData.authed;
+    let codeMirrorEditor = null;
+    let configData = {};
+    let currentConfigText = "";
+    let sources = [];
+    let sourcePreviewResults = {};
+    let sourceContentTestResults = {};
+    let agentToolsData = { builtin_tools: [], custom_tools: [] };
+    let agentToolTestArgs = {};
+    const AGENT_TOOL_EXAMPLES = {
+        searxng: {
+            name: "searxng_search",
+            title: "SearXNG 网页搜索",
+            description: "调用 SearXNG /search 接口检索公开网页结果，适合补充外部资料。需要将 base_url 改成你的 SearXNG 服务地址。",
+            parameters: {
+                q: {
+                    type: "string",
+                    default: "TrendSonar 新闻",
+                    description: "搜索关键词或自然语言问题"
+                },
+                base_url: {
+                    type: "string",
+                    default: "http://127.0.0.1:8080",
+                    description: "SearXNG 服务根地址，不要以斜杠结尾"
+                },
+                language: {
+                    type: "string",
+                    default: "zh-CN",
+                    description: "搜索语言，例如 zh-CN、en"
+                },
+                categories: {
+                    type: "string",
+                    default: "general",
+                    description: "搜索分类，例如 general、news、science"
+                },
+                time_range: {
+                    type: "string",
+                    default: "",
+                    description: "可选时间范围：day、week、month、year；留空不限制"
+                },
+                limit: {
+                    type: "integer",
+                    default: 5,
+                    description: "返回结果数量上限"
+                }
+            },
+            executor: {
+                type: "http",
+                method: "GET",
+                url: "{base_url}/search",
+                query: {
+                    q: "{q}",
+                    format: "json",
+                    language: "{language}",
+                    categories: "{categories}",
+                    time_range: "{time_range}"
+                },
+                result_path: "results",
+                item_fields: ["title", "url", "content", "engine", "publishedDate"],
+                limit: 5,
+                timeout: 20
+            },
+            prompt_hint: [
+                "执行方式：",
+                "- 使用 HTTP GET 请求 {base_url}/search。",
+                "- 查询参数至少包含 q={q}、format=json、language={language}、categories={categories}。",
+                "- 如果 time_range 不为空，附加 time_range={time_range}。",
+                "- 从 JSON 响应的 results 数组取前 limit 条。",
+                "",
+                "返回字段：",
+                "- title：结果标题",
+                "- url：结果链接",
+                "- content：摘要文本",
+                "- engine：来源搜索引擎",
+                "- publishedDate：发布时间（如果有）",
+                "",
+                "使用规则：",
+                "- 只依据返回结果回答，不要把搜索结果当成已核实新闻。",
+                "- 引用外部网页时保留 url。",
+                "- 如果 SearXNG 不可用或结果为空，说明没有查到。"
+            ].join("\n")
+        }
+    };
+    let logsTimer = null;
+    let activeTab = "config";
+
+    // 日志懒加载状态。
+    let fullLogLines = [];
+    let renderedLimit = 200;
+    const LOG_PAGE_SIZE = 200;
+    let logSource = "realtime";
+
+    function initCodeEditor() {
+        const editor = document.getElementById("configEditor");
+        if (editor && window.CodeMirror && !codeMirrorEditor) {
+            codeMirrorEditor = window.CodeMirror.fromTextArea(editor, {
+                mode: "yaml",
+                lineNumbers: true,
+                lineWrapping: true,
+                indentUnit: 2,
+                tabSize: 2,
+            });
+        }
+
+        resizeEditors();
+    }
+
+    function getEditorValue() {
+        const editor = document.getElementById("configEditor");
+        if (codeMirrorEditor) return codeMirrorEditor.getValue();
+        return editor?.value || "";
+    }
+
+    function setEditorValue(v) {
+        const editor = document.getElementById("configEditor");
+        if (codeMirrorEditor) {
+            codeMirrorEditor.setValue(v || "");
+            codeMirrorEditor.refresh();
+        } else if (editor) {
+            editor.value = v || "";
+        }
+        resizeEditors();
+    }
+
+    function escapeHtml(text) {
+        return String(text || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
+
+    function setAppNameFromConfig() {
+        const newName = String(configData.APP_NAME || "").trim();
+        if (!newName) return;
+
+        document.title = newName + " - 管理";
+        const logoText = document.querySelector(".logo span:last-child");
+        if (logoText) logoText.textContent = newName;
+    }
+
+    const CONFIG_SECTIONS = [
+        {
+            title: "基础配置",
+            desc: "应用名称、日志级别、端口和数据库连接。",
+            fields: [
+                { key: "APP_NAME", label: "应用名称", type: "text" },
+                { key: "LOG_LEVEL", label: "日志等级", type: "select", options: ["DEBUG", "INFO", "WARNING", "ERROR"] },
+                { key: "PORT", label: "服务端口", type: "number" },
+                { key: "DATABASE_URL", label: "数据库地址", type: "text", wide: true },
+            ]
+        },
+        {
+            title: "模型与向量",
+            descHtml: '主力模型、备用模型和 Embedding 服务配置。注册硅基流动，有免费的模型：<a href="https://cloud.siliconflow.cn/i/fUoGwjZb" target="_blank" rel="noopener noreferrer">https://cloud.siliconflow.cn/i/fUoGwjZb</a> ',
+            fields: [
+                { key: "SILICONFLOW_BASE_URL", label: "Embedding Base URL", type: "text", wide: true },
+                { key: "SILICONFLOW_API_KEY", label: "Embedding API Key", type: "password", wide: true },
+                { key: "EMBEDDING_MODEL", label: "Embedding 模型", type: "text", testKind: "embedding" },
+                { key: "MAIN_AI_BASE_URL", label: "主模型 Base URL", type: "text", wide: true },
+                { key: "MAIN_AI_API_KEY", label: "主模型 API Key", type: "password", wide: true },
+                { key: "MAIN_AI_MODEL", label: "主模型名称", type: "text", testKind: "main" },
+                { key: "MAIN_AI_CONCURRENCY", label: "主模型并发", type: "number" },
+                { key: "BACKUP_AI_BASE_URL", label: "备用模型 Base URL", type: "text", wide: true },
+                { key: "BACKUP_AI_API_KEY", label: "备用模型 API Key", type: "password", wide: true },
+                { key: "BACKUP_AI_MODEL", label: "备用模型名称", type: "text", testKind: "backup" },
+                { key: "BACKUP_AI_CONCURRENCY", label: "备用模型并发", type: "number" },
+            ]
+        },
+        {
+            title: "自动任务与性能",
+            desc: "调度、摘要、分析和统一并发预算。",
+            fields: [
+                { key: "SCHEDULE_INTERVAL_MINUTES", label: "自动任务间隔(分钟)", type: "number" },
+                { key: "AUTO_SUMMARY_TOP_N", label: "自动摘要 Top N", type: "number" },
+                { key: "AUTO_ANALYSIS_TOP_N", label: "自动分析 Top N", type: "number" },
+                { key: "ANALYSIS_BATCH_SIZE", label: "分析批次大小", type: "number" },
+                { key: "EMBEDDING_CONCURRENCY", label: "Embedding 并发", type: "number" },
+                { key: "LLM_CONCURRENCY", label: "LLM 总并发", type: "number" },
+            ]
+        },
+        {
+            title: "数据清理",
+            desc: "控制是否在全流程结束后自动删除低热度历史新闻。默认关闭，避免误删历史检索数据。",
+            fields: [
+                { key: "DATA_CLEANUP_ENABLED", label: "启用低热新闻自动清理", type: "boolean", wide: true },
+                { key: "DATA_CLEANUP_MIN_HEAT", label: "删除热度低于", type: "number", step: "0.1" },
+                { key: "DATA_CLEANUP_PROTECT_DAYS", label: "保护最近天数", type: "number" },
+            ]
+        },
+        {
+            title: "内容生成参数",
+            desc: "输入截断、摘要长度和关注关键词。",
+            fields: [
+                { key: "ANALYSIS_INPUT_MAX_LENGTH", label: "分析输入最大长度", type: "number" },
+                { key: "SUMMARY_INPUT_MAX_LENGTH", label: "摘要正文截断长度", type: "number" },
+                { key: "SUMMARY_ORIGIN_MAX_LENGTH", label: "原始摘要截断长度", type: "number" },
+                { key: "SUMMARY_OUTPUT_LENGTH", label: "摘要目标字数", type: "number" },
+                { key: "FOLLOW_KEYWORDS", label: "关注关键词", type: "text", wide: true },
+                { key: "FOLLOW_KEYWORDS_THRESHOLD", label: "关键词相似度阈值", type: "number", step: "0.05" },
+            ]
+        },
+        {
+            title: "专题追踪",
+            desc: "专题生成、召回、匹配和审核相关参数。",
+            fields: [
+                { key: "TOPIC_LOOKBACK_DAYS", label: "聚合时间窗口(天)", type: "number" },
+                { key: "TOPIC_AGGREGATION_TOP_N", label: "聚合种子数", type: "number" },
+                { key: "TOPIC_GENERATION_COUNT", label: "生成数量范围", type: "text" },
+                { key: "TOPIC_RECALL_POOL_SIZE", label: "向量召回池大小", type: "number" },
+                { key: "TOPIC_MATCH_THRESHOLD", label: "向量初筛阈值", type: "number", step: "0.05" },
+                { key: "TOPIC_MATCH_MAX_CANDIDATES", label: "最大核验候选数", type: "number" },
+                { key: "TOPIC_MIN_NEWS_COUNT", label: "最低新闻数量", type: "number" },
+                { key: "TOPIC_UPDATE_LOOKBACK_DAYS", label: "专题更新时间窗口", type: "number" },
+                { key: "TOPIC_SCHEDULE_INTERVAL_HOURS", label: "专题定时间隔(小时)", type: "number" },
+                { key: "TOPIC_NEWS_MIN_HEAT", label: "最低新闻热度", type: "number", step: "0.1" },
+                { key: "TOPIC_QUALITY_LEVEL", label: "专题质量等级", type: "number" },
+                { key: "TOPIC_DISCOVERY_MAX_NEWS_FOR_CLUSTER", label: "程序聚类新闻上限", type: "number" },
+                { key: "TOPIC_DISCOVERY_MAX_CLUSTERS", label: "候选簇送审上限", type: "number" },
+                { key: "TOPIC_DISCOVERY_AI_BATCH_SIZE", label: "AI 审核批次大小", type: "number" },
+                { key: "TOPIC_CLUSTER_MIN_SCORE", label: "候选最低分", type: "number", step: "1" },
+                { key: "TOPIC_CLUSTER_SIM_THRESHOLD", label: "常规聚类相似度", type: "number", step: "0.01" },
+                { key: "TOPIC_CLUSTER_STRONG_SIM_THRESHOLD", label: "强聚类相似度", type: "number", step: "0.01" },
+                { key: "TOPIC_CLUSTER_MAX_DAYS_SPAN", label: "聚类最大跨度(天)", type: "number" },
+                { key: "TOPIC_EVIDENCE_MAX_TITLES", label: "证据标题数", type: "number" },
+                { key: "TOPIC_EVIDENCE_MAX_CHARS", label: "证据文本字符上限", type: "number" },
+                { key: "TOPIC_TIMELINE_MAX_EVENTS_PER_DAY", label: "每日时间轴节点上限", type: "number" },
+                { key: "TOPIC_OVERVIEW_MAX_NEWS", label: "综述素材新闻数", type: "number" },
+                { key: "TOPIC_CREATE_MAX_PER_RUN", label: "每轮新建专题上限", type: "number" },
+                { key: "TOPIC_MIN_SOURCE_COUNT", label: "最低来源数", type: "number" },
+                { key: "TOPIC_EXISTING_MERGE_HINT_THRESHOLD", label: "合并提示相似度", type: "number", step: "0.01" },
+            ]
+        },
+        {
+            title: "AI 路由",
+            desc: "为不同功能选择 main 或 backup。",
+            fields: [
+                { key: "AI_ROUTE.SUMMARY", label: "摘要生成", type: "route" },
+                { key: "AI_ROUTE.SENTIMENT", label: "情感分析", type: "route" },
+                { key: "AI_ROUTE.KEYWORDS", label: "关键词实体", type: "route" },
+                { key: "AI_ROUTE.CLUSTERING", label: "聚类去重", type: "route" },
+                { key: "AI_ROUTE.TOPIC_NAME", label: "专题命名", type: "route" },
+                { key: "AI_ROUTE.TOPIC_EVAL", label: "专题评估", type: "route" },
+                { key: "AI_ROUTE.TOPIC_MATCH", label: "专题匹配", type: "route" },
+                { key: "AI_ROUTE.TOPIC_TIMELINE", label: "专题时间轴", type: "route" },
+                { key: "AI_ROUTE.TOPIC_OVERVIEW", label: "专题综述", type: "route" },
+                { key: "AI_ROUTE.TOPIC_INITIAL_SUMMARY", label: "专题初始摘要", type: "route" },
+                { key: "AI_ROUTE.REPORT", label: "报告生成", type: "route" },
+                { key: "AI_ROUTE.CHAT", label: "对话助手", type: "route" },
+            ]
+        },
+        {
+            title: "列表配置",
+            desc: "新闻分类与忽略域名。",
+            fields: [
+                { key: "NEWS_CATEGORIES", label: "新闻分类", type: "list", wide: true },
+                { key: "IGNORED_DOMAINS", label: "忽略域名", type: "list", wide: true },
+            ]
+        },
+        {
+            title: "爬虫配置",
+            desc: "正文抓取并发与微博 Cookie 等抓取配置。",
+            fields: [
+                { key: "CRAWLER_CONCURRENCY", label: "爬虫并发", type: "number" },
+                { key: "CRAWLER_CONTENT_MIN_LENGTH", label: "正文有效长度", type: "number" },
+                { key: "CRAWLER_FAST_WAIT_SECONDS", label: "快速等待秒数", type: "number", step: "0.5" },
+                { key: "CRAWLER_DYNAMIC_WAIT_SECONDS", label: "动态等待秒数", type: "number", step: "0.5" },
+                { key: "CRAWLER_FETCH_TIMEOUT_SECONDS", label: "单次抓取超时秒", type: "number", step: "1" },
+                { key: "CRAWLER_PAGE_TIMEOUT_MS", label: "页面超时毫秒", type: "number" },
+                { key: "CRAWLER_RETRY_ATTEMPTS", label: "补抓尝试次数", type: "number" },
+                { key: "CRAWLER_RETRY_DELAY_SECONDS", label: "重试等待秒数", type: "number", step: "0.5" },
+                { key: "WEIBO_COOKIE", label: "微博 Cookie", type: "textarea", wide: true },
+            ]
+        },
+    ];
+
+    const CONFIG_FIELD_DEFAULTS = {
+        TOPIC_DISCOVERY_MAX_NEWS_FOR_CLUSTER: 800,
+        TOPIC_DISCOVERY_MAX_CLUSTERS: 30,
+        TOPIC_DISCOVERY_AI_BATCH_SIZE: 15,
+        TOPIC_CLUSTER_MIN_SCORE: 55,
+        TOPIC_CLUSTER_SIM_THRESHOLD: 0.62,
+        TOPIC_CLUSTER_STRONG_SIM_THRESHOLD: 0.78,
+        TOPIC_CLUSTER_MAX_DAYS_SPAN: 7,
+        TOPIC_EVIDENCE_MAX_TITLES: 6,
+        TOPIC_EVIDENCE_MAX_CHARS: 900,
+        TOPIC_TIMELINE_MAX_EVENTS_PER_DAY: 4,
+        TOPIC_OVERVIEW_MAX_NEWS: 30,
+        TOPIC_CREATE_MAX_PER_RUN: 5,
+        TOPIC_MIN_SOURCE_COUNT: 2,
+        TOPIC_EXISTING_MERGE_HINT_THRESHOLD: 0.68,
+        CRAWLER_CONTENT_MIN_LENGTH: 30,
+        CRAWLER_FAST_WAIT_SECONDS: 1.5,
+        CRAWLER_DYNAMIC_WAIT_SECONDS: 6,
+        CRAWLER_FETCH_TIMEOUT_SECONDS: 45,
+        CRAWLER_PAGE_TIMEOUT_MS: 60000,
+        CRAWLER_RETRY_ATTEMPTS: 2,
+        CRAWLER_RETRY_DELAY_SECONDS: 8,
+        "AI_ROUTE.SUMMARY": "main",
+        "AI_ROUTE.SENTIMENT": "backup",
+        "AI_ROUTE.KEYWORDS": "backup",
+        "AI_ROUTE.CLUSTERING": "backup",
+        "AI_ROUTE.TOPIC_NAME": "backup",
+        "AI_ROUTE.TOPIC_EVAL": "backup",
+        "AI_ROUTE.TOPIC_MATCH": "backup",
+        "AI_ROUTE.TOPIC_TIMELINE": "backup",
+        "AI_ROUTE.TOPIC_OVERVIEW": "backup",
+        "AI_ROUTE.TOPIC_INITIAL_SUMMARY": "main",
+        "AI_ROUTE.REPORT": "backup",
+        "AI_ROUTE.CHAT": "backup",
+    };
+
+    const CONFIG_FIELD_HELP = {
+        APP_NAME: "用于页面标题和系统标识。示例：TrendSonar。",
+        LOG_LEVEL: "控制日志详细程度。生产环境建议 INFO，排查问题时可临时改为 DEBUG。",
+        PORT: "Web 服务监听端口。示例：8193，修改后需要通过新端口访问。",
+        DATABASE_URL: "数据库连接地址。SQLite 示例：sqlite+aiosqlite:///data/trendsonar.db；PostgreSQL 示例：postgresql+asyncpg://user:pass@host:5432/db。",
+        SILICONFLOW_BASE_URL: "Embedding 服务接口地址。示例：https://api.siliconflow.cn/v1。",
+        SILICONFLOW_API_KEY: "Embedding 服务密钥，用于生成新闻和查询向量。示例：sk-xxxxx。",
+        EMBEDDING_MODEL: "向量模型名称，影响搜索、RAG 和专题匹配。示例：BAAI/bge-m3。",
+        MAIN_AI_BASE_URL: "主力大模型接口地址，用于摘要、分析、对话等任务。示例：https://api.example.com/v1。",
+        MAIN_AI_API_KEY: "主力大模型 API Key。请填写服务商提供的密钥，避免泄露。",
+        MAIN_AI_MODEL: "主力模型名称。示例：glm-4-flash、gpt-4o-mini、deepseek-chat。",
+        MAIN_AI_CONCURRENCY: "主力模型最大并发请求数。数值越大速度越快但更容易触发限流，建议 3-10。",
+        BACKUP_AI_BASE_URL: "备用大模型接口地址，主力模型失败或指定路由时使用。示例：https://api.deepseek.com。",
+        BACKUP_AI_API_KEY: "备用大模型 API Key。可与主力模型相同，也可使用另一个服务商。",
+        BACKUP_AI_MODEL: "备用模型名称。适合放成本低或稳定性高的模型。示例：deepseek-chat。",
+        BACKUP_AI_CONCURRENCY: "备用模型最大并发请求数。建议根据备用服务商限流设置，通常 3-10。",
+        SCHEDULE_INTERVAL_MINUTES: "自动抓取和分析任务间隔，单位分钟。示例：120 表示每 2 小时执行一次。",
+        AUTO_SUMMARY_TOP_N: "每轮自动为热度最高的多少条新闻生成摘要。示例：30。",
+        AUTO_ANALYSIS_TOP_N: "每轮自动深度分析的新闻数量上限。示例：500，数据量大时可调低。",
+        ANALYSIS_BATCH_SIZE: "批量分析每批处理数量。过大可能超出模型上下文，建议 10-50。",
+        CRAWLER_CONCURRENCY: "正文抓取和新闻源请求的全局并发上限。正文抓取会启动/复用浏览器，内存敏感时建议 1-2。",
+        CRAWLER_CONTENT_MIN_LENGTH: "正文抓取结果低于该长度会被视为无效。动态页短文本较多时可设 20-30，过高会误跳过。",
+        CRAWLER_FAST_WAIT_SECONDS: "浏览器快速抓取返回前等待秒数。设为 1-2 秒可避免页面刚加载就返回空壳。",
+        CRAWLER_DYNAMIC_WAIT_SECONDS: "快速抓取无正文时的慢速动态等待秒数。知乎、头条等动态页建议 5-8 秒。",
+        CRAWLER_FETCH_TIMEOUT_SECONDS: "单次完整正文抓取的硬超时，包含轻量抓取、crawl4ai 和 Playwright 兜底。建议 30-60 秒，避免坏链接卡住整批任务。",
+        CRAWLER_PAGE_TIMEOUT_MS: "浏览器页面加载超时时间，单位毫秒。动态站点建议 60000 或更高。",
+        CRAWLER_RETRY_ATTEMPTS: "正文补抓总尝试次数。2 表示首次失败后只重试 1 次；抓不到的站点通常不建议更高。",
+        CRAWLER_RETRY_DELAY_SECONDS: "外层正文补抓失败后再次尝试前等待秒数。页面/driver 启动慢时建议 8-15 秒。",
+        EMBEDDING_CONCURRENCY: "Embedding 请求全局并发上限。示例：5，避免向量服务限流。",
+        LLM_CONCURRENCY: "所有 LLM 调用共享的总并发上限。示例：5，用于控制外部 API 压力。",
+        DATA_CLEANUP_ENABLED: "是否在全流程任务结束后自动删除低热度历史新闻。默认关闭，关闭时不会删除任何新闻。",
+        DATA_CLEANUP_MIN_HEAT: "启用清理后，删除热度低于该数值的新闻。示例：1。",
+        DATA_CLEANUP_PROTECT_DAYS: "启用清理后，最近 N 天内的新闻不会被自动删除。示例：30。",
+        ANALYSIS_INPUT_MAX_LENGTH: "情感/分类分析时输入给模型的最大文本长度。示例：500。",
+        SUMMARY_INPUT_MAX_LENGTH: "生成摘要时正文截断长度。示例：2000；设为 0 通常表示不额外截断。",
+        SUMMARY_ORIGIN_MAX_LENGTH: "已有原始摘要参与生成时的截断长度。示例：300。",
+        SUMMARY_OUTPUT_LENGTH: "希望 AI 输出摘要的大致字数。示例：300。",
+        FOLLOW_KEYWORDS: "关注关键词，多个词用逗号分隔。示例：中国, 美国, AI。为空则不过滤。",
+        FOLLOW_KEYWORDS_THRESHOLD: "关注关键词向量匹配阈值，范围 0-1。越高越严格，示例：0.5。",
+        TOPIC_LOOKBACK_DAYS: "专题聚合回看最近多少天新闻。示例：7。",
+        TOPIC_AGGREGATION_TOP_N: "用于发现专题的高热新闻种子数量。示例：100。",
+        TOPIC_GENERATION_COUNT: "每轮希望生成的专题数量范围。示例：3-6。",
+        TOPIC_RECALL_POOL_SIZE: "专题向量召回候选池大小。越大越全面但更慢，示例：2000。",
+        TOPIC_MATCH_THRESHOLD: "专题相关新闻向量初筛阈值，范围 0-1。示例：0.45。",
+        TOPIC_MATCH_MAX_CANDIDATES: "进入 AI 核验的最大候选新闻数。示例：50。",
+        TOPIC_MIN_NEWS_COUNT: "一个专题至少需要包含的新闻数。示例：3。",
+        TOPIC_UPDATE_LOOKBACK_DAYS: "专题更新时回看最近多少天新闻。示例：3。",
+        TOPIC_SCHEDULE_INTERVAL_HOURS: "专题定时刷新间隔，单位小时。示例：6。",
+        TOPIC_NEWS_MIN_HEAT: "进入专题候选的最低新闻热度。示例：1.0。",
+        TOPIC_QUALITY_LEVEL: "专题质量过滤等级，数值越高越严格。示例：2。",
+        TOPIC_DISCOVERY_MAX_NEWS_FOR_CLUSTER: "每轮进入程序聚类的最高热度新闻数量。越大召回越全但计算更慢，示例：800。",
+        TOPIC_DISCOVERY_MAX_CLUSTERS: "每轮最多送 AI 审核的候选事件簇数量。控制专题审核 token 消耗，示例：30。",
+        TOPIC_DISCOVERY_AI_BATCH_SIZE: "候选事件簇批量审核大小。越大单次 prompt 越长，示例：15。",
+        TOPIC_CLUSTER_MIN_SCORE: "程序聚类候选进入 AI 审核的最低分。越高越保守，示例：55。",
+        TOPIC_CLUSTER_SIM_THRESHOLD: "常规语义合并阈值，范围 0-1。越高越不容易合并，示例：0.62。",
+        TOPIC_CLUSTER_STRONG_SIM_THRESHOLD: "强语义合并阈值，范围 0-1。达到该值后仍需实体/动作支撑，示例：0.78。",
+        TOPIC_CLUSTER_MAX_DAYS_SPAN: "同一事件簇允许跨越的最大天数。示例：7。",
+        TOPIC_EVIDENCE_MAX_TITLES: "单个候选证据包最多保留多少条代表标题。示例：6。",
+        TOPIC_EVIDENCE_MAX_CHARS: "单个候选证据包事实摘要最大字符数。越小越省 token，示例：900。",
+        TOPIC_TIMELINE_MAX_EVENTS_PER_DAY: "每天最多保留多少个时间轴节点。示例：4。",
+        TOPIC_OVERVIEW_MAX_NEWS: "生成专题综述时最多使用多少条真实新闻素材。示例：30。",
+        TOPIC_CREATE_MAX_PER_RUN: "每轮自动刷新最多新建多少个专题。用于防止一次性生成过多专题，示例：5。",
+        TOPIC_MIN_SOURCE_COUNT: "自动生成专题要求的最少来源数。示例：2。",
+        TOPIC_EXISTING_MERGE_HINT_THRESHOLD: "候选簇提示合并现有专题的相似度阈值，示例：0.68。",
+        "AI_ROUTE.SUMMARY": "选择摘要生成使用 main 或 backup。main 通常速度快，backup 可用于更稳定模型。",
+        "AI_ROUTE.SENTIMENT": "选择情感和分类分析使用的模型节点。示例：main。",
+        "AI_ROUTE.KEYWORDS": "选择关键词和实体提取使用的模型节点。示例：main。",
+        "AI_ROUTE.CLUSTERING": "选择新闻聚类去重判断使用的模型节点。建议使用稳定性较高的 backup。",
+        "AI_ROUTE.TOPIC_NAME": "选择专题命名使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_EVAL": "选择专题质量评估使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_MATCH": "选择专题与新闻匹配核验使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_TIMELINE": "选择专题时间轴生成使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_OVERVIEW": "选择专题综述生成使用的模型节点。示例：backup。",
+        "AI_ROUTE.TOPIC_INITIAL_SUMMARY": "选择专题初始摘要使用的模型节点。示例：main。",
+        "AI_ROUTE.REPORT": "选择日报/周报等报告生成使用的模型节点。示例：backup。",
+        "AI_ROUTE.CHAT": "选择管理端问答助手使用的模型节点。示例：main。",
+        NEWS_CATEGORIES: "新闻分类列表，每行一个。示例：财经商业、科技科学、社会民生。",
+        IGNORED_DOMAINS: "忽略域名列表，每行一个。命中的链接不会抓取或入库。示例：twitter.com。",
+        WEIBO_COOKIE: "微博登录后的完整 Cookie，用于抓取微博搜索/详情正文；系统不会主动生成 Cookie，成功抓取后会合并响应 Set-Cookie 做续期。",
+    };
+
+    function getConfigHelp(field) {
+        return field.help || CONFIG_FIELD_HELP[field.key] || "请按配置文件要求填写；修改后保存并重启生效。";
+    }
+
+    function getConfigValue(path) {
+        const parts = path.split(".");
+        let cur = configData;
+        for (const part of parts) {
+            if (!cur || typeof cur !== "object") return "";
+            cur = cur[part];
+        }
+        return cur ?? "";
+    }
+
+    function setConfigValue(path, value) {
+        const parts = path.split(".");
+        let cur = configData;
+        for (let i = 0; i < parts.length - 1; i++) {
+            const part = parts[i];
+            if (!cur[part] || typeof cur[part] !== "object") cur[part] = {};
+            cur = cur[part];
+        }
+        cur[parts[parts.length - 1]] = value;
+    }
+
+    function applyConfigDefaults() {
+        Object.entries(CONFIG_FIELD_DEFAULTS).forEach(([key, value]) => {
+            const current = getConfigValue(key);
+            if (current === "" || current === null || current === undefined) {
+                setConfigValue(key, value);
+            }
+        });
+    }
+
+    function parseConfigInputValue(field, raw) {
+        if (field.type === "number") return Number(raw || 0);
+        if (field.type === "boolean") return String(raw) === "true";
+        if (field.type === "list") return String(raw || "").split("\n").map((x) => x.trim()).filter(Boolean);
+        return raw;
+    }
+
+    function renderConfigForm() {
+        const root = document.getElementById("configForm");
+        if (!root) return;
+        root.innerHTML = CONFIG_SECTIONS.map((section) => `
+            <div class="config-section-card">
+                <div class="config-section-head">
+                    <h4>${escapeHtml(section.title)}</h4>
+                    <p>${section.descHtml || escapeHtml(section.desc)}</p>
+                </div>
+                <div class="config-fields-grid">
+                    ${section.fields.map((field) => renderConfigField(field)).join("")}
+                </div>
+            </div>
+        `).join("");
+    }
+
+    function renderConfigField(field) {
+        const value = getConfigValue(field.key);
+        const id = "cfg_" + field.key.replace(/\./g, "_");
+        const wide = field.wide ? " wide" : "";
+        const testButton = field.testKind
+            ? `<button type="button" id="cfgTestBtn_${field.testKind}" class="admin-btn config-test-btn" data-action="test-ai-model" data-test-kind="${field.testKind}">测试</button>`
+            : "";
+        const testStatus = field.testKind
+            ? `<span id="cfgTestStatus_${field.testKind}" class="config-test-status" aria-live="polite"></span>`
+            : "";
+        if (field.type === "select" || field.type === "route") {
+            const options = field.type === "route" ? ["main", "backup"] : field.options;
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<select id="${id}" class="admin-input" data-config-key="${field.key}" data-config-type="${field.type}">${options.map((opt) => `<option value="${opt}" ${String(value) === opt ? "selected" : ""}>${opt}</option>`).join("")}</select><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        if (field.type === "boolean") {
+            const boolValue = value === true || String(value).toLowerCase() === "true";
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<select id="${id}" class="admin-input" data-config-key="${field.key}" data-config-type="${field.type}"><option value="false" ${!boolValue ? "selected" : ""}>关闭</option><option value="true" ${boolValue ? "selected" : ""}>启用</option></select><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        if (field.type === "textarea") {
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<textarea id="${id}" class="admin-textarea config-textarea" data-config-key="${field.key}" data-config-type="${field.type}">${escapeHtml(value)}</textarea><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        if (field.type === "list") {
+            const text = Array.isArray(value) ? value.join("\n") : String(value || "");
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<textarea id="${id}" class="admin-textarea config-textarea small" data-config-key="${field.key}" data-config-type="${field.type}">${escapeHtml(text)}</textarea><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        const step = field.step ? ` step="${field.step}"` : "";
+        const input = `<input id="${id}" class="admin-input" type="${field.type === "password" ? "password" : field.type}"${step} value="${escapeHtml(value)}" data-config-key="${field.key}" data-config-type="${field.type}">`;
+        const control = field.testKind ? `<div class="config-test-row">${input}${testButton}</div>` : input;
+        return `<label class="config-field${wide}">${escapeHtml(field.label)}${control}<span class="config-help">${escapeHtml(getConfigHelp(field))}</span>${testStatus}</label>`;
+    }
+
+    function collectConfigForm() {
+        document.querySelectorAll("[data-config-key]").forEach((el) => {
+            const field = CONFIG_SECTIONS.flatMap((s) => s.fields).find((item) => item.key === el.dataset.configKey) || { type: el.dataset.configType };
+            setConfigValue(el.dataset.configKey, parseConfigInputValue(field, el.value));
+        });
+    }
+
+    function syncAdvancedConfigFromForm() {
+        collectConfigForm();
+        currentConfigText = JSON.stringify(configData, null, 2);
+        setEditorValue(currentConfigText);
+        return currentConfigText;
+    }
+
+    const AI_TEST_CONFIG = {
+        embedding: {
+            label: "Embedding",
+            baseKey: "SILICONFLOW_BASE_URL",
+            apiKey: "SILICONFLOW_API_KEY",
+            modelKey: "EMBEDDING_MODEL",
+        },
+        main: {
+            label: "主模型",
+            baseKey: "MAIN_AI_BASE_URL",
+            apiKey: "MAIN_AI_API_KEY",
+            modelKey: "MAIN_AI_MODEL",
+        },
+        backup: {
+            label: "备用模型",
+            baseKey: "BACKUP_AI_BASE_URL",
+            apiKey: "BACKUP_AI_API_KEY",
+            modelKey: "BACKUP_AI_MODEL",
+        },
+    };
+
+    function getConfigInputValue(key) {
+        const id = "cfg_" + key.replace(/\./g, "_");
+        const el = document.getElementById(id);
+        if (el) return String(el.value || "").trim();
+        return String(getConfigValue(key) || "").trim();
+    }
+
+    function setModelTestStatus(kind, message, cls = "") {
+        const statusEl = document.getElementById("cfgTestStatus_" + kind);
+        if (!statusEl) return;
+        statusEl.textContent = message || "";
+        statusEl.className = "config-test-status" + (cls ? (" " + cls) : "");
+    }
+
+    async function testAIModel(kind) {
+        const meta = AI_TEST_CONFIG[kind];
+        if (!meta) return;
+        const button = document.getElementById("cfgTestBtn_" + kind);
+        const payload = {
+            kind,
+            base_url: getConfigInputValue(meta.baseKey),
+            api_key: getConfigInputValue(meta.apiKey),
+            model: getConfigInputValue(meta.modelKey),
+        };
+        if (!payload.base_url || !payload.api_key || !payload.model) {
+            setModelTestStatus(kind, "请先填写 Base URL、API Key 和模型名称。", "error");
+            return;
+        }
+
+        if (button) {
+            button.disabled = true;
+            button.textContent = "测试中";
+        }
+        setModelTestStatus(kind, "正在测试服务连通性...", "");
+        try {
+            const resp = await fetch("/api/admin/ai/test", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const data = await resp.json().catch(() => ({}));
+            const elapsed = data.elapsed_ms ? `（${data.elapsed_ms}ms）` : "";
+            if (!resp.ok) {
+                setModelTestStatus(kind, data.detail || "测试失败", "error");
+            } else if (data.ok) {
+                setModelTestStatus(kind, (data.message || (meta.label + "服务可用")) + elapsed, "ok");
+            } else {
+                setModelTestStatus(kind, data.message || (meta.label + "服务不可用"), "error");
+            }
+        } catch (e) {
+            setModelTestStatus(kind, "测试请求失败: " + e.message, "error");
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = "测试";
+            }
+        }
+    }
+
+    function toggleAdvancedConfig() {
+        const wrap = document.getElementById("advancedConfigWrap");
+        if (!wrap) return;
+        const willShow = wrap.classList.contains("is-hidden");
+        if (willShow) syncAdvancedConfigFromForm();
+        wrap.classList.toggle("is-hidden", !willShow);
+        setTimeout(resizeEditors, 20);
+    }
+
+    function resizeEditors() {
+        const configPanel = document.getElementById("panelConfig");
+        const configTextarea = document.getElementById("configEditor");
+
+        if (configPanel && configTextarea && configPanel.classList.contains("active")) {
+            const rect = configTextarea.getBoundingClientRect();
+            // 代码编辑器初始化后优先使用外层容器计算高度。
+            const wrapper = configPanel.querySelector(".CodeMirror");
+            const top = wrapper ? wrapper.getBoundingClientRect().top : rect.top;
+
+            const available = Math.max(260, window.innerHeight - top - 20);
+            if (codeMirrorEditor) {
+                codeMirrorEditor.setSize("100%", available + "px");
+                codeMirrorEditor.refresh();
+            } else {
+                configTextarea.style.minHeight = available + "px";
+            }
+        }
+    }
+
+    function setStatus(el, msg, cls) {
+        if (!el) return;
+        el.textContent = msg || "";
+        el.className = "admin-status" + (cls ? (" " + cls) : "");
+    }
+
+    async function doLogin() {
+        const pwdEl = document.getElementById("adminPassword");
+        const statusEl = document.getElementById("adminLoginStatus");
+        const password = (pwdEl?.value || "").trim();
+        if (!password) {
+            setStatus(statusEl, "请输入密码", "error");
+            return;
+        }
+        setStatus(statusEl, "登录中...", "");
+        const resp = await fetch("/admin/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password })
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            setStatus(statusEl, data.message || "登录失败", "error");
+            return;
+        }
+        location.reload();
+    }
+
+    async function loadConfig() {
+        const statusEl = document.getElementById("adminStatus");
+        setStatus(statusEl, "加载配置中...", "");
+        const resp = await fetch("/api/admin/config", { method: "GET" });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            setStatus(statusEl, data.detail || "加载失败", "error");
+            return;
+        }
+        const data = await resp.json();
+        currentConfigText = data.yaml || "";
+        configData = data.config || {};
+        applyConfigDefaults();
+        setEditorValue(JSON.stringify(configData, null, 2));
+        renderConfigForm();
+        setAppNameFromConfig();
+        setStatus(statusEl, "已加载。保存后将自动重启。", "ok");
+    }
+
+    async function loadSources() {
+        const statusEl = document.getElementById("adminStatus");
+        const pathEl = document.getElementById("sourcesPath");
+        setStatus(statusEl, "加载新闻源中...", "");
+        const resp = await fetch("/api/admin/news_sources", { method: "GET", cache: "no-store" });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            setStatus(statusEl, data.detail || "加载失败", "error");
+            return;
+        }
+        const data = await resp.json();
+        sources = Array.isArray(data.sources) ? data.sources : [];
+        if (pathEl) pathEl.textContent = "配置路径: " + (data.path || "");
+        renderSources();
+        setStatus(statusEl, "新闻源已加载，共 " + sources.length + " 个。", "ok");
+    }
+
+    function normalizeSourceForSave(source) {
+        return {
+            name: String(source.name || "").trim(),
+            weight: Number(source.weight || 1),
+            address: String(source.address || "").trim(),
+            enabled: source.enabled !== false,
+        };
+    }
+
+    function updateSourceField(index, field, value) {
+        if (!sources[index]) return;
+        if (field === "weight") sources[index][field] = Number(value || 1);
+        else if (field === "enabled") sources[index][field] = !!value;
+        else sources[index][field] = value;
+    }
+
+    function openSourceFormModal(index = null) {
+        const modal = document.getElementById("sourceFormModal");
+        const titleEl = document.getElementById("sourceFormModalTitle");
+        const indexEl = document.getElementById("editSourceIndex");
+        const nameEl = document.getElementById("sourceFormName");
+        const weightEl = document.getElementById("sourceFormWeight");
+        const addressEl = document.getElementById("sourceFormAddress");
+        const enabledEl = document.getElementById("sourceFormEnabled");
+        if (!modal || !titleEl || !indexEl || !nameEl || !weightEl || !addressEl || !enabledEl) return;
+        const isEdit = index !== null && index !== undefined;
+        const source = isEdit ? (sources[index] || {}) : { name: "", weight: 1, address: "", enabled: true };
+        titleEl.textContent = isEdit ? "编辑新闻源" : "新增新闻源";
+        indexEl.value = isEdit ? String(index) : "";
+        nameEl.value = source.name || "";
+        weightEl.value = source.weight || 1;
+        addressEl.value = source.address || "";
+        enabledEl.checked = source.enabled !== false;
+        modal.classList.remove("is-hidden");
+    }
+
+    function closeSourceFormModal() {
+        const modal = document.getElementById("sourceFormModal");
+        if (modal) modal.classList.add("is-hidden");
+    }
+
+    async function saveSourceForm() {
+        const indexValue = document.getElementById("editSourceIndex")?.value || "";
+        const source = {
+            name: document.getElementById("sourceFormName")?.value || "",
+            weight: Number(document.getElementById("sourceFormWeight")?.value || 1),
+            address: document.getElementById("sourceFormAddress")?.value || "",
+            enabled: !!document.getElementById("sourceFormEnabled")?.checked,
+            health: indexValue !== "" ? (sources[Number(indexValue)]?.health || {}) : {},
+        };
+        if (!source.name.trim() || !source.address.trim()) {
+            alert("新闻源名称和地址不能为空");
+            return;
+        }
+        if (indexValue === "") {
+            sources.unshift(source);
+        } else {
+            const index = Number(indexValue);
+            sources[index] = { ...sources[index], ...source };
+        }
+        closeSourceFormModal();
+        renderSources();
+        const saved = await saveSources(true);
+        if (!saved) openSourceFormModal(indexValue === "" ? 0 : Number(indexValue));
+    }
+
+    function addSource() {
+        openSourceFormModal();
+    }
+
+    async function removeSource(index) {
+        if (!confirm("确定删除这个新闻源吗？")) return;
+        const removed = sources.splice(index, 1);
+        renderSources();
+        const saved = await saveSources(true);
+        if (!saved && removed.length) {
+            sources.splice(index, 0, removed[0]);
+            renderSources();
+        }
+    }
+
+    function formatSourceTime(value) {
+        if (!value) return "-";
+        return String(value).replace("T", " ").slice(0, 19);
+    }
+
+    function getSourceStatusClass(status) {
+        if (status === "success") return "ok";
+        if (status === "failed") return "bad";
+        return "idle";
+    }
+
+    function getSourceStatusText(status, fallback) {
+        if (status === "success") return "成功";
+        if (status === "failed") return "失败";
+        return fallback || "未执行";
+    }
+
+    function getSourceHealthScore(health, enabled) {
+        const fetchOk = health.last_fetch_status === "success";
+        const testOk = health.last_test_status === "success";
+        const failureCount = Number(health.failure_count || 0);
+        let score = enabled ? 45 : 20;
+        if (fetchOk) score += 35;
+        if (testOk) score += 15;
+        score -= Math.min(30, failureCount * 10);
+        if (!enabled) score = Math.min(score, 55);
+        return Math.max(0, Math.min(100, score));
+    }
+
+    function getSourceHealthTone(score) {
+        if (score >= 80) return "ok";
+        if (score >= 55) return "warn";
+        return "bad";
+    }
+
+    function closeSourcePreviewModal() {
+        const modal = document.getElementById("sourcePreviewModal");
+        if (modal) modal.classList.add("is-hidden");
+    }
+
+    async function testSourceContent(index, itemIndex) {
+        const source = sources[index] || {};
+        const previewData = sourcePreviewResults[index] || {};
+        const preview = Array.isArray(previewData.preview) ? previewData.preview : [];
+        const item = preview[itemIndex] || {};
+        const url = String(item.url || "").trim();
+        if (!url) {
+            alert("该条新闻没有可测试的链接");
+            return;
+        }
+
+        const resultKey = `${index}-${itemIndex}`;
+        sourceContentTestResults[resultKey] = {
+            loading: true,
+            ok: false,
+            length: 0,
+            preview: "",
+            message: "正在测试正文抓取...",
+        };
+        openSourcePreviewModal(index);
+
+        try {
+            const resp = await fetch("/api/admin/news_sources/test_content", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url })
+            });
+            const data = await resp.json().catch(() => ({}));
+            sourceContentTestResults[resultKey] = {
+                loading: false,
+                ok: !!data.ok,
+                length: Number(data.length || 0),
+                preview: String(data.preview || ""),
+                message: String(data.message || (data.ok ? "正文抓取成功" : "正文抓取失败")),
+            };
+        } catch (err) {
+            sourceContentTestResults[resultKey] = {
+                loading: false,
+                ok: false,
+                length: 0,
+                preview: "",
+                message: err && err.message ? String(err.message) : "正文抓取失败",
+            };
+        }
+
+        openSourcePreviewModal(index);
+    }
+
+    function openSourcePreviewModal(index) {
+        const source = sources[index] || {};
+        const data = sourcePreviewResults[index] || { preview: [], message: "暂无测试结果", count: 0, ok: false };
+        const modal = document.getElementById("sourcePreviewModal");
+        const titleEl = document.getElementById("sourcePreviewModalTitle");
+        const summaryEl = document.getElementById("sourcePreviewSummary");
+        const listEl = document.getElementById("sourcePreviewList");
+        if (!modal || !titleEl || !summaryEl || !listEl) return;
+        titleEl.textContent = "新闻源测试结果 - " + (source.name || "未命名新闻源");
+        summaryEl.innerHTML = `
+            <div class="source-modal-kpis">
+                <span class="source-badge ${data.ok ? "ok" : "bad"}">${data.ok ? "测试成功" : "测试失败"}</span>
+                <span>提取 ${data.count || 0} 条</span>
+                <span>${escapeHtml(data.message || "")}</span>
+            </div>
+            <div class="source-modal-url">${escapeHtml(source.address || "")}</div>
+        `;
+        const preview = Array.isArray(data.preview) ? data.preview : [];
+        if (!preview.length) {
+            listEl.innerHTML = '<div class="source-empty">暂无可展示的提取结果。</div>';
+        } else {
+            listEl.innerHTML = preview.map((item, idx) => `
+                <div class="source-modal-item">
+                    <div class="source-modal-index">#${idx + 1}</div>
+                    <div class="source-modal-title">${escapeHtml(item.title || "无标题")}</div>
+                    <a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noopener">${escapeHtml(item.url || "")}</a>
+                    <div class="source-modal-field"><strong>来源：</strong>${escapeHtml(item.source || source.name || "")}</div>
+                    <div class="source-modal-field"><strong>发布时间：</strong>${escapeHtml(item.publish_date || item.time || "")}</div>
+                    <div class="source-modal-summary-text">${escapeHtml(item.summary || "无摘要")}</div>
+                    <div class="source-modal-actions">
+                        <button class="admin-btn" data-action="test-source-content" data-source-index="${index}" data-preview-index="${idx}">测试正文抓取</button>
+                    </div>
+                    ${(() => {
+                        const contentTest = sourceContentTestResults[`${index}-${idx}`];
+                        if (!contentTest) return "";
+                        return `
+                            <div class="source-content-test ${contentTest.ok ? "ok" : "bad"}">
+                                <div class="source-content-test-head">
+                                    <strong>${contentTest.ok ? "正文抓取成功" : "正文抓取失败"}</strong>
+                                    <span>${escapeHtml(contentTest.message || "")}</span>
+                                    <span>${contentTest.length || 0} 字</span>
+                                </div>
+                                <div class="source-content-test-body">${escapeHtml(contentTest.preview || (contentTest.loading ? "正在测试正文抓取..." : "无正文预览"))}</div>
+                            </div>
+                        `;
+                    })()}
+                </div>
+            `).join("");
+        }
+        modal.classList.remove("is-hidden");
+    }
+
+    async function testSource(index) {
+        const source = normalizeSourceForSave(sources[index] || {});
+        const statusEl = document.getElementById("sourceTestStatus" + index);
+        if (!source.name || !source.address) {
+            if (statusEl) statusEl.textContent = "名称和地址不能为空";
+            return;
+        }
+        if (statusEl) statusEl.textContent = "测试中...";
+        const resp = await fetch("/api/admin/news_sources/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(source)
+        });
+        const data = await resp.json().catch(() => ({}));
+        sources[index].health = data.health || sources[index].health || {};
+        sourcePreviewResults[index] = data;
+        if (statusEl) statusEl.textContent = (data.ok ? "测试成功" : "测试失败") + "，提取 " + (data.count || 0) + " 条";
+        renderSources();
+        openSourcePreviewModal(index);
+    }
+
+    function renderSources() {
+        const grid = document.getElementById("sourcesGrid");
+        if (!grid) return;
+        if (!sources.length) {
+            grid.innerHTML = '<div class="source-empty">暂无新闻源，请点击“新增新闻源”。</div>';
+            return;
+        }
+        grid.innerHTML = sources.map((source, index) => {
+            const health = source.health || {};
+            const enabled = source.enabled !== false;
+            const fetchStatus = health.last_fetch_status || "";
+            const testStatus = health.last_test_status || "";
+            const fetchClass = getSourceStatusClass(fetchStatus);
+            const testClass = getSourceStatusClass(testStatus);
+            const cachedPreview = sourcePreviewResults[index];
+            const healthScore = getSourceHealthScore(health, enabled);
+            const healthTone = getSourceHealthTone(healthScore);
+            return `
+                <div class="source-card prompt-card ${enabled ? "" : "disabled"}">
+                    <div class="source-card-top">
+                        <div>
+                            <h4>${escapeHtml(source.name || "未命名新闻源")}</h4>
+                            <div class="source-key">${escapeHtml(source.address || "暂未填写地址")}</div>
+                        </div>
+                        <label class="source-switch-pill ${enabled ? "on" : "off"}">
+                            <input type="checkbox" ${enabled ? "checked" : ""} data-action="toggle-source-enabled" data-source-index="${index}">
+                            <span>${enabled ? "已启用" : "已停用"}</span>
+                        </label>
+                    </div>
+                    <div class="source-card-desc">
+                        <span class="source-badge ${fetchClass}">加载：${getSourceStatusText(fetchStatus, "未加载")}</span>
+                        <span class="source-badge ${testClass}">测试：${getSourceStatusText(testStatus, "未测试")}</span>
+                        <span class="source-badge idle">权重 ${escapeHtml(source.weight || 1)}</span>
+                    </div>
+                    <div class="source-health-meter ${healthTone}" aria-label="新闻源健康度 ${healthScore}">
+                        <div class="source-health-row">
+                            <span>健康度</span>
+                            <strong>${healthScore}</strong>
+                        </div>
+                        <div class="source-health-bar"><i style="width:${healthScore}%"></i></div>
+                    </div>
+                    <div class="source-card-meta">
+                        <div><strong>地址</strong><span class="source-address-text">${escapeHtml(source.address || "-")}</span></div>
+                        <div><strong>权重</strong><span>${escapeHtml(source.weight || 1)}</span></div>
+                        <div><strong>上次加载</strong><span>${formatSourceTime(health.last_fetch_at)} · ${health.last_fetch_count ?? 0} 条</span></div>
+                        <div><strong>上次测试</strong><span>${formatSourceTime(health.last_test_at)} · ${health.last_test_count ?? 0} 条</span></div>
+                        <div><strong>失败次数</strong><span>${health.failure_count ?? 0}</span></div>
+                    </div>
+                    ${(health.last_error || health.last_test_error) ? `<div class="source-card-error">${escapeHtml(health.last_error || health.last_test_error || "")}</div>` : ""}
+                    <div class="prompt-actions source-actions">
+                        <span id="sourceTestStatus${index}" class="source-test-status">${cachedPreview ? `最近测试提取 ${cachedPreview.count || 0} 条` : ""}</span>
+                        ${cachedPreview ? `<button class="admin-btn" data-action="open-source-preview" data-source-index="${index}">查看结果</button>` : ""}
+                        <button class="admin-btn" data-action="open-source-form" data-source-index="${index}">编辑</button>
+                        <button class="admin-btn" data-action="test-source" data-source-index="${index}">测试抓取</button>
+                        <button class="admin-btn danger" data-action="remove-source" data-source-index="${index}">删除</button>
+                    </div>
+                </div>
+            `;
+        }).join("");
+    }
+
+    async function waitForRestartAndReload() {
+        for (let i = 0; i < 30; i++) {
+            await new Promise((r) => setTimeout(r, 1000));
+            try {
+                const resp = await fetch("/api/admin/config", { method: "GET", cache: "no-store" });
+                if (resp.ok) {
+                    location.reload();
+                    return;
+                }
+            } catch (e) {}
+        }
+    }
+
+    async function saveConfig() {
+        const statusEl = document.getElementById("adminStatus");
+        setStatus(statusEl, "保存中...", "");
+        const advancedWrap = document.getElementById("advancedConfigWrap");
+        const configText = advancedWrap && !advancedWrap.classList.contains("is-hidden") ? getEditorValue() : syncAdvancedConfigFromForm();
+        try {
+            JSON.parse(configText);
+        } catch (e) {
+            setStatus(statusEl, "配置格式错误: " + e.message, "error");
+            return;
+        }
+        const resp = await fetch("/api/admin/config", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ yaml_text: configText })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            setStatus(statusEl, data.detail || "保存失败", "error");
+            return;
+        }
+        setStatus(statusEl, "保存成功，服务即将重启（请等待 2-5 秒后刷新）。", "ok");
+        setAppNameFromConfig();
+        waitForRestartAndReload();
+    }
+
+    async function saveSources(showStatus = true) {
+        const statusEl = document.getElementById("adminStatus");
+        if (showStatus) setStatus(statusEl, "保存新闻源中...", "");
+        const cleanSources = sources.map(normalizeSourceForSave);
+        if (cleanSources.some((item) => !item.name || !item.address)) {
+            setStatus(statusEl, "保存失败：新闻源名称和地址不能为空。", "error");
+            return false;
+        }
+
+        const resp = await fetch("/api/admin/news_sources/structured", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sources: cleanSources })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            setStatus(statusEl, data.detail || "保存失败", "error");
+            return false;
+        }
+        if (showStatus) setStatus(statusEl, "保存成功，配置已生效。", "ok");
+        await loadSources();
+        return true;
+    }
+
+    function setLogsHint(text) {
+        const el = document.getElementById("logsRetentionInfo");
+        if (el) el.textContent = text || "";
+    }
+
+    function getSelectedLogSource() {
+        const sel = document.getElementById("logSourceSelect");
+        return (sel?.value || "realtime").trim() || "realtime";
+    }
+
+    function updateLogsToolbarState() {
+        const clearBtn = document.getElementById("clearLogsBtn");
+        const source = getSelectedLogSource();
+        if (clearBtn) clearBtn.disabled = source !== "realtime";
+    }
+
+    async function refreshLogFiles(preserveSelection = true) {
+        const sel = document.getElementById("logSourceSelect");
+        if (!sel) return;
+
+        const prev = preserveSelection ? getSelectedLogSource() : "realtime";
+        const resp = await fetch("/api/admin/log_files", { method: "GET", cache: "no-store" });
+        const data = await resp.json().catch(() => ({}));
+
+        const files = Array.isArray(data.files) ? data.files : [];
+        const retentionDays = data.retention_days || 3;
+        setLogsHint("日志目录: logs｜保留天数: " + retentionDays);
+
+        sel.innerHTML = "";
+        const optRealtime = document.createElement("option");
+        optRealtime.value = "realtime";
+        optRealtime.textContent = "实时（内存）";
+        sel.appendChild(optRealtime);
+
+        files.forEach((f) => {
+            const name = (f && f.name) ? String(f.name) : "";
+            if (!name) return;
+            const opt = document.createElement("option");
+            opt.value = name;
+            opt.textContent = name;
+            sel.appendChild(opt);
+        });
+
+        const candidates = Array.from(sel.options).map(o => o.value);
+        if (candidates.includes(prev)) {
+            sel.value = prev;
+        } else if (files.length > 0) {
+            sel.value = String(files[0].name);
+        } else {
+            sel.value = "realtime";
+        }
+
+        updateLogsToolbarState();
+    }
+
+    async function fetchRealtimeLogs() {
+        const logEl = document.getElementById("logViewer");
+        if (!logEl) return;
+        const resp = await fetch("/api/admin/logs", { method: "GET", cache: "no-store" });
+        if (!resp.ok) {
+            logEl.textContent = "日志加载失败（可能未登录或服务异常）";
+            return;
+        }
+        const data = await resp.json().catch(() => ({}));
+        const raw = data.logs || "";
+
+        const newLines = raw ? raw.split(/\r?\n/).reverse() : [];
+
+        // 内容未变化时跳过渲染，避免日志面板闪烁。
+        if (fullLogLines.length > 0 && newLines.length === fullLogLines.length && newLines[0] === fullLogLines[0]) {
+            return;
+        }
+
+        fullLogLines = newLines;
+        renderLogs();
+    }
+
+    async function fetchLogFile(name) {
+        const logEl = document.getElementById("logViewer");
+        if (!logEl) return;
+        const url = "/api/admin/log_file?name=" + encodeURIComponent(name) + "&tail_lines=5000";
+        const resp = await fetch(url, { method: "GET", cache: "no-store" });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            logEl.textContent = data.detail || "日志加载失败（可能未登录或文件不存在）";
+            return;
+        }
+        const data = await resp.json().catch(() => ({}));
+        const raw = data.text || "";
+        const newLines = raw ? raw.split(/\r?\n/).reverse() : [];
+
+        renderedLimit = LOG_PAGE_SIZE;
+        fullLogLines = newLines;
+        renderLogs();
+
+        const retentionDays = data.retention_days || 3;
+        const total = data.total_lines || 0;
+        const returned = data.returned_lines || 0;
+        const truncated = !!data.truncated;
+        const suffix = truncated ? ("｜仅展示最后 " + returned + "/" + total + " 行") : ("｜共 " + total + " 行");
+        setLogsHint("日志目录: logs｜保留天数: " + retentionDays + "｜当前文件: " + (data.name || name) + suffix);
+    }
+
+    async function fetchLogsBySource() {
+        const source = getSelectedLogSource();
+        updateLogsToolbarState();
+        if (source === "realtime") {
+            await fetchRealtimeLogs();
+            return;
+        }
+        await fetchLogFile(source);
+    }
+
+    function renderLogs() {
+        const logEl = document.getElementById("logViewer");
+        if (!logEl) return;
+
+        // 判断用户是否停留在顶部查看最新日志。
+        const isAtTop = logEl.scrollTop < 50;
+
+        const slice = fullLogLines.slice(0, renderedLimit);
+        logEl.textContent = slice.join("\n");
+
+        // 若用户原本在顶部，保持顶部位置以便继续查看最新日志。
+        if (isAtTop) {
+            logEl.scrollTop = 0;
+        }
+    }
+
+    function onLogScroll() {
+        const logEl = document.getElementById("logViewer");
+        if (!logEl) return;
+
+        const { scrollTop, scrollHeight, clientHeight } = logEl;
+        // 滚动接近底部时继续加载更旧日志。
+        if (scrollTop + clientHeight >= scrollHeight - 50) {
+            if (renderedLimit < fullLogLines.length) {
+                renderedLimit += LOG_PAGE_SIZE;
+                // 追加旧日志后保留当前滚动上下文，减少视图跳动。
+                renderLogs();
+            }
+        }
+    }
+
+    async function clearLogs() {
+        if (getSelectedLogSource() !== "realtime") return;
+        const resp = await fetch("/api/admin/logs", { method: "DELETE" });
+        if (!resp.ok) return;
+        fullLogLines = [];
+        renderedLimit = LOG_PAGE_SIZE;
+        await fetchRealtimeLogs();
+    }
+
+    function setTab(tab) {
+        const statusEl = document.getElementById("adminStatus");
+        if (statusEl) setStatus(statusEl, "", "");
+
+        activeTab = tab;
+        const tabConfigBtn = document.getElementById("tabConfigBtn");
+        const tabSourcesBtn = document.getElementById("tabSourcesBtn");
+        const tabLogsBtn = document.getElementById("tabLogsBtn");
+        const tabPromptsBtn = document.getElementById("tabPromptsBtn");
+        const tabToolsBtn = document.getElementById("tabToolsBtn");
+
+        const panelConfig = document.getElementById("panelConfig");
+        const panelSources = document.getElementById("panelSources");
+        const panelLogs = document.getElementById("panelLogs");
+        const panelPrompts = document.getElementById("panelPrompts");
+        const panelTools = document.getElementById("panelTools");
+
+        if (tabConfigBtn) tabConfigBtn.classList.toggle("active", tab === "config");
+        if (tabSourcesBtn) tabSourcesBtn.classList.toggle("active", tab === "sources");
+        if (tabLogsBtn) tabLogsBtn.classList.toggle("active", tab === "logs");
+        if (tabPromptsBtn) tabPromptsBtn.classList.toggle("active", tab === "prompts");
+        if (tabToolsBtn) tabToolsBtn.classList.toggle("active", tab === "tools");
+
+        if (panelConfig) panelConfig.classList.toggle("active", tab === "config");
+        if (panelSources) panelSources.classList.toggle("active", tab === "sources");
+        if (panelLogs) panelLogs.classList.toggle("active", tab === "logs");
+        if (panelPrompts) panelPrompts.classList.toggle("active", tab === "prompts");
+        if (panelTools) panelTools.classList.toggle("active", tab === "tools");
+
+        if (logsTimer) {
+            clearInterval(logsTimer);
+            logsTimer = null;
+        }
+
+        if (tab === "logs") {
+            renderedLimit = LOG_PAGE_SIZE;
+            fullLogLines = [];
+            refreshLogFiles(false).then(async () => {
+                const source = getSelectedLogSource();
+                if (source === "realtime") {
+                    await fetchRealtimeLogs();
+                    logsTimer = setInterval(fetchRealtimeLogs, 1500);
+                } else {
+                    await fetchLogFile(source);
+                }
+            });
+        } else if (tab === "prompts") {
+            loadPrompts();
+        } else if (tab === "tools") {
+            loadAgentTools();
+        } else if (tab === "sources") {
+             loadSources();
+             // 延迟重算高度，等待面板 DOM 完成切换。
+             setTimeout(resizeEditors, 10);
+        } else {
+            // 配置页通常已经加载，只需要重算编辑器高度。
+            setTimeout(resizeEditors, 10);
+        }
+    }
+
+    async function logout() {
+        await fetch("/admin/logout", { method: "POST" });
+        location.reload();
+    }
+
+    // --- 提示词管理 ---
+    let allPrompts = {};
+    let activePromptGroup = "全部";
+
+    async function loadPrompts() {
+        const statusEl = document.getElementById("adminStatus");
+        setStatus(statusEl, "加载提示词中...", "");
+
+        const resp = await fetch("/api/system/prompts", { method: "GET" });
+        if (!resp.ok) {
+            setStatus(statusEl, "加载提示词失败", "error");
+            return;
+        }
+
+        const data = await resp.json();
+        allPrompts = data;
+        renderPromptGroups();
+        renderPrompts();
+        setStatus(statusEl, "提示词加载完成", "ok");
+    }
+
+    function renderPromptGroups() {
+        const groups = new Set(["全部"]);
+        Object.values(allPrompts).forEach(p => {
+            if (p.group) groups.add(p.group);
+            else groups.add("未分类");
+        });
+
+        const container = document.getElementById("promptsGroups");
+        if (!container) return;
+        container.innerHTML = "";
+
+        const sortedGroups = Array.from(groups).sort((a, b) => {
+             if (a === "全部") return -1;
+             if (b === "全部") return 1;
+             return a.localeCompare(b);
+        });
+
+        sortedGroups.forEach(g => {
+            const btn = document.createElement("div");
+            btn.className = "admin-subtab" + (g === activePromptGroup ? " active" : "");
+            btn.textContent = g;
+            btn.onclick = () => {
+                activePromptGroup = g;
+                renderPromptGroups(); // 重新渲染以更新当前分组样式。
+                renderPrompts();
+            };
+            container.appendChild(btn);
+        });
+    }
+
+    function renderPrompts() {
+        const grid = document.getElementById("promptsGrid");
+        if (!grid) return;
+        grid.innerHTML = "";
+
+        // 按键名排序，保持管理视图稳定。
+        const keys = Object.keys(allPrompts).sort();
+
+        keys.forEach(key => {
+            const item = allPrompts[key];
+            const itemGroup = item.group || "未分类";
+
+            if (activePromptGroup !== "全部" && itemGroup !== activePromptGroup) {
+                return;
+            }
+
+            const card = document.createElement("div");
+            card.className = "prompt-card";
+            card.innerHTML = `
+                <h4>${item.title || key} <span class="prompt-key">(${key})</span></h4>
+                <div class="prompt-group-name">${item.group || "未分类"}</div>
+                <p>${item.description || "暂无描述"}</p>
+                <div class="prompt-actions">
+                    <button class="admin-btn small" data-action="edit-prompt" data-prompt-key="${escapeHtml(key)}">编辑</button>
+                </div>
+            `;
+            grid.appendChild(card);
+        });
+    }
+
+    function editPrompt(key) {
+        const item = allPrompts[key];
+        if (!item) return;
+
+        document.getElementById("editPromptKey").value = key;
+        document.getElementById("editPromptTitle").value = item.title || "";
+        document.getElementById("editPromptDesc").textContent = item.description || "";
+        document.getElementById("editPromptSystem").value = item.system_prompt || "";
+        document.getElementById("editPromptUser").value = item.user_prompt || "";
+
+        document.getElementById("modalTitle").textContent = "编辑提示词 - " + (item.title || key);
+        document.getElementById("promptModal").classList.remove("is-hidden");
+    }
+
+    function closePromptModal() {
+        document.getElementById("promptModal").classList.add("is-hidden");
+    }
+
+    async function savePrompt() {
+        const key = document.getElementById("editPromptKey").value;
+        const systemPrompt = document.getElementById("editPromptSystem").value;
+        const userPrompt = document.getElementById("editPromptUser").value;
+
+        if (!key) return;
+
+        const statusEl = document.getElementById("adminStatus");
+        setStatus(statusEl, "保存提示词中...", "");
+
+        const payload = {
+            system_prompt: systemPrompt,
+            user_prompt: userPrompt
+        };
+
+        const resp = await fetch(`/api/system/prompts/${key}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            setStatus(statusEl, err.detail || "保存失败", "error");
+            alert("保存失败: " + (err.detail || "未知错误"));
+            return;
+        }
+
+        const resData = await resp.json();
+        // 更新本地缓存，避免保存后重新请求。
+        if (resData.data) {
+            allPrompts[key] = resData.data;
+        }
+
+        closePromptModal();
+        setStatus(statusEl, "提示词保存成功", "ok");
+    }
+
+    // --- 智能体工具管理 ---
+    async function loadAgentTools() {
+        const statusEl = document.getElementById("adminStatus");
+        setStatus(statusEl, "加载工具中...", "");
+        const resp = await fetch("/api/admin/agent_tools", { method: "GET", cache: "no-store" });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            setStatus(statusEl, data.detail || "工具加载失败", "error");
+            return;
+        }
+        agentToolsData = await resp.json();
+        renderAgentTools();
+        setStatus(statusEl, "工具加载完成，共 " + (agentToolsData.total || 0) + " 个。", "ok");
+    }
+
+    function getAllAgentTools() {
+        const builtin = Array.isArray(agentToolsData.builtin_tools) ? agentToolsData.builtin_tools : [];
+        const custom = Array.isArray(agentToolsData.custom_tools) ? agentToolsData.custom_tools : [];
+        return builtin.concat(custom);
+    }
+
+    function renderAgentTools() {
+        const grid = document.getElementById("agentToolsGrid");
+        if (!grid) return;
+        const tools = getAllAgentTools();
+        if (!tools.length) {
+            grid.innerHTML = '<div class="source-empty">暂无工具配置。</div>';
+            return;
+        }
+        grid.innerHTML = tools.map((tool) => renderAgentToolCard(tool)).join("");
+    }
+
+    function renderAgentToolCard(tool) {
+        const name = String(tool.name || "");
+        const safeName = escapeHtml(name);
+        const params = tool.parameters && typeof tool.parameters === "object" ? tool.parameters : {};
+        const paramText = Object.keys(params).length ? Object.keys(params).join("、") : "无参数";
+        const kind = tool.kind === "custom" ? "自定义" : "内置";
+        const safeToTest = tool.safe_to_test !== false;
+        const executor = tool.executor && typeof tool.executor === "object" ? tool.executor : {};
+        const executorText = tool.kind === "custom"
+            ? `执行器：${executor.type ? escapeHtml(String(executor.type).toUpperCase()) : "未配置"}`
+            : "";
+        return `
+            <div class="prompt-card tool-card">
+                <h4>${escapeHtml(tool.title || name)} <span class="prompt-key">(${safeName})</span></h4>
+                <div class="prompt-group-name">${kind}工具 · ${tool.enabled === false ? "停用" : "启用"}</div>
+                <p>${escapeHtml(tool.description || "暂无描述")}</p>
+                <div class="tool-param-line">参数：${escapeHtml(paramText)}</div>
+                ${executorText ? `<div class="tool-param-line">${executorText}</div>` : ""}
+                <div class="prompt-actions">
+                    <button class="admin-btn small" data-action="open-agent-tool-test" data-tool-name="${safeName}">${safeToTest ? "测试" : "查看"}</button>
+                    ${tool.kind === "custom" ? `<button class="admin-btn small" data-action="open-agent-tool-modal" data-tool-name="${safeName}">编辑</button><button class="admin-btn danger small" data-action="delete-agent-tool" data-tool-name="${safeName}">删除</button>` : ""}
+                </div>
+            </div>
+        `;
+    }
+
+    function getAgentToolByName(name) {
+        return getAllAgentTools().find((item) => item.name === name);
+    }
+
+    function buildDefaultToolArgs(tool) {
+        const args = {};
+        const params = tool && tool.parameters && typeof tool.parameters === "object" ? tool.parameters : {};
+        Object.entries(params).forEach(([key, meta]) => {
+            if (meta && typeof meta === "object" && "default" in meta) args[key] = meta.default;
+        });
+        if (tool?.name === "search_news" && !args.q) args.q = "热点";
+        if (tool?.name === "get_news_detail" && !args.news_id) args.news_id = 1;
+        if (tool?.name === "get_topic_detail" && !args.topic_id) args.topic_id = 1;
+        if (tool?.name === "get_term_analysis" && !args.term) args.term = "中国";
+        if (tool?.name === "web_search" && !args.q) args.q = "TrendSonar 新闻";
+        if (tool?.name === "web_crawl_page" && !args.url) args.url = "https://example.com";
+        if (tool?.name === "generate_news_image") {
+            if (!args.title) args.title = "TrendSonar 新闻图片";
+            if (!args.body) args.body = "这里是一段用于测试图片生成工具的新闻摘要。";
+        }
+        return args;
+    }
+
+    function openAgentToolTest(name) {
+        const tool = getAgentToolByName(name);
+        const output = document.getElementById("agentToolTestOutput");
+        if (!tool || !output) return;
+        const args = agentToolTestArgs[name] || buildDefaultToolArgs(tool);
+        agentToolTestArgs[name] = args;
+        output.classList.remove("is-hidden");
+        output.innerHTML = `
+            <div class="tool-test-head">
+                <strong>${escapeHtml(tool.title || name)}</strong>
+                <span>${escapeHtml(name)}</span>
+            </div>
+            <textarea id="agentToolTestArgs" class="admin-textarea" rows="8">${escapeHtml(JSON.stringify(args, null, 2))}</textarea>
+            <div class="tool-test-actions">
+                <button class="admin-btn primary" data-action="run-agent-tool-test" data-tool-name="${escapeHtml(name)}">${tool.safe_to_test === false ? "查看限制" : "运行测试"}</button>
+            </div>
+            <pre id="agentToolTestResult" class="tool-test-result"></pre>
+        `;
+        output.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    async function runAgentToolTest(name) {
+        const resultEl = document.getElementById("agentToolTestResult");
+        const argsEl = document.getElementById("agentToolTestArgs");
+        if (!resultEl || !argsEl) return;
+        let args = {};
+        try {
+            args = JSON.parse(argsEl.value || "{}");
+        } catch (e) {
+            resultEl.textContent = "参数不是合法 JSON: " + e.message;
+            return;
+        }
+        agentToolTestArgs[name] = args;
+        resultEl.textContent = "测试中...";
+        const resp = await fetch("/api/admin/agent_tools/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, args })
+        });
+        const data = await resp.json().catch(() => ({}));
+        resultEl.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function openAgentToolModal(name = "") {
+        const tool = name ? getAgentToolByName(name) : null;
+        document.getElementById("agentToolModalTitle").textContent = tool ? "编辑工具" : "新增工具";
+        document.getElementById("agentToolName").value = tool?.name || "";
+        document.getElementById("agentToolName").readOnly = !!tool;
+        document.getElementById("agentToolTitle").value = tool?.title || "";
+        document.getElementById("agentToolDescription").value = tool?.description || "";
+        document.getElementById("agentToolParameters").value = JSON.stringify(tool?.parameters || {}, null, 2);
+        document.getElementById("agentToolExecutor").value = JSON.stringify(tool?.executor || {}, null, 2);
+        document.getElementById("agentToolPromptHint").value = tool?.prompt_hint || "";
+        document.getElementById("agentToolEnabled").checked = tool?.enabled !== false;
+        updateAgentToolExamplePanel(!tool);
+        document.getElementById("agentToolModal").classList.remove("is-hidden");
+    }
+
+    function updateAgentToolExamplePanel(visible) {
+        const panel = document.getElementById("agentToolExamplePanel");
+        const code = document.getElementById("agentToolExampleCode");
+        if (!panel || !code) return;
+        panel.classList.toggle("is-hidden", !visible);
+        code.textContent = JSON.stringify({
+            ...AGENT_TOOL_EXAMPLES.searxng,
+            enabled: true
+        }, null, 2);
+    }
+
+    function fillAgentToolExample(key) {
+        const example = AGENT_TOOL_EXAMPLES[key];
+        if (!example) return;
+        document.getElementById("agentToolName").value = example.name;
+        document.getElementById("agentToolTitle").value = example.title;
+        document.getElementById("agentToolDescription").value = example.description;
+        document.getElementById("agentToolParameters").value = JSON.stringify(example.parameters, null, 2);
+        document.getElementById("agentToolExecutor").value = JSON.stringify(example.executor, null, 2);
+        document.getElementById("agentToolPromptHint").value = example.prompt_hint;
+        document.getElementById("agentToolEnabled").checked = true;
+    }
+
+    function closeAgentToolModal() {
+        const modal = document.getElementById("agentToolModal");
+        if (modal) modal.classList.add("is-hidden");
+    }
+
+    async function saveAgentTool() {
+        const statusEl = document.getElementById("adminStatus");
+        let parameters = {};
+        let executor = {};
+        try {
+            parameters = JSON.parse(document.getElementById("agentToolParameters")?.value || "{}");
+        } catch (e) {
+            alert("参数 JSON 不合法: " + e.message);
+            return;
+        }
+        try {
+            executor = JSON.parse(document.getElementById("agentToolExecutor")?.value || "{}");
+        } catch (e) {
+            alert("执行器 JSON 不合法: " + e.message);
+            return;
+        }
+        const payload = {
+            name: document.getElementById("agentToolName")?.value || "",
+            title: document.getElementById("agentToolTitle")?.value || "",
+            description: document.getElementById("agentToolDescription")?.value || "",
+            parameters,
+            executor,
+            prompt_hint: document.getElementById("agentToolPromptHint")?.value || "",
+            enabled: !!document.getElementById("agentToolEnabled")?.checked,
+        };
+        setStatus(statusEl, "保存工具中...", "");
+        const resp = await fetch("/api/admin/agent_tools/custom", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            setStatus(statusEl, data.detail || "工具保存失败", "error");
+            return;
+        }
+        closeAgentToolModal();
+        setStatus(statusEl, "工具已保存", "ok");
+        await loadAgentTools();
+    }
+
+    async function deleteAgentTool(name) {
+        if (!confirm("确定删除这个自定义工具吗？")) return;
+        const statusEl = document.getElementById("adminStatus");
+        const resp = await fetch("/api/admin/agent_tools/custom/" + encodeURIComponent(name), { method: "DELETE" });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            setStatus(statusEl, data.detail || "删除失败", "error");
+            return;
+        }
+        setStatus(statusEl, "工具已删除", "ok");
+        await loadAgentTools();
+    }
+
+    async function openAgentPromptEditor() {
+        if (!Object.keys(allPrompts || {}).length) {
+            await loadPrompts();
+        }
+        if (allPrompts.agent_system) {
+            editPrompt("agent_system");
+            return;
+        }
+        setStatus(document.getElementById("adminStatus"), "未找到 agent_system 提示词，请检查默认提示词配置。", "error");
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+        if (!authed) {
+            document.getElementById("adminLoginBtn")?.addEventListener("click", doLogin);
+            document.getElementById("adminPassword")?.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") doLogin();
+            });
+            return;
+        }
+        document.getElementById("reloadConfigBtn")?.addEventListener("click", loadConfig);
+        document.getElementById("toggleAdvancedConfigBtn")?.addEventListener("click", toggleAdvancedConfig);
+        document.getElementById("saveConfigBtn")?.addEventListener("click", saveConfig);
+        document.getElementById("logoutBtn")?.addEventListener("click", logout);
+
+        document.getElementById("tabConfigBtn")?.addEventListener("click", () => setTab("config"));
+        document.getElementById("tabSourcesBtn")?.addEventListener("click", () => setTab("sources"));
+        document.getElementById("tabLogsBtn")?.addEventListener("click", () => setTab("logs"));
+        document.getElementById("tabPromptsBtn")?.addEventListener("click", () => setTab("prompts"));
+        document.getElementById("tabToolsBtn")?.addEventListener("click", () => setTab("tools"));
+
+        document.getElementById("refreshPromptsBtn")?.addEventListener("click", loadPrompts);
+        document.getElementById("refreshAgentToolsBtn")?.addEventListener("click", loadAgentTools);
+        document.getElementById("addAgentToolBtn")?.addEventListener("click", () => openAgentToolModal());
+        document.getElementById("editAgentPromptBtn")?.addEventListener("click", openAgentPromptEditor);
+
+        document.getElementById("refreshLogsBtn")?.addEventListener("click", async () => {
+            await refreshLogFiles(true);
+            await fetchLogsBySource();
+        });
+        document.getElementById("clearLogsBtn")?.addEventListener("click", clearLogs);
+        document.getElementById("logSourceSelect")?.addEventListener("change", async () => {
+            if (logsTimer) {
+                clearInterval(logsTimer);
+                logsTimer = null;
+            }
+            renderedLimit = LOG_PAGE_SIZE;
+            fullLogLines = [];
+            const source = getSelectedLogSource();
+            if (source === "realtime") {
+                await fetchRealtimeLogs();
+                logsTimer = setInterval(fetchRealtimeLogs, 1500);
+            } else {
+                await fetchLogFile(source);
+            }
+            updateLogsToolbarState();
+        });
+
+        document.getElementById("reloadSourcesBtn")?.addEventListener("click", loadSources);
+        document.getElementById("addSourceBtn")?.addEventListener("click", addSource);
+        document.getElementById("closePromptModalBtn")?.addEventListener("click", closePromptModal);
+        document.getElementById("cancelPromptBtn")?.addEventListener("click", closePromptModal);
+        document.getElementById("savePromptBtn")?.addEventListener("click", savePrompt);
+        document.getElementById("closeSourceFormModalBtn")?.addEventListener("click", closeSourceFormModal);
+        document.getElementById("cancelSourceFormBtn")?.addEventListener("click", closeSourceFormModal);
+        document.getElementById("saveSourceFormBtn")?.addEventListener("click", saveSourceForm);
+        document.getElementById("closeSourcePreviewModalBtn")?.addEventListener("click", closeSourcePreviewModal);
+        document.getElementById("closeSourcePreviewFooterBtn")?.addEventListener("click", closeSourcePreviewModal);
+        document.getElementById("closeAgentToolModalBtn")?.addEventListener("click", closeAgentToolModal);
+        document.getElementById("cancelAgentToolBtn")?.addEventListener("click", closeAgentToolModal);
+        document.getElementById("saveAgentToolBtn")?.addEventListener("click", saveAgentTool);
+        document.getElementById("fillSearxngExampleBtn")?.addEventListener("click", () => fillAgentToolExample("searxng"));
+
+        const logViewer = document.getElementById("logViewer");
+        if (logViewer) logViewer.addEventListener("scroll", onLogScroll);
+
+        document.addEventListener("click", (event) => {
+            const actionEl = event.target.closest("[data-action]");
+            if (!actionEl) return;
+            const action = actionEl.dataset.action;
+            if (action === "edit-prompt") {
+                editPrompt(actionEl.dataset.promptKey || "");
+                return;
+            }
+            if (action === "open-source-preview") {
+                openSourcePreviewModal(Number(actionEl.dataset.sourceIndex || 0));
+                return;
+            }
+            if (action === "open-source-form") {
+                openSourceFormModal(Number(actionEl.dataset.sourceIndex || 0));
+                return;
+            }
+            if (action === "test-source") {
+                testSource(Number(actionEl.dataset.sourceIndex || 0));
+                return;
+            }
+            if (action === "remove-source") {
+                removeSource(Number(actionEl.dataset.sourceIndex || 0));
+                return;
+            }
+            if (action === "test-source-content") {
+                testSourceContent(Number(actionEl.dataset.sourceIndex || 0), Number(actionEl.dataset.previewIndex || 0));
+                return;
+            }
+            if (action === "open-agent-tool-test") {
+                openAgentToolTest(actionEl.dataset.toolName || "");
+                return;
+            }
+            if (action === "open-agent-tool-modal") {
+                openAgentToolModal(actionEl.dataset.toolName || "");
+                return;
+            }
+            if (action === "delete-agent-tool") {
+                deleteAgentTool(actionEl.dataset.toolName || "");
+                return;
+            }
+            if (action === "run-agent-tool-test") {
+                runAgentToolTest(actionEl.dataset.toolName || "");
+                return;
+            }
+            if (action === "test-ai-model") {
+                testAIModel(actionEl.dataset.testKind || "");
+            }
+        });
+
+        document.addEventListener("change", (event) => {
+            const actionEl = event.target.closest("[data-action]");
+            if (!actionEl) return;
+            if (actionEl.dataset.action === "toggle-source-enabled") {
+                const index = Number(actionEl.dataset.sourceIndex || 0);
+                updateSourceField(index, "enabled", !!actionEl.checked);
+                renderSources();
+            }
+        });
+
+        window.addEventListener("resize", resizeEditors);
+        initCodeEditor();
+        loadConfig();
+    });

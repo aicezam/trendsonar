@@ -235,7 +235,7 @@
             const time = item.time ? new Date(item.time).toLocaleString("zh-CN") : "-";
             const itemId = Number(item.id || 0);
             const titleHtml = itemId > 0
-                ? `<button class="detail-inline-link" type="button" onclick="openNewsDetail(${itemId}, { replace: true })">${escapeHtml(item.title || "(无标题)")}</button>`
+                ? `<button class="detail-inline-link" type="button" data-action="open-news-detail" data-news-id="${itemId}" data-replace="true">${escapeHtml(item.title || "(无标题)")}</button>`
                 : `<a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title || "(无标题)")}</a>`;
             return `
                 <div class="detail-list-item">
@@ -294,7 +294,7 @@
             <div class="detail-section">
                 <div class="detail-section-title">
                     <span>新闻摘要</span>
-                    <button class="btn-link" onclick="genSummary(${Number(news.id || 0)})">重新生成</button>
+                    <button class="btn-link" data-action="generate-summary" data-news-id="${Number(news.id || 0)}">重新生成</button>
                 </div>
                 <div class="detail-summary markdown-body" id="summary-${Number(news.id || 0)}">${summary}</div>
             </div>
@@ -324,6 +324,12 @@
                 if (state.graph && state.graph.hasNode(term)) selectNode(term);
                 else expandNode(term).then(() => selectNode(term));
             });
+        });
+        els.detailBody.querySelectorAll('[data-action="open-news-detail"]').forEach((el) => {
+            el.addEventListener("click", () => openNewsDetail(Number(el.dataset.newsId || 0), { replace: el.dataset.replace === "true" }));
+        });
+        els.detailBody.querySelectorAll('[data-action="generate-summary"]').forEach((el) => {
+            el.addEventListener("click", () => genSummary(Number(el.dataset.newsId || 0)));
         });
     }
 

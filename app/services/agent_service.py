@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 from uuid import uuid4
 
 from pydantic_ai import Agent, RunContext
@@ -62,6 +62,42 @@ LIST_QUERY_HINTS = ("哪些", "有哪些", "列出", "整理", "汇总", "名单
 SUPPLEMENT_SKIP_QUERY_HINTS = ("为什么", "为何", "原因", "解释", "分析", "没查到", "没有查到", "查不到", "搜不到", "没搜到", "为什么没有")
 TOP_REFERENCE_AUDIT_WINDOW = 5
 MAX_SUPPLEMENT_REFERENCES = 2
+
+
+def _parse_news_ids(value: Optional[Union[List[int], str]]) -> Optional[List[int]]:
+    """
+    输入:
+    - `value`: 新闻 ID 列表，或模型误传的 JSON 字符串列表
+
+    输出:
+    - 清洗后的新闻 ID 整数列表；无法解析时返回 None
+
+    作用:
+    - 兼容模型把 `[1, 2, 3]` 作为字符串传入的情况，避免工具参数校验失败。
+    """
+
+    if value is None:
+        return None
+
+    parsed: Any = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+
+    if not isinstance(parsed, list):
+        return None
+
+    news_ids: List[int] = []
+    for item in parsed:
+        try:
+            news_id = int(item)
+        except (TypeError, ValueError):
+            continue
+        news_ids.append(news_id)
+
+    return news_ids
 
 
 @dataclass
@@ -285,9 +321,9 @@ class AgentService:
         async def get_news_detail(
             ctx: RunContext[AgentDeps],
             news_id: int = 0,
-            news_ids: Optional[List[int]] = None,
+            news_ids: Optional[Union[List[int], str]] = None,
         ) -> Dict[str, Any]:
-            return await agent_tool_service.get_news_detail(news_id=news_id, news_ids=news_ids)
+            return await agent_tool_service.get_news_detail(news_id=news_id, news_ids=_parse_news_ids(news_ids))
 
         @agent.tool(description="查询已有活跃专题。创建专题前必须先用这个能力或 create_event_topic 的查重能力确认是否已存在。")
         async def list_topics(

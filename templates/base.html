@@ -18,7 +18,7 @@
             } catch (e) {}
         })();
     </script>
-    <link rel="stylesheet" href="/static/style.css?version=v0.1.8.6">
+    <link rel="stylesheet" href="/static/css/base.css?version=v0.1.8.6">
     {% block head %}{% endblock %}
 </head>
 <body class="page page-{{ active_page or 'index' }} {% block body_class %}{% endblock %}">
@@ -69,71 +69,6 @@
 
     {% block content %}{% endblock %}
     {% block scripts %}{% endblock %}
-    <script>
-        // 全局图片错误处理，避免坏图占据新闻卡片空间。
-        window.addEventListener('error', function(e) {
-            if (e.target && e.target.tagName === 'IMG') {
-                if (e.target.dataset.failed) return;
-                e.target.dataset.failed = true;
-                
-                e.target.style.display = 'none';
-            }
-        }, true);
-
-        (function () {
-            try {
-                const key = "ts_theme";
-                const btn = document.getElementById("themeToggle");
-                if (!btn) return;
-
-                function setLabel(theme) {
-                    const isDark = theme === "dark";
-                    btn.innerHTML = isDark
-                        ? '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="2"/><path d="M12 2.8v2.1M12 19.1v2.1M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2.8 12h2.1M19.1 12h2.1M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
-                        : '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" aria-hidden="true"><path d="M20.2 14.8A7.2 7.2 0 0 1 9.2 3.8 8.7 8.7 0 1 0 20.2 14.8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
-                    btn.setAttribute("aria-label", theme === "dark" ? "切换为浅色模式" : "切换为深色模式");
-                    btn.setAttribute("title", btn.getAttribute("aria-label") || "");
-                }
-
-                function getCurrentTheme() {
-                    const t = (document.documentElement.dataset.theme || "").trim();
-                    if (t === "dark" || t === "light") return t;
-                    const prefersDark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
-                    return prefersDark ? "dark" : "light";
-                }
-
-                setLabel(getCurrentTheme());
-                btn.addEventListener("click", () => {
-                    const cur = getCurrentTheme();
-                    const next = cur === "dark" ? "light" : "dark";
-                    document.documentElement.dataset.theme = next;
-                    try { localStorage.setItem(key, next); } catch (e) {}
-                    setLabel(next);
-                });
-            } catch (e) {}
-        })();
-
-        async function refreshAppName() {
-            try {
-                const resp = await fetch("/api/app_info", { method: "GET", cache: "no-store" });
-                if (!resp.ok) return;
-                const data = await resp.json().catch(() => ({}));
-                const newName = (data.app_name || "").trim();
-                if (!newName) return;
-
-                const logoText = document.querySelector(".logo span:last-child");
-                if (logoText && logoText.textContent !== newName) logoText.textContent = newName;
-
-                const idx = document.title.indexOf(" - ");
-                if (idx >= 0) {
-                    const suffix = document.title.slice(idx);
-                    document.title = newName + suffix;
-                } else {
-                    document.title = newName;
-                }
-            } catch (e) {}
-        }
-        refreshAppName();
-    </script>
+    <script src="/static/js/base.js"></script>
 </body>
 </html>
