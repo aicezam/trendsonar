@@ -3,6 +3,9 @@ const topicsPageDataEl = document.getElementById("page-data");
 const topicsPageData = topicsPageDataEl ? JSON.parse(topicsPageDataEl.textContent || "{}") : {};
 const IS_ADMIN = !!topicsPageData.isAdmin;
 const TOPIC_FALLBACK_CATEGORIES = topicsPageData.newsCategories || [];
+const topicDefaults = (topicsPageData.uiDefaults && topicsPageData.uiDefaults.TOPICS) || {};
+const DEFAULT_TOPIC_TIME_RANGE = topicDefaults.TIME_RANGE || "all";
+const DEFAULT_TOPIC_SORT_BY = topicDefaults.SORT_BY || "updated";
     const TIME_OPTIONS = [
         { label: "全部时间", value: "all" },
         { label: "今日", value: "today" },
@@ -17,8 +20,8 @@ const TOPIC_FALLBACK_CATEGORIES = topicsPageData.newsCategories || [];
     const state = {
         filter: {
             q: "",
-            sortBy: "updated",
-            dateOption: "all",
+            sortBy: DEFAULT_TOPIC_SORT_BY,
+            dateOption: DEFAULT_TOPIC_TIME_RANGE,
             startDate: "",
             endDate: "",
             minHeat: "0",
@@ -228,8 +231,8 @@ const TOPIC_FALLBACK_CATEGORIES = topicsPageData.newsCategories || [];
     function resetFilters() {
         state.filter = {
             q: "",
-            sortBy: "updated",
-            dateOption: "all",
+            sortBy: DEFAULT_TOPIC_SORT_BY,
+            dateOption: DEFAULT_TOPIC_TIME_RANGE,
             startDate: "",
             endDate: "",
             minHeat: "0",

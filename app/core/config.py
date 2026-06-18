@@ -104,10 +104,23 @@ class Settings(BaseSettings):
     FOLLOW_KEYWORDS_THRESHOLD: float = 0.65
 
     NEWS_CATEGORIES: List[str] = ["时政军事", "财经商业", "科技科学", "社会民生", "文娱体育"]
+    NEWS_CATEGORY_DESCRIPTIONS: Dict[str, str] = {
+        "时政军事": "国家政策、政务动态、外交关系、国际局势、军事安全、战争冲突、国防军工、公共治理等新闻。",
+        "财经商业": "宏观经济、金融市场、产业政策、企业经营、消费市场、投资融资、贸易供应链、房地产等新闻。",
+        "科技科学": "人工智能、互联网、芯片半导体、通信、航天、生物医药、新能源、科研成果、数字产品等新闻。",
+        "社会民生": "教育、医疗、就业、住房、交通、公共安全、灾害事故、法律案件、社会治理、民生服务等新闻。",
+        "文娱体育": "影视音乐、游戏动漫、明星艺人、文化活动、旅游休闲、体育赛事、运动员、娱乐产业等新闻。",
+    }
 
     ADMIN_PASSWORD: Optional[str] = None
 
     IGNORED_DOMAINS: List[str] = []
+
+    UI_DEFAULTS: Dict[str, Dict[str, str]] = {
+        "INDEX": {"TIME_RANGE": "today", "SORT_BY": "heat"},
+        "TOPICS": {"TIME_RANGE": "all", "SORT_BY": "updated"},
+        "GRAPH": {"TIME_RANGE": "24h", "SORT_BY": "heat"},
+    }
 
     TOPIC_LOOKBACK_DAYS: int = 3
     TOPIC_AGGREGATION_TOP_N: int = 300

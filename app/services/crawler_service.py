@@ -806,6 +806,46 @@ class CrawlerService:
         if skipped_by_title > 0:
             logger.debug(f"   🚫 因标题和来源重复跳过 {skipped_by_title} 条")
 
+        if follow_keywords and final_list:
+            analysis_items = [
+                {
+                    "id": idx,
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary") or item.get("content") or "",
+                }
+                for idx, item in enumerate(final_list)
+            ]
+            try:
+                logger.info(f"🧠 开始 AI 关注范围过滤 (待判断: {len(final_list)} 条)")
+                analysis_results = await ai_service.batch_analyze_sentiment(
+                    analysis_items,
+                    follow_keywords=follow_keywords,
+                )
+                if analysis_results:
+                    filtered_list = []
+                    skipped_by_ai = 0
+                    for idx, item in enumerate(final_list):
+                        result = analysis_results.get(idx)
+                        if result and result.get("follow_match") is False:
+                            skipped_by_ai += 1
+                            continue
+                        if result:
+                            item["sentiment_label"] = result.get("label", item.get("sentiment_label", "中立"))
+                            item["sentiment_score"] = result.get("score", item.get("sentiment_score", 50.0))
+                            item["category"] = result.get("category", item.get("category", "其他"))
+                            item["region"] = result.get("region", item.get("region", "全球"))
+                            item["keywords"] = result.get("keywords", item.get("keywords", []))
+                            item["entities"] = result.get("entities", item.get("entities", []))
+                        filtered_list.append(item)
+                    final_list = filtered_list
+                    logger.info(f"✅ AI 关注范围过滤完成: 跳过 {skipped_by_ai} 条，保留 {len(final_list)} 条")
+                else:
+                    logger.warning("⚠️ AI 关注范围过滤未返回结果，保留向量过滤后的候选新闻")
+            except AIServiceUnavailableError:
+                raise
+            except Exception as e:
+                logger.error(f"❌ AI 关注范围过滤异常，保留候选新闻: {e}")
+
         async with AsyncSessionLocal() as db:
             count = 0
             for item in final_list:
@@ -820,6 +860,8 @@ class CrawlerService:
                     sources=[{"name": item["source"], "url": item.get("original_url", item["url"])}],
                     sentiment_score=item.get("sentiment_score", 50.0),
                     sentiment_label=item.get("sentiment_label", "中立"),
+                    category=item.get("category", "其他"),
+                    region=item.get("region", "全球"),
                     keywords=item.get("keywords", []),
                     entities=item.get("entities", []),
                 )

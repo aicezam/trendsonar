@@ -638,6 +638,79 @@ class AIService:
                 return cat
         return "其他"
 
+    def _format_category_options(self) -> str:
+        """
+        输入:
+        - 运行时配置中的新闻分类与分类描述
+
+        输出:
+        - 供提示词使用的分类名称与说明文本
+
+        作用:
+        - 在不改变数据库分类字段的前提下，为 AI 分类提供更精细的判定依据
+        """
+
+        descriptions = settings.NEWS_CATEGORY_DESCRIPTIONS or {}
+        lines = []
+        for category in settings.NEWS_CATEGORIES:
+            description = descriptions.get(category)
+            if description:
+                lines.append(f"{category}：{description}")
+            else:
+                lines.append(category)
+        return "\n".join(lines)
+
+    def _parse_bool_value(self, value: Any, default: bool = True) -> bool:
+        """
+        输入:
+        - `value`: AI 返回的布尔类字段
+        - `default`: 无法判断时的默认值
+
+        输出:
+        - 标准布尔值
+
+        作用:
+        - 兼容模型输出 true/false、是/否、1/0 等不同写法
+        """
+
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in {"true", "1", "yes", "y", "是", "符合", "匹配", "相关"}:
+            return True
+        if text in {"false", "0", "no", "n", "否", "不符合", "不匹配", "无关"}:
+            return False
+        return default
+
+    def _append_follow_keywords_instruction(self, system_prompt: str, follow_keywords: str = "") -> str:
+        """
+        输入:
+        - `system_prompt`: 原始情感分析系统提示词
+        - `follow_keywords`: 用户配置的关注关键词
+
+        输出:
+        - 附加关注范围判断要求后的提示词
+
+        作用:
+        - 在情感分析同一次调用中判断新闻是否属于用户关注范围
+        """
+
+        keywords = [item.strip() for item in (follow_keywords or "").split(",") if item.strip()]
+        if not keywords:
+            return system_prompt
+        keywords_text = "、".join(keywords)
+        return (
+            f"{system_prompt}\n\n"
+            "关注范围额外判断：\n"
+            f"- 用户配置的 FOLLOW_KEYWORDS 为：{keywords_text}\n"
+            "- 请判断每条新闻的核心事件是否与上述关注范围语义一致。\n"
+            "- 只有新闻主要讨论这些关键词对应的行业、主题、机构、产品、政策或事件时，follow_match 才返回 true。\n"
+            "- 只是偶然提到关键词、广告、无实际关联、主体不相关或主题明显偏离时，follow_match 返回 false。\n"
+            "- 输出 JSON 必须额外包含布尔字段 follow_match。"
+        )
+
     async def analyze_sentiment(self, title: str, content: str = "") -> Dict:
         """
         输入:
@@ -651,7 +724,7 @@ class AIService:
         - 对单条新闻进行深度舆情分析，主通道失败时降级到备用通道
         """
 
-        categories_str = "、".join(settings.NEWS_CATEGORIES)
+        categories_str = self._format_category_options()
         system_prompt = prompt_manager.get_system_prompt("sentiment_analysis_single", categories_str=categories_str)
         user_prompt = prompt_manager.get_user_prompt("sentiment_analysis_single", title=title, content=content[:1000])
 
@@ -693,27 +766,35 @@ class AIService:
             "entities": [],
         }
 
-    async def batch_analyze_sentiment(self, news_items: List[Dict]) -> Dict[int, Dict]:
+    async def batch_analyze_sentiment(self, news_items: List[Dict], follow_keywords: str = "") -> Dict[int, Dict]:
         """
         输入:
         - `news_items`: 待分析新闻列表（至少包含 id/title）
+        - `follow_keywords`: 关注关键词；不为空时额外返回 follow_match
 
         输出:
         - `id -> 分析结果` 的映射
 
         作用:
         - 对多条新闻进行批量快速分析，用于提升吞吐与降低成本
+        - 可在同一次分析中判断新闻是否符合关注关键词范围
         """
 
         if not news_items:
             return {}
 
-        categories_str = "、".join(settings.NEWS_CATEGORIES)
+        categories_str = self._format_category_options()
         system_prompt = prompt_manager.get_system_prompt("sentiment_analysis_batch", categories_str=categories_str)
+        system_prompt = self._append_follow_keywords_instruction(system_prompt, follow_keywords)
 
         items_text = ""
         for item in news_items:
-            items_text += f"[ID:{item['id']}] {item['title']}\n"
+            title = str(item.get("title") or "").strip()
+            summary = str(item.get("summary") or item.get("content") or "").strip()
+            items_text += f"[ID:{item['id']}] {title}"
+            if summary:
+                items_text += f"\n摘要：{summary[:300]}"
+            items_text += "\n"
         user_prompt = prompt_manager.get_user_prompt("sentiment_analysis_batch", items_text=items_text)
 
         res = await self._call_llm_with_routes(
@@ -742,10 +823,16 @@ class AIService:
             if isinstance(results_list, list):
                 for item in results_list:
                     if "id" in item:
+                        try:
+                            item_id = int(item["id"])
+                        except (TypeError, ValueError):
+                            continue
                         if "category" in item:
                             item["category"] = self._normalize_category(item["category"])
                         item["region"] = normalize_regions_to_countries(item.get("region"))
-                        result_map[item["id"]] = item
+                        if follow_keywords:
+                            item["follow_match"] = self._parse_bool_value(item.get("follow_match"), default=True)
+                        result_map[item_id] = item
             return result_map
 
         except AIConfigurationError:

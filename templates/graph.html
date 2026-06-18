@@ -132,6 +132,7 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script id="page-data" type="application/json">{{ {"uiDefaults": ui_defaults | default(settings.UI_DEFAULTS, true)} | tojson }}</script>
 <script src="/static/marked.min.js"></script>
-<script src="/static/js/pages/graph.js?version=v0.6.0"></script>
+<script src="/static/js/pages/graph.js?version=v0.6.1"></script>
 {% endblock %}

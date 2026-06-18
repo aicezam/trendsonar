@@ -255,10 +255,23 @@ const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent |
         },
         {
             title: "列表配置",
-            desc: "新闻分类与忽略域名。",
+            desc: "新闻分类、分类说明与忽略域名。",
             fields: [
                 { key: "NEWS_CATEGORIES", label: "新闻分类", type: "list", wide: true },
+                { key: "NEWS_CATEGORY_DESCRIPTIONS", label: "新闻分类说明", type: "objectMap", wide: true },
                 { key: "IGNORED_DOMAINS", label: "忽略域名", type: "list", wide: true },
+            ]
+        },
+        {
+            title: "页面默认筛选",
+            desc: "配置首页、专题、图谱打开时默认使用的时间范围和排序方式。",
+            fields: [
+                { key: "UI_DEFAULTS.INDEX.TIME_RANGE", label: "首页默认时间", type: "select", options: ["today", "24h", "3d", "7d", "week", "month", "year", "all"] },
+                { key: "UI_DEFAULTS.INDEX.SORT_BY", label: "首页默认排序", type: "select", options: ["heat", "date"] },
+                { key: "UI_DEFAULTS.TOPICS.TIME_RANGE", label: "专题默认时间", type: "select", options: ["today", "24h", "3d", "7d", "week", "month", "year", "all"] },
+                { key: "UI_DEFAULTS.TOPICS.SORT_BY", label: "专题默认排序", type: "select", options: ["updated", "heat"] },
+                { key: "UI_DEFAULTS.GRAPH.TIME_RANGE", label: "图谱默认时间", type: "select", options: ["24h", "7d", "30d", "year", "all"] },
+                { key: "UI_DEFAULTS.GRAPH.SORT_BY", label: "图谱默认排序", type: "select", options: ["heat", "date"] },
             ]
         },
         {
@@ -300,6 +313,13 @@ const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent |
         CRAWLER_PAGE_TIMEOUT_MS: 60000,
         CRAWLER_RETRY_ATTEMPTS: 2,
         CRAWLER_RETRY_DELAY_SECONDS: 8,
+        NEWS_CATEGORY_DESCRIPTIONS: {},
+        "UI_DEFAULTS.INDEX.TIME_RANGE": "today",
+        "UI_DEFAULTS.INDEX.SORT_BY": "heat",
+        "UI_DEFAULTS.TOPICS.TIME_RANGE": "all",
+        "UI_DEFAULTS.TOPICS.SORT_BY": "updated",
+        "UI_DEFAULTS.GRAPH.TIME_RANGE": "24h",
+        "UI_DEFAULTS.GRAPH.SORT_BY": "heat",
         "AI_ROUTE.SUMMARY": "main",
         "AI_ROUTE.SENTIMENT": "backup",
         "AI_ROUTE.KEYWORDS": "backup",
@@ -391,6 +411,13 @@ const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent |
         "AI_ROUTE.REPORT": "选择日报/周报等报告生成使用的模型节点。示例：backup。",
         "AI_ROUTE.CHAT": "选择管理端问答助手使用的模型节点。示例：main。",
         NEWS_CATEGORIES: "新闻分类列表，每行一个。示例：财经商业、科技科学、社会民生。",
+        NEWS_CATEGORY_DESCRIPTIONS: "新闻分类说明，每行一个，格式：分类名: 说明。分类名建议与新闻分类保持一致，用于 AI 更准确分类。",
+        "UI_DEFAULTS.INDEX.TIME_RANGE": "首页默认时间范围。today=今日，24h=24小时，all=全部。",
+        "UI_DEFAULTS.INDEX.SORT_BY": "首页默认排序。heat=热度优先，date=时间优先。",
+        "UI_DEFAULTS.TOPICS.TIME_RANGE": "专题默认时间范围。all=全部，today=今日。",
+        "UI_DEFAULTS.TOPICS.SORT_BY": "专题默认排序。updated=最近更新，heat=热度优先。",
+        "UI_DEFAULTS.GRAPH.TIME_RANGE": "图谱默认时间范围。支持 24h、7d、30d、year、all。",
+        "UI_DEFAULTS.GRAPH.SORT_BY": "图谱默认排序。heat=热度优先，date=时间优先。",
         IGNORED_DOMAINS: "忽略域名列表，每行一个。命中的链接不会抓取或入库。示例：twitter.com。",
         WEIBO_COOKIE: "微博登录后的完整 Cookie，用于抓取微博搜索/详情正文；系统不会主动生成 Cookie，成功抓取后会合并响应 Set-Cookie 做续期。",
     };
@@ -429,10 +456,36 @@ const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent |
         });
     }
 
+    function formatObjectMapValue(key, value) {
+        if (key === "NEWS_CATEGORY_DESCRIPTIONS") {
+            const descriptions = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+            const categories = Array.isArray(configData.NEWS_CATEGORIES) ? configData.NEWS_CATEGORIES : [];
+            const orderedKeys = [...categories, ...Object.keys(descriptions).filter((item) => !categories.includes(item))];
+            return orderedKeys.map((item) => `${item}: ${descriptions[item] || ""}`).join("\n");
+        }
+        if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+        return Object.entries(value).map(([itemKey, itemValue]) => `${itemKey}: ${itemValue ?? ""}`).join("\n");
+    }
+
+    function parseObjectMapValue(raw) {
+        const result = {};
+        String(raw || "").split("\n").forEach((line) => {
+            const text = line.trim();
+            if (!text) return;
+            const separatorIndex = text.search(/[:：]/);
+            if (separatorIndex <= 0) return;
+            const key = text.slice(0, separatorIndex).trim();
+            const value = text.slice(separatorIndex + 1).trim();
+            if (key && value) result[key] = value;
+        });
+        return result;
+    }
+
     function parseConfigInputValue(field, raw) {
         if (field.type === "number") return Number(raw || 0);
         if (field.type === "boolean") return String(raw) === "true";
         if (field.type === "list") return String(raw || "").split("\n").map((x) => x.trim()).filter(Boolean);
+        if (field.type === "objectMap") return parseObjectMapValue(raw);
         return raw;
     }
 
@@ -476,6 +529,10 @@ const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent |
         if (field.type === "list") {
             const text = Array.isArray(value) ? value.join("\n") : String(value || "");
             return `<label class="config-field${wide}">${escapeHtml(field.label)}<textarea id="${id}" class="admin-textarea config-textarea small" data-config-key="${field.key}" data-config-type="${field.type}">${escapeHtml(text)}</textarea><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
+        }
+        if (field.type === "objectMap") {
+            const text = formatObjectMapValue(field.key, value);
+            return `<label class="config-field${wide}">${escapeHtml(field.label)}<textarea id="${id}" class="admin-textarea config-textarea" data-config-key="${field.key}" data-config-type="${field.type}">${escapeHtml(text)}</textarea><span class="config-help">${escapeHtml(getConfigHelp(field))}</span></label>`;
         }
         const step = field.step ? ` step="${field.step}"` : "";
         const input = `<input id="${id}" class="admin-input" type="${field.type === "password" ? "password" : field.type}"${step} value="${escapeHtml(value)}" data-config-key="${field.key}" data-config-type="${field.type}">`;

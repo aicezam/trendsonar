@@ -9,6 +9,11 @@
     const SigmaCtor = window.Sigma && (window.Sigma.Sigma || window.Sigma.default || window.Sigma);
     const GraphCtor = window.graphology && (window.graphology.Graph || window.graphology.default || window.graphology);
     const Lib = window.graphologyLibrary || {};
+    const pageDataEl = document.getElementById("page-data");
+    const pageData = pageDataEl ? JSON.parse(pageDataEl.textContent || "{}") : {};
+    const graphDefaults = (pageData.uiDefaults && pageData.uiDefaults.GRAPH) || {};
+    const DEFAULT_GRAPH_TIME_RANGE = graphDefaults.TIME_RANGE || "24h";
+    const DEFAULT_GRAPH_SORT_BY = graphDefaults.SORT_BY || "heat";
 
     const state = {
         graph: null,
@@ -17,7 +22,8 @@
         fa2Timer: 0,
         pinRaf: 0,
         autoExpandTimer: 0,
-        range: "24h",
+        range: DEFAULT_GRAPH_TIME_RANGE,
+        sortBy: DEFAULT_GRAPH_SORT_BY,
         selectedTerm: "",
         loading: false,
         detailLoading: false,
@@ -154,6 +160,7 @@
     function currentFilters() {
         const params = new URLSearchParams();
         params.set("range", state.range);
+        params.set("sort_by", state.sortBy);
         if (els.category.value) params.set("category", els.category.value);
         if (els.region.value) params.set("region", els.region.value);
         if (els.source.value) params.set("source", els.source.value);
@@ -1117,6 +1124,9 @@
     }
 
     function bindUi() {
+        els.rangeTabs.querySelectorAll("button[data-range]").forEach(item => {
+            item.classList.toggle("active", item.dataset.range === state.range);
+        });
         els.rangeTabs.querySelectorAll("button[data-range]").forEach(btn => {
             btn.addEventListener("click", () => {
                 els.rangeTabs.querySelectorAll("button").forEach(item => item.classList.remove("active"));

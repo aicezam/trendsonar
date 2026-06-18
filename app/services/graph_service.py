@@ -512,6 +512,7 @@ class GraphService:
         source: Optional[str],
         sample_limit: int,
         date: str = "all",
+        sort_by: str = "heat",
         term: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
@@ -551,7 +552,11 @@ class GraphService:
         )
         if term:
             stmt = stmt.where(self._term_condition(term))
-        stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date)).limit(sample_limit)
+        if sort_by == "date":
+            stmt = stmt.order_by(desc(News.publish_date), desc(News.heat_score))
+        else:
+            stmt = stmt.order_by(desc(News.heat_score), desc(News.publish_date))
+        stmt = stmt.limit(sample_limit)
         return [dict(row) for row in (await db.execute(stmt)).mappings().all()]
 
     def _aggregate_rows(
@@ -779,6 +784,7 @@ class GraphService:
         category: Optional[str] = None,
         region: Optional[str] = None,
         source: Optional[str] = None,
+        sort_by: str = "heat",
         limit: int = 120,
         edge_limit: int = 420,
         min_edge_weight: int = 2,
@@ -810,6 +816,7 @@ class GraphService:
             category=category,
             region=region,
             source=source,
+            sort_by=sort_by,
             limit=limit,
             edge_limit=edge_limit,
             min_edge_weight=min_edge_weight,
@@ -895,6 +902,7 @@ class GraphService:
             category=category,
             region=region,
             source=source,
+            sort_by=sort_by,
             limit=limit,
             edge_limit=edge_limit,
             min_edge_weight=min_edge_weight,
@@ -1125,7 +1133,7 @@ class GraphService:
             select(News)
             .options(defer(News.content), defer(News.embedding))
             .where(self._term_condition(clean_term))
-            .order_by(desc(News.heat_score), desc(News.publish_date))
+            .order_by(*order_by)
             .offset(offset)
             .limit(page_size + 1),
             date=normalized_range,

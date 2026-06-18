@@ -10,6 +10,13 @@
             return false;
         };
 
+        const pageDataEl = document.getElementById('page-data');
+        const pageData = pageDataEl ? JSON.parse(pageDataEl.textContent || '{}') : {};
+        const indexDefaults = (pageData.uiDefaults && pageData.uiDefaults.INDEX) || {};
+        const DEFAULT_INDEX_TIME_RANGE = indexDefaults.TIME_RANGE || 'today';
+        const DEFAULT_INDEX_SORT_BY = indexDefaults.SORT_BY || 'heat';
+        const todayValue = new Date().toISOString().split('T')[0];
+
         // 页面状态集中管理，避免筛选、分页和弹窗状态互相污染。
         const state = {
             list: [],
@@ -24,11 +31,11 @@
                 source: '',
                 category: 'all',
                 region: '',
-                sortBy: localStorage.getItem('index_sortBy') || 'heat',
-                dateOption: 'today',
+                sortBy: DEFAULT_INDEX_SORT_BY,
+                dateOption: DEFAULT_INDEX_TIME_RANGE,
                 dateTouched: false,
-                startDate: new Date().toISOString().split('T')[0],
-                endDate: new Date().toISOString().split('T')[0]
+                startDate: DEFAULT_INDEX_TIME_RANGE === 'today' ? todayValue : '',
+                endDate: DEFAULT_INDEX_TIME_RANGE === 'today' ? todayValue : ''
             },
             chat: {
                 isOpen: false,
@@ -382,7 +389,8 @@
             };
             els.desktopResetBtn.onclick = () => {
                 state.filter.q = '';
-                state.filter.dateOption = 'today';
+                state.filter.dateOption = DEFAULT_INDEX_TIME_RANGE;
+                state.filter.sortBy = DEFAULT_INDEX_SORT_BY;
                 state.filter.startDate = '';
                 state.filter.endDate = '';
                 state.filter.source = '';
@@ -392,7 +400,7 @@
                 els.mobileTopSearchInput.value = '';
                 if (msSource) msSource.updateSelected('');
                 if (msRegion) msRegion.updateSelected('');
-                setTimeOption('today', { auto: true, skipFetch: true });
+                setTimeOption(DEFAULT_INDEX_TIME_RANGE, { auto: true, skipFetch: true });
                 fetchNews(true);
             };
 
@@ -423,7 +431,6 @@
 
             const setSort = (val) => {
                 state.filter.sortBy = val;
-                localStorage.setItem('index_sortBy', val);
                 updateUIState();
                 if (!isMobile()) fetchNews(true);
             };
