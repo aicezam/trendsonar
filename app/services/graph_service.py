@@ -865,6 +865,7 @@ class GraphService:
         category: Optional[str] = None,
         region: Optional[str] = None,
         source: Optional[str] = None,
+        sort_by: str = "heat",
         limit: int = 90,
         edge_limit: int = 360,
         min_edge_weight: int = 1,
@@ -922,6 +923,7 @@ class GraphService:
             source=source,
             sample_limit=min(GRAPH_MAX_AGGREGATE_NEWS, 12000),
             date=normalized_range,
+            sort_by=sort_by,
             term=clean_term,
         )
         payload = self._aggregate_rows(
@@ -1102,6 +1104,7 @@ class GraphService:
         category: Optional[str] = None,
         region: Optional[str] = None,
         source: Optional[str] = None,
+        sort_by: str = "heat",
         page: int = 1,
         page_size: int = 10,
     ) -> dict[str, Any]:
@@ -1129,6 +1132,10 @@ class GraphService:
         page = max(1, int(page or 1))
         page_size = max(1, min(int(page_size or 10), 50))
         offset = (page - 1) * page_size
+        if sort_by == "date":
+            order_by = [desc(News.publish_date), desc(News.heat_score)]
+        else:
+            order_by = [desc(News.heat_score), desc(News.publish_date)]
         stmt = build_news_query_filters(
             select(News)
             .options(defer(News.content), defer(News.embedding))
