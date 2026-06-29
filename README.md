@@ -8,7 +8,9 @@ TrendSonar 是一个面向新闻热点聚合、事件去重、专题追踪、舆
 
 ## 在线演示
 
-体验地址：[https://ainews.izam.cn](https://ainews.izam.cn)
+体验地址：
+全网综合新闻聚合：[https://ainews.izam.cn](https://ainews.izam.cn)
+医药垂直行业新闻：[https://mednews.izam.cn](https://mednews.izam.cn)
 
 ## 功能概览
 
