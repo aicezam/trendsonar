@@ -148,6 +148,23 @@ class AIService:
     def _has_embedding(self) -> bool:
         return bool((settings.SILICONFLOW_API_KEY or "").strip()) and bool((settings.SILICONFLOW_BASE_URL or "").strip()) and bool((settings.EMBEDDING_MODEL or "").strip())
 
+    def _ai_default_headers(self) -> Optional[Dict[str, str]]:
+        user_agent = str(settings.AI_USER_AGENT or "").strip()
+        if not user_agent:
+            return None
+        return {"User-Agent": user_agent}
+
+    def _build_chat_messages(self, prompt: str, system: str = "") -> List[Dict[str, str]]:
+        user_content = str(prompt or "").strip()
+        if not user_content:
+            raise ValueError("AI 请求内容为空")
+        messages: List[Dict[str, str]] = []
+        system_content = str(system or "").strip()
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
     def _iter_llm_routes(self, prefer_backup: bool) -> List[Dict[str, str]]:
         routes: List[Dict[str, str]] = []
         if prefer_backup:
@@ -231,13 +248,12 @@ class AIService:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"🔵 [LLM 请求] 模型: {model}\n系统提示词: {system}\n用户提示词: {prompt[:2000]}...")
 
+            messages = self._build_chat_messages(prompt, system)
+
             async def do_call():
                 return await client.chat.completions.create(
                     model=model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
+                    messages=messages,
                     temperature=0.6,
                     timeout=120,
                     extra_body=extra_body if extra_body else None,
@@ -318,6 +334,10 @@ class AIService:
         return "AI 服务暂时不可用（请先在管理页完善 AI 配置）"
 
     async def stream_completion(self, prompt: str, system_prompt: str = "", route_key: Optional[str] = None) -> AsyncIterator[str]:
+        if not str(prompt or "").strip():
+            yield "AI 请求内容为空"
+            return
+
         prefer_backup = False
         if route_key:
             prefer_backup = self._get_prefer_backup(route_key)
@@ -331,17 +351,14 @@ class AIService:
 
         for idx, route in enumerate(routes):
             try:
-                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"], default_headers=self._ai_default_headers()) as client:
                     extra_body = {}
                     if "modelscope" in str(client.base_url):
                         extra_body["enable_thinking"] = False
 
                     stream = await client.chat.completions.create(
                         model=route["model"],
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt},
-                        ],
+                        messages=self._build_chat_messages(prompt, system_prompt),
                         stream=True,
                         temperature=0.6,
                         timeout=120,
@@ -958,7 +975,7 @@ class AIService:
             for i, route in enumerate(routes):
                 failure_state: Dict[str, str] = {}
                 # 使用 async with 确保 client 资源释放
-                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"]) as client:
+                async with AsyncOpenAI(api_key=route["api_key"], base_url=route["base_url"], default_headers=self._ai_default_headers()) as client:
                     res = await self._call_llm(
                         client,
                         route["model"],
@@ -1355,7 +1372,7 @@ class AIService:
 
         try:
             # 使用 async with 确保资源释放
-            async with AsyncOpenAI(api_key=api_key, base_url=base_url) as client:
+            async with AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=self._ai_default_headers()) as client:
                 extra_body = {}
                 if "modelscope" in str(client.base_url):
                     extra_body["enable_thinking"] = False
@@ -1363,10 +1380,7 @@ class AIService:
                 logger.info(f"开始流式对话请求: model={model}, stream=True")
                 stream = await client.chat.completions.create(
                     model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    messages=self._build_chat_messages(user_prompt, system_prompt),
                     stream=True,
                     temperature=0.7,
                     timeout=60,
@@ -1414,6 +1428,9 @@ class AIService:
             "Authorization": f"Bearer {settings.SILICONFLOW_API_KEY}",
             "Content-Type": "application/json",
         }
+        ai_headers = self._ai_default_headers()
+        if ai_headers:
+            headers.update(ai_headers)
 
         all_embeddings: List[List[float]] = [[] for _ in cleaned_texts]
         indexed_texts = [(idx, text) for idx, text in enumerate(cleaned_texts) if text]

@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     BACKUP_AI_BASE_URL: Optional[str] = None
     BACKUP_AI_MODEL: Optional[str] = None
     BACKUP_AI_CONCURRENCY: int = 10
+    AI_USER_AGENT: str = "TrendSonar/0.2.8"
 
     CRAWLER_CONCURRENCY: int = 2
     CRAWLER_CONTENT_MIN_LENGTH: int = 30

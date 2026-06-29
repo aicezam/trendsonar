@@ -169,6 +169,7 @@ const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent |
                 { key: "BACKUP_AI_API_KEY", label: "备用模型 API Key", type: "password", wide: true },
                 { key: "BACKUP_AI_MODEL", label: "备用模型名称", type: "text", testKind: "backup" },
                 { key: "BACKUP_AI_CONCURRENCY", label: "备用模型并发", type: "number" },
+                { key: "AI_USER_AGENT", label: "AI 请求 User-Agent", type: "text", wide: true },
             ]
         },
         {
@@ -313,6 +314,7 @@ const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent |
         CRAWLER_PAGE_TIMEOUT_MS: 60000,
         CRAWLER_RETRY_ATTEMPTS: 2,
         CRAWLER_RETRY_DELAY_SECONDS: 8,
+        AI_USER_AGENT: "TrendSonar/0.2.8",
         NEWS_CATEGORY_DESCRIPTIONS: {},
         "UI_DEFAULTS.INDEX.TIME_RANGE": "today",
         "UI_DEFAULTS.INDEX.SORT_BY": "heat",
@@ -350,6 +352,7 @@ const adminPageData = adminPageDataEl ? JSON.parse(adminPageDataEl.textContent |
         BACKUP_AI_API_KEY: "备用大模型 API Key。可与主力模型相同，也可使用另一个服务商。",
         BACKUP_AI_MODEL: "备用模型名称。适合放成本低或稳定性高的模型。示例：deepseek-chat。",
         BACKUP_AI_CONCURRENCY: "备用模型最大并发请求数。建议根据备用服务商限流设置，通常 3-10。",
+        AI_USER_AGENT: "调用主模型、备用模型和 Embedding 服务时使用的 User-Agent。留空则使用客户端默认值，示例：TrendSonar/0.2.8。",
         SCHEDULE_INTERVAL_MINUTES: "自动抓取和分析任务间隔，单位分钟。示例：120 表示每 2 小时执行一次。",
         AUTO_SUMMARY_TOP_N: "每轮自动为热度最高的多少条新闻生成摘要。示例：30。",
         AUTO_ANALYSIS_TOP_N: "每轮自动深度分析的新闻数量上限。示例：500，数据量大时可调低。",

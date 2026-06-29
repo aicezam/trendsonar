@@ -64,6 +64,9 @@ BACKUP_AI_BASE_URL: https://api.siliconflow.cn/v1
 BACKUP_AI_MODEL: deepseek-ai/DeepSeek-V3.2
 BACKUP_AI_CONCURRENCY: 10  # 最大并发请求数，根据模型能力调整
 
+# AI 请求 User-Agent。留空则使用客户端默认值，可按服务商要求自定义
+AI_USER_AGENT: TrendSonar/0.2.8
+
 #BACKUP_AI_API_KEY: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 #BACKUP_AI_BASE_URL: https://api-inference.modelscope.cn/v1
 #BACKUP_AI_MODEL: Qwen/Qwen3-14B

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 from uuid import uuid4
 
+from openai import AsyncOpenAI
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -215,7 +216,10 @@ class AgentService:
         if not (api_key and base_url and model_name):
             raise RuntimeError("AI 服务暂时不可用，请先在管理页完善 AI 配置")
 
-        provider = OpenAIProvider(api_key=str(api_key), base_url=str(base_url))
+        user_agent = str(settings.AI_USER_AGENT or "").strip()
+        default_headers = {"User-Agent": user_agent} if user_agent else None
+        client = AsyncOpenAI(api_key=str(api_key), base_url=str(base_url), default_headers=default_headers)
+        provider = OpenAIProvider(openai_client=client)
         return OpenAIChatModel(str(model_name), provider=provider)
 
     def _build_agent(self, use_backup: bool = False) -> Agent[AgentDeps, str]:
